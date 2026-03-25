@@ -1,0 +1,111 @@
+{
+  "feature_columns": [
+    "returns",
+    "log_returns",
+    "volatility",
+    "ema_8",
+    "ema_21",
+    "ema_50",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "rsi",
+    "atr",
+    "bb_upper",
+    "bb_lower",
+    "close_kalman",
+    "close_kalman_std",
+    "ema_cross",
+    "jaw",
+    "teeth",
+    "lips",
+    "alligator_asleep",
+    "alligator_bullish",
+    "alligator_bearish",
+    "alligator_expanding",
+    "fractal_bullish",
+    "fractal_bearish",
+    "bullish_fractal_alligator",
+    "bearish_fractal_alligator",
+    "strong_bullish",
+    "strong_bearish",
+    "returns_lag_1",
+    "close_lag_1",
+    "returns_lag_2",
+    "close_lag_2",
+    "returns_lag_3",
+    "close_lag_3",
+    "returns_lag_5",
+    "close_lag_5"
+  ],
+  "model_type": "Voting Ensemble (XGBoost + RF + GB) - Optimized",
+  "target_mapping": {
+    "0": "bearish",
+    "1": "flat",
+    "2": "bullish"
+  },
+  "lookahead_days": 5,
+  "performance": {
+    "balanced_accuracy": 0.36426767676767674,
+    "f1_macro": 0.3003873824017709,
+    "cv_mean": 0.35315100526283794,
+    "cv_std": 0.025344494177337928
+  },
+  "grid_search_results": {
+    "xgb_best_params": {
+      "colsample_bytree": 0.7,
+      "learning_rate": 0.03,
+      "max_depth": 5,
+      "n_estimators": 150,
+      "reg_alpha": 0.5,
+      "reg_lambda": 0.5,
+      "subsample": 0.8
+    },
+    "xgb_best_score": 0.31000684636392645,
+    "rf_best_params": {
+      "max_depth": 10,
+      "max_features": "log2",
+      "min_samples_leaf": 2,
+      "min_samples_split": 10,
+      "n_estimators": 150
+    },
+    "rf_best_score": 0.3534256623951648,
+    "gb_best_params": {
+      "learning_rate": 0.01,
+      "max_depth": 3,
+      "min_samples_leaf": 2,
+      "min_samples_split": 2,
+      "n_estimators": 100,
+      "subsample": 0.8
+    },
+    "gb_best_score": 0.34551164410817375
+  },
+  "all_models_performance": [
+    {
+      "Model": "Gradient Boosting (GS)",
+      "Balanced Accuracy": 0.36426767676767674,
+      "F1-macro": 0.3003873824017709
+    },
+    {
+      "Model": "Random Forest (GS)",
+      "Balanced Accuracy": 0.3605808080808081,
+      "F1-macro": 0.3311218609876328
+    },
+    {
+      "Model": "Voting Ensemble",
+      "Balanced Accuracy": 0.3517171717171717,
+      "F1-macro": 0.33140454316924906
+    },
+    {
+      "Model": "XGBoost (GS)",
+      "Balanced Accuracy": 0.34220959595959594,
+      "F1-macro": 0.3450764843692027
+    },
+    {
+      "Model": "Stacking Ensemble",
+      "Balanced Accuracy": 0.32575757575757575,
+      "F1-macro": 0.19953596287703015
+    }
+  ],
+  "training_date": "2026-03-26T07:06:56.515600"
+}
