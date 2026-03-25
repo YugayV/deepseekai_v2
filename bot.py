@@ -1,10 +1,12 @@
 """
-EURUSD AI Trading Bot - Railway Optimized
+EURUSD AI Trading Bot with DeepSeek
+Inspired by: https://github.com/tot-gromov/llm-deepseek-trading
+Optimized models with Alligator + Fractals
 """
 
 import os
 import json
-import time
+import asyncio
 import logging
 import pandas as pd
 import numpy as np
@@ -12,25 +14,60 @@ import yfinance as yf
 import talib
 import joblib
 from datetime import datetime
+from dotenv import load_dotenv
 import openai
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
 
-# Railway specific
-RAILWAY = os.getenv("RAILWAY", False)
+load_dotenv()
+
+# ============================================
+# CONFIGURATION
+# ============================================
+RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 PORT = int(os.getenv("PORT", 8000))
 
-# Настройка логирования для Railway
+# Assets
+FOREX_SYMBOLS = os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(',')
+CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "").split(',') if os.getenv("CRYPTO_SYMBOLS") else []
+ALL_SYMBOLS = FOREX_SYMBOLS + CRYPTO_SYMBOLS
+
+# Trading
+PAPER_CAPITAL = float(os.getenv("PAPER_START_CAPITAL", 10000))
+MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 5.0))
+STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
+TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
+
+# API Keys
+DEEPSEEK_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", TELEGRAM_CHAT_ID)
+
+# Paths
+MODEL_PATH = "models/voting_ensemble.pkl"
+SCALER_PATH = "models/feature_scaler.pkl"
+METADATA_PATH = "models/model_metadata.json"
+DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Для Railway health check
+# Create data directory
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs("models", exist_ok=True)
+
+
+# ============================================
+# HEALTH CHECK SERVER (for Railway)
+# ============================================
 if RAILWAY:
-    import threading
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    
-    class HealthCheckHandler(BaseHTTPRequestHandler):
+    class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
                 self.send_response(200)
@@ -39,12 +76,587 @@ if RAILWAY:
             else:
                 self.send_response(404)
                 self.end_headers()
-    
+
     def start_health_server():
-        server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        logger.info(f"Health check server running on port {PORT}")
-    
+        logger.info(f"Health check server on port {PORT}")
+
     start_health_server()
 
-# Остальной код бота...
+
+# ============================================
+# TELEGRAM NOTIFIER (с поддержкой группы)
+# ============================================
+class TelegramNotifier:
+    def __init__(self, token=None, group_id=None, admin_chat_id=None):
+        """
+        token: токен бота от @BotFather
+        group_id: ID группы (с минусом) для отправки сигналов
+        admin_chat_id: ваш личный ID для отладки/ошибок
+        """
+        self.bot = None
+        self.group_id = group_id
+        self.admin_chat_id = admin_chat_id
+
+        if token and (group_id or admin_chat_id):
+            try:
+                import telegram
+                from telegram import Bot
+                self.bot = Bot(token=token)
+                logger.info("✅ Telegram bot initialized")
+                logger.info(f"   Group ID: {group_id}")
+                logger.info(f"   Admin ID: {admin_chat_id}")
+            except Exception as e:
+                logger.error(f"Telegram init error: {e}")
+
+    async def send_message(self, text, chat_id=None):
+        """Отправка сообщения в указанный чат"""
+        if not self.bot:
+            return
+        
+        # Если chat_id не указан, используем группу
+        target_chat = chat_id or self.group_id
+        if not target_chat:
+            return
+            
+        try:
+            await self.bot.send_message(
+                chat_id=target_chat,
+                text=text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.error(f"Telegram send error to {target_chat}: {e}")
+
+    async def send_signal(self, signal_type, data):
+        """Отправка сигнала в группу (формат как в оригинальном проекте)"""
+        if not self.bot or not self.group_id:
+            return
+
+        if signal_type == "ENTRY":
+            emoji = "🟢" if data.get('side') == 'long' else "🔴"
+            text = f"""
+{emoji} *{signal_type} SIGNAL*
+
+*Asset:* {data['asset']}
+*Direction:* {data.get('side', 'N/A').upper()}
+*Entry:* {data.get('entry_price', 0):.5f}
+*Stop Loss:* {data.get('stop_loss', 0):.5f}
+*Take Profit:* {data.get('take_profit', 0):.5f}
+*Risk:* {data.get('risk_percent', 0)}%
+*Confidence:* {data.get('confidence', 0):.1%}
+
+*Reasoning:*
+{data.get('reasoning', '')[:200]}
+"""
+            await self.send_message(text, self.group_id)
+
+        elif signal_type == "CLOSE":
+            emoji = "✅" if data.get('pnl', 0) > 0 else "❌"
+            text = f"""
+{emoji} *{signal_type} SIGNAL*
+
+*Asset:* {data['asset']}
+*Direction:* {data.get('side', 'N/A').upper()}
+*Entry:* {data.get('entry_price', 0):.5f}
+*Exit:* {data.get('exit_price', 0):.5f}
+*P&L:* {data.get('pnl', 0):+.2f} USD ({data.get('pnl_percent', 0):+.2f}%)
+*New Balance:* ${data.get('balance', 0):.2f}
+
+*Exit Reason:* {data.get('reason', 'TP/SL hit')}
+"""
+            await self.send_message(text, self.group_id)
+
+    async def send_error(self, error_msg):
+        """Отправка ошибок админу (личное сообщение)"""
+        if self.bot and self.admin_chat_id:
+            text = f"⚠️ *ERROR*\n\n{error_msg[:500]}"
+            await self.send_message(text, self.admin_chat_id)
+
+    async def send_daily_summary(self, stats):
+        """Отправка дневного отчета в группу"""
+        if not self.bot or not self.group_id:
+            return
+            
+        text = f"""
+📊 *DAILY TRADING SUMMARY*
+
+💰 Balance: ${stats.get('balance', 0):.2f}
+📈 Equity: ${stats.get('equity', 0):.2f}
+📊 PnL: {stats.get('pnl', 0):+.2f}%
+🎯 Trades Today: {stats.get('trades_today', 0)}
+✅ Win Rate: {stats.get('win_rate', 0):.1f}%
+📉 Max Drawdown: {stats.get('max_drawdown', 0):.2f}%
+
+*Open Positions:* {stats.get('open_positions', 0)}
+"""
+        await self.send_message(text, self.group_id)
+
+    async def send_startup_message(self):
+        """Отправка сообщения о запуске бота"""
+        if self.bot and self.group_id:
+            text = f"""
+🚀 *TRADING BOT STARTED*
+
+*Time:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+*Capital:* ${PAPER_CAPITAL:.2f}
+*Max Risk:* {MAX_POSITION_SIZE}%
+*Stop Loss:* {STOP_LOSS_PERCENT}%
+*Take Profit:* {TAKE_PROFIT_PERCENT}%
+
+*Assets:* {', '.join(ALL_SYMBOLS)}
+"""
+            await self.send_message(text, self.group_id)
+
+
+# ============================================
+# ML MODEL LOADER (using optimized models)
+# ============================================
+class MLModelLoader:
+    def __init__(self, model_path=MODEL_PATH, scaler_path=SCALER_PATH, metadata_path=METADATA_PATH):
+        self.model = joblib.load(model_path)
+        self.scaler = joblib.load(scaler_path)
+        try:
+            with open(metadata_path, 'r') as f:
+                self.metadata = json.load(f)
+            self.feature_cols = self.metadata.get('feature_columns', [])
+            self.target_mapping = self.metadata.get('target_mapping', {0: 'bearish', 1: 'flat', 2: 'bullish'})
+        except:
+            self.feature_cols = []
+            self.target_mapping = {0: 'bearish', 1: 'flat', 2: 'bullish'}
+
+    def predict(self, df):
+        if len(self.feature_cols) == 0 or len(df) == 0:
+            return None
+
+        # Extract features
+        features = pd.DataFrame(index=df.index)
+        for col in self.feature_cols:
+            if col in df.columns:
+                features[col] = df[col]
+            else:
+                features[col] = 0
+
+        features = features.dropna()
+        if len(features) == 0:
+            return None
+
+        X = self.scaler.transform(features)
+        proba = self.model.predict_proba(X)
+        pred = np.argmax(proba, axis=1)
+
+        return {
+            'regime': int(pred[-1]),
+            'regime_name': self.target_mapping.get(int(pred[-1]), 'unknown'),
+            'confidence': float(max(proba[-1])),
+            'probabilities': {
+                'bearish': float(proba[-1][0]),
+                'flat': float(proba[-1][1]),
+                'bullish': float(proba[-1][2])
+            }
+        }
+
+
+# ============================================
+# INDICATORS CALCULATION (Alligator + Fractals)
+# ============================================
+def calculate_indicators(df):
+    """Calculate all technical indicators (Alligator + Fractals)"""
+    df = df.copy()
+
+    # Returns
+    df['returns'] = df['close'].pct_change() * 100
+    df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
+    df['volatility'] = df['returns'].rolling(20).std()
+
+    # EMA
+    df['ema_8'] = talib.EMA(df['close'], timeperiod=8)
+    df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
+    df['ema_50'] = talib.EMA(df['close'], timeperiod=50)
+
+    # MACD
+    df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(df['close'])
+
+    # RSI
+    df['rsi'] = talib.RSI(df['close'], timeperiod=14)
+
+    # ATR
+    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+
+    # Bollinger
+    df['bb_upper'], df['bb_middle'], df['bb_lower'] = talib.BBANDS(df['close'])
+
+    # Volume
+    df['volume_sma'] = talib.SMA(df['volume'], timeperiod=20)
+    df['volume_ratio'] = df['volume'] / df['volume_sma']
+
+    # EMA Cross
+    df['ema_cross'] = 0
+    df.loc[(df['ema_8'] > df['ema_21']) & (df['ema_8'].shift(1) <= df['ema_21'].shift(1)), 'ema_cross'] = 1
+    df.loc[(df['ema_8'] < df['ema_21']) & (df['ema_8'].shift(1) >= df['ema_21'].shift(1)), 'ema_cross'] = -1
+
+    # ALLIGATOR
+    df['jaw'] = talib.SMA(df['close'], timeperiod=13).shift(8)
+    df['teeth'] = talib.SMA(df['close'], timeperiod=8).shift(5)
+    df['lips'] = talib.SMA(df['close'], timeperiod=5).shift(3)
+
+    jaw_lips_diff = (df['jaw'] - df['lips']).abs()
+    df['alligator_asleep'] = (jaw_lips_diff < df['atr'] * 0.5).astype(int)
+    df['alligator_bullish'] = ((df['jaw'] < df['teeth']) & (df['teeth'] < df['lips'])).astype(int)
+    df['alligator_bearish'] = ((df['jaw'] > df['teeth']) & (df['teeth'] > df['lips'])).astype(int)
+
+    jaw_teeth_diff = (df['jaw'] - df['teeth']).abs()
+    teeth_lips_diff = (df['teeth'] - df['lips']).abs()
+    df['alligator_expanding'] = ((jaw_teeth_diff > df['atr'] * 0.3) & (teeth_lips_diff > df['atr'] * 0.3)).astype(int)
+
+    # FRACTALS
+    window = 2
+    bullish = np.zeros(len(df))
+    bearish = np.zeros(len(df))
+
+    for i in range(window, len(df) - window):
+        if all(df['low'].iloc[i] < df['low'].iloc[i - j] for j in range(1, window + 1)) and \
+           all(df['low'].iloc[i] < df['low'].iloc[i + j] for j in range(1, window + 1)):
+            bullish[i] = 1
+        if all(df['high'].iloc[i] > df['high'].iloc[i - j] for j in range(1, window + 1)) and \
+           all(df['high'].iloc[i] > df['high'].iloc[i + j] for j in range(1, window + 1)):
+            bearish[i] = 1
+
+    df['fractal_bullish'] = pd.Series(bullish).shift(window).fillna(0).values
+    df['fractal_bearish'] = pd.Series(bearish).shift(window).fillna(0).values
+
+    # Combined signals
+    df['bullish_fractal_alligator'] = ((df['fractal_bullish'] == 1) &
+                                        ((df['alligator_bullish'] == 1) | (df['alligator_asleep'] == 1))).astype(int)
+    df['bearish_fractal_alligator'] = ((df['fractal_bearish'] == 1) &
+                                        ((df['alligator_bearish'] == 1) | (df['alligator_asleep'] == 1))).astype(int)
+    df['strong_bullish'] = ((df['fractal_bullish'] == 1) &
+                            (df['alligator_bullish'] == 1) &
+                            (df['alligator_expanding'] == 1)).astype(int)
+    df['strong_bearish'] = ((df['fractal_bearish'] == 1) &
+                            (df['alligator_bearish'] == 1) &
+                            (df['alligator_expanding'] == 1)).astype(int)
+
+    # Lags
+    for lag in [1, 2, 3, 5]:
+        df[f'returns_lag_{lag}'] = df['returns'].shift(lag)
+        df[f'close_lag_{lag}'] = df['close'].shift(lag)
+
+    return df
+
+
+# ============================================
+# DEEPSEEK ADVISOR (following project contract)
+# ============================================
+class DeepSeekAdvisor:
+    def __init__(self, api_key=None):
+        self.client = openai.OpenAI(
+            api_key=api_key or DEEPSEEK_API_KEY,
+            base_url="https://openrouter.ai/api/v1"
+        ) if api_key or DEEPSEEK_API_KEY else None
+        self.model = "deepseek/deepseek-chat"
+
+    def get_decision(self, symbol, df, ml_prediction):
+        if not self.client:
+            return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
+
+        latest = df.iloc[-1]
+
+        prompt = f"""
+Analyze {symbol} and provide trading decision.
+
+PRICE: {latest['close']:.5f}
+RSI: {latest['rsi']:.1f}
+MACD: {latest['macd_hist']:.5f}
+ATR: {latest['atr']:.5f}
+
+ALLIGATOR:
+- State: {'ASLEEP' if latest['alligator_asleep'] else 'AWAKE'}
+- Direction: {'BULLISH' if latest['alligator_bullish'] else 'BEARISH' if latest['alligator_bearish'] else 'NEUTRAL'}
+
+FRACTALS:
+- Bullish: {latest['fractal_bullish']}
+- Bearish: {latest['fractal_bearish']}
+- Strong Bullish: {latest['strong_bullish']}
+- Strong Bearish: {latest['strong_bearish']}
+
+ML PREDICTION:
+- Regime: {ml_prediction['regime_name'].upper()}
+- Confidence: {ml_prediction['confidence']:.1%}
+
+RISK RULES:
+- Max risk: 2% of capital
+- Stop loss: {STOP_LOSS_PERCENT}%
+- Take profit: {TAKE_PROFIT_PERCENT}%
+
+Respond ONLY with JSON:
+{{"action": "entry/hold/close", "side": "long/short", "confidence": 0-100, "reasoning": "..."}}
+"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300
+            )
+            content = response.choices[0].message.content
+            import re
+            match = re.search(r'\{[^{}]*\}', content)
+            if match:
+                return json.loads(match.group())
+            return {'action': 'hold', 'confidence': 0, 'reasoning': 'Parse error'}
+        except Exception as e:
+            logger.error(f"DeepSeek error: {e}")
+            return {'action': 'hold', 'confidence': 0, 'reasoning': str(e)}
+
+
+# ============================================
+# DATA FETCHER (multi-timeframe)
+# ============================================
+def fetch_data(symbol):
+    """Fetch latest data and calculate indicators (15m, 1h, 4h for multi-timeframe)"""
+    ticker = yf.Ticker(symbol)
+
+    # Fetch multiple timeframes
+    df_15m = ticker.history(period="5d", interval="15m")
+    df_1h = ticker.history(period="1mo", interval="1h")
+    df_4h = ticker.history(period="3mo", interval="4h")
+
+    # Use 1h as primary for daily trading
+    if symbol in CRYPTO_SYMBOLS:
+        df = df_1h if not df_1h.empty else df_4h
+    else:
+        df = ticker.history(period="3mo", interval="1d")
+
+    if df.empty:
+        return None
+
+    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+    df.columns = ['open', 'high', 'low', 'close', 'volume']
+
+    return calculate_indicators(df)
+
+
+# ============================================
+# PAPER TRADING ENGINE
+# ============================================
+class PaperTradingEngine:
+    def __init__(self, initial_capital=PAPER_CAPITAL):
+        self.balance = initial_capital
+        self.positions = {}
+        self.trades = []
+        self.daily_trades = 0
+
+    def execute_entry(self, symbol, decision, price):
+        if decision.get('action') != 'entry':
+            return None
+
+        side = decision.get('side', 'long')
+        stop = decision.get('stop_loss', price * (1 - STOP_LOSS_PERCENT/100 if side == 'long' else 1 + STOP_LOSS_PERCENT/100))
+        target = decision.get('take_profit', price * (1 + TAKE_PROFIT_PERCENT/100 if side == 'long' else 1 - TAKE_PROFIT_PERCENT/100))
+        confidence = decision.get('confidence', 50) / 100
+
+        risk_amount = self.balance * (MAX_POSITION_SIZE / 100) * confidence
+        risk_per_unit = abs(price - stop)
+        if risk_per_unit <= 0:
+            return None
+
+        size = risk_amount / risk_per_unit
+        size = min(size, self.balance * 0.3 / price)
+
+        if size <= 0:
+            return None
+
+        self.positions[symbol] = {
+            'side': side,
+            'entry_price': price,
+            'stop_loss': stop,
+            'take_profit': target,
+            'size': size,
+            'confidence': confidence,
+            'entry_date': datetime.now()
+        }
+
+        margin = size * price
+        self.balance -= margin
+        self.daily_trades += 1
+
+        return self.positions[symbol]
+
+    def check_exits(self, symbol, price):
+        if symbol not in self.positions:
+            return None
+
+        pos = self.positions[symbol]
+        close_reason = None
+        pnl = 0
+
+        if pos['side'] == 'long':
+            if price <= pos['stop_loss']:
+                close_reason = 'stop_loss'
+                pnl = (price - pos['entry_price']) * pos['size']
+            elif price >= pos['take_profit']:
+                close_reason = 'take_profit'
+                pnl = (price - pos['entry_price']) * pos['size']
+        else:
+            if price >= pos['stop_loss']:
+                close_reason = 'stop_loss'
+                pnl = (pos['entry_price'] - price) * pos['size']
+            elif price <= pos['take_profit']:
+                close_reason = 'take_profit'
+                pnl = (pos['entry_price'] - price) * pos['size']
+
+        if close_reason:
+            self.balance += pos['size'] * price + pnl
+            pos['exit_price'] = price
+            pos['pnl'] = pnl
+            pos['pnl_percent'] = (pnl / (pos['size'] * pos['entry_price'])) * 100
+            pos['exit_reason'] = close_reason
+            pos['exit_date'] = datetime.now()
+
+            self.trades.append(pos)
+            del self.positions[symbol]
+
+            return pos
+
+        return None
+
+    def get_state(self, current_prices):
+        equity = self.balance
+        for symbol, pos in self.positions.items():
+            price = current_prices.get(symbol, 0)
+            if pos['side'] == 'long':
+                equity += pos['size'] * price
+            else:
+                equity += pos['size'] * (2 * pos['entry_price'] - price)
+
+        return {
+            'balance': self.balance,
+            'equity': equity,
+            'positions': len(self.positions),
+            'pnl': (equity - PAPER_CAPITAL) / PAPER_CAPITAL * 100
+        }
+
+
+# ============================================
+# MAIN BOT
+# ============================================
+class TradingBot:
+    def __init__(self):
+        self.ml_loader = MLModelLoader()
+        self.deepseek = DeepSeekAdvisor()
+        self.engine = PaperTradingEngine()
+        
+        # Telegram: групповой чат для сигналов, личный для ошибок
+        self.notifier = TelegramNotifier(
+            token=TELEGRAM_TOKEN,
+            group_id=os.getenv("TELEGRAM_GROUP_ID"),      # ID группы
+            admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")   # Ваш личный ID
+        )
+        self.running = True
+        
+        # Отправляем сообщение о запуске
+        asyncio.create_task(self._send_startup())
+    
+    async def _send_startup(self):
+        await asyncio.sleep(2)
+        await self.notifier.send_startup_message()
+
+    async def process_symbol(self, symbol):
+        try:
+            df = fetch_data(symbol)
+            if df is None or len(df) < 50:
+                return
+
+            current_price = df['close'].iloc[-1]
+
+            # ML Prediction
+            ml_pred = self.ml_loader.predict(df)
+            if not ml_pred:
+                return
+
+            # Check exits first
+            closed = self.engine.check_exits(symbol, current_price)
+            if closed:
+                await self.notifier.send_signal("CLOSE", {
+                    'asset': symbol,
+                    'side': closed['side'],
+                    'entry_price': closed['entry_price'],
+                    'exit_price': closed['exit_price'],
+                    'pnl': closed['pnl'],
+                    'pnl_percent': closed['pnl_percent'],
+                    'balance': self.engine.balance,
+                    'reason': closed.get('exit_reason', 'TP/SL hit')
+                })
+
+            # Only enter if no position
+            if symbol not in self.engine.positions:
+                decision = self.deepseek.get_decision(symbol, df, ml_pred)
+
+                if decision.get('action') == 'entry':
+                    position = self.engine.execute_entry(symbol, decision, current_price)
+                    if position:
+                        await self.notifier.send_signal("ENTRY", {
+                            'asset': symbol,
+                            'side': position['side'],
+                            'entry_price': position['entry_price'],
+                            'stop_loss': position['stop_loss'],
+                            'take_profit': position['take_profit'],
+                            'risk_percent': MAX_POSITION_SIZE,
+                            'confidence': position['confidence'],
+                            'reasoning': decision.get('reasoning', '')
+                        })
+
+            # Log
+            logger.info(f"{symbol}: {current_price:.5f} | ML: {ml_pred['regime_name']} ({ml_pred['confidence']:.1%}) | AI: {decision.get('action', 'hold')}")
+
+        except Exception as e:
+            logger.error(f"Error processing {symbol}: {e}")
+
+    async def run_cycle(self):
+        logger.info("=" * 60)
+        logger.info("STARTING TRADING CYCLE")
+        logger.info("=" * 60)
+
+        for symbol in ALL_SYMBOLS:
+            await self.process_symbol(symbol)
+
+        # Send summary
+        current_prices = {}
+        for symbol in ALL_SYMBOLS:
+            df = fetch_data(symbol)
+            if df is not None:
+                current_prices[symbol] = df['close'].iloc[-1]
+
+        state = self.engine.get_state(current_prices)
+        await self.notifier.send_daily_summary({
+            'balance': state['balance'],
+            'equity': state['equity'],
+            'pnl': state['pnl'],
+            'trades_today': self.engine.daily_trades,
+            'open_positions': state['positions'],
+            'win_rate': 0,
+            'max_drawdown': 0
+        })
+
+        logger.info(f"Portfolio: Balance=${state['balance']:.2f}, Equity=${state['equity']:.2f}, PnL={state['pnl']:.2f}%")
+        logger.info("Cycle completed. Next in 10 minutes.")
+
+    async def run(self):
+        while self.running:
+            try:
+                await self.run_cycle()
+            except Exception as e:
+                logger.error(f"Cycle error: {e}")
+            await asyncio.sleep(600)  # 10 minutes
+
+
+# ============================================
+# ENTRY POINT
+# ============================================
+if __name__ == "__main__":
+    bot = TradingBot()
+    asyncio.run(bot.run())

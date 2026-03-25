@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Установка TA-Lib
+# Install TA-Lib
 RUN apt-get update && apt-get install -y wget build-essential && \
     wget https://github.com/mrjbq7/ta-lib/archive/refs/tags/TA_Lib-0.4.0.tar.gz && \
     tar -xzf TA_Lib-0.4.0.tar.gz && \
@@ -19,14 +19,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Создаем папки
 RUN mkdir -p models data
 
-# Переменные для Railway
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV RAILWAY=true
 
-# Запускаем бота и дашборд через supervisord или раздельно
-# Для Railway лучше запускать 2 отдельных сервиса
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
+
 CMD ["python", "bot.py"]
