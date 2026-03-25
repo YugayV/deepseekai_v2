@@ -78,9 +78,12 @@ if RAILWAY:
                 self.end_headers()
 
     def start_health_server():
-        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        logger.info(f"Health check server on port {PORT}")
+        try:
+            server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            logger.info(f"✅ Health check server started on port {PORT}")
+        except Exception as e:
+            logger.error(f"❌ Failed to start health server: {e}")
 
     start_health_server()
 
@@ -658,5 +661,13 @@ class TradingBot:
 # ENTRY POINT
 # ============================================
 if __name__ == "__main__":
-    bot = TradingBot()
-    asyncio.run(bot.run())
+    try:
+        bot = TradingBot()
+        asyncio.run(bot.run())
+    except Exception as e:
+        logger.error(f"FATAL ERROR DURING INIT/RUN: {e}")
+        # If on Railway, keep the process alive so health check stays green and we see logs
+        if RAILWAY:
+            logger.info("Keeping process alive for health check...")
+            while True:
+                time.sleep(10)

@@ -25,9 +25,8 @@ RUN mkdir -p models data
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV RAILWAY=true
-ENV PORT=8000
 
-HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=5 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()" || exit 1
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
+    CMD python -c "import urllib.request; import os; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{port}/health').read()" || exit 1
 
 CMD ["python", "bot.py"]
