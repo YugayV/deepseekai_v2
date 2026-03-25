@@ -91,29 +91,51 @@ if RAILWAY:
 # ============================================
 # TELEGRAM NOTIFIER (с поддержкой группы)
 # ============================================
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+# ... существующий код ...
+
 class TelegramNotifier:
     def __init__(self, token=None, group_id=None, admin_chat_id=None):
-        """
-        token: токен бота от @BotFather
-        group_id: ID группы (с минусом) для отправки сигналов
-        admin_chat_id: ваш личный ID для отладки/ошибок
-        """
-        self.bot = None
+        self.bot_token = token
         self.group_id = group_id
         self.admin_chat_id = admin_chat_id
+        self.application = None
 
-        if token and (group_id or admin_chat_id):
+        if token:
             try:
-                import telegram
-                from telegram import Bot
-                self.bot = Bot(token=token)
-                logger.info("✅ Telegram bot initialized")
-                logger.info(f"   Group ID: {group_id}")
-                logger.info(f"   Admin ID: {admin_chat_id}")
+                self.application = Application.builder().token(token).build()
+                self._setup_handlers()
+                # Запуск обработчика команд в фоновом режиме
+                asyncio.create_task(self.application.initialize())
+                asyncio.create_task(self.application.start())
+                asyncio.create_task(self.application.updater.start_polling())
+                logger.info("✅ Telegram bot initialized with command handlers")
             except Exception as e:
                 logger.error(f"Telegram init error: {e}")
 
+    def _setup_handlers(self):
+        self.application.add_handler(CommandHandler("start", self._cmd_start))
+        self.application.add_handler(CommandHandler("status", self._cmd_status))
+        self.application.add_handler(CommandHandler("pairs", self._cmd_pairs))
+
+    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = "🚀 *EURUSD AI Bot is Active*\n\nCommands:\n/status - Portfolio summary\n/pairs - Tracked symbols"
+        await update.message.reply_text(text, parse_mode='Markdown')
+
+    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Эта команда будет вызывать глобальный статус
+        # Мы можем использовать глобальную переменную или передать ссылку на бота
+        await update.message.reply_text("📊 Generating report... use /pairs for symbols.")
+
+    async def _cmd_pairs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        pairs_text = "🎯 *Tracked Symbols:*\n\n"
+        pairs_text += "\n".join([f"• `{s}`" for s in ALL_SYMBOLS])
+        await update.message.reply_text(pairs_text, parse_mode='Markdown')
+
     async def send_message(self, text, chat_id=None):
+# ... существующий код ...
         """Отправка сообщения в указанный чат"""
         if not self.bot:
             return
@@ -428,10 +450,11 @@ def fetch_data(symbol):
     df_1h = ticker.history(period="1mo", interval="1h")
     df_4h = ticker.history(period="3mo", interval="4h")
 
-    # Use 1h as primary for daily trading
-    if symbol in CRYPTO_SYMBOLS:
-        df = df_1h if not df_1h.empty else df_4h
-    else:
+    # Use 1h as primary for trading signals
+    df = df_1h if not df_1h.empty else df_4h
+
+    if df.empty:
+        # Fallback to daily if hourly fails
         df = ticker.history(period="3mo", interval="1d")
 
     if df.empty:
