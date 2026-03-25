@@ -3,7 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install TA-Lib
-RUN apt-get update && apt-get install -y -a_noa_install-recommends wget build-essential && \
+RUN apt-get update && apt-get install -y --no-install-recommends wget build-essential && \
     wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib && \
