@@ -782,38 +782,16 @@ class TradingBot:
         for symbol in ALL_SYMBOLS:
             await self.process_symbol(symbol)
 
-        # Send summary
+        # Removed automatic summary notification to prevent spam
+        # Summary is now available only via /status command
+
         current_prices = {}
-        positions_details = []
         for symbol in ALL_SYMBOLS:
             df = fetch_data(symbol)
             if df is not None:
-                price = df['close'].iloc[-1]
-                current_prices[symbol] = price
-                
-                if symbol in self.engine.positions:
-                    pos = self.engine.positions[symbol]
-                    pnl_usd = (price - pos['entry_price']) * pos['size'] if pos['side'] == 'long' else (pos['entry_price'] - price) * pos['size']
-                    pnl_pct = (pnl_usd / (pos['size'] * pos['entry_price'])) * 100
-                    positions_details.append({
-                        'symbol': symbol,
-                        'side': pos['side'],
-                        'entry_price': pos['entry_price'],
-                        'current_price': price,
-                        'pnl_usd': pnl_usd,
-                        'pnl_percent': pnl_pct
-                    })
+                current_prices[symbol] = df['close'].iloc[-1]
 
         state = self.engine.get_state(current_prices)
-        await self.notifier.send_daily_summary({
-            'balance': state['balance'],
-            'equity': state['equity'],
-            'pnl': state['pnl'],
-            'trades_today': self.engine.daily_trades,
-            'open_positions': state['positions'],
-            'positions_details': positions_details
-        })
-
         logger.info(f"Portfolio: Balance=${state['balance']:.2f}, Equity=${state['equity']:.2f}, PnL={state['pnl']:.2f}%")
         logger.info("Cycle completed. Next in 10 minutes.")
 

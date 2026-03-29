@@ -196,13 +196,13 @@ for symbol in assets:
     df['sma_20'] = df['close'].rolling(20).mean()
     df['sma_50'] = df['close'].rolling(50).mean()
 
-    # Create subplots
+    # Create subplots (Removed Volume)
     fig = make_subplots(
-        rows=3, cols=1,
+        rows=2, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
-        row_heights=[0.6, 0.2, 0.2],
-        subplot_titles=(f'{symbol} - Price', 'RSI (14)', 'Volume')
+        row_heights=[0.7, 0.3],
+        subplot_titles=(f'{symbol} - Price', 'RSI (14)')
     )
 
     # Candlestick chart
@@ -232,11 +232,8 @@ for symbol in assets:
     fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-    # Volume
-    fig.add_trace(go.Bar(x=df.index, y=df['volume'], name='Volume', marker_color='steelblue'), row=3, col=1)
-
-    fig.update_layout(height=800, showlegend=True)
-    fig.update_xaxes(title_text="Date", row=3, col=1)
+    fig.update_layout(height=600, showlegend=True)
+    fig.update_xaxes(title_text="Date", row=2, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
