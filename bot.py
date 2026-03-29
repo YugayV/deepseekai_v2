@@ -782,7 +782,7 @@ class TradingBot:
                 
                 cmd = cmd_data.get("command")
                 if cmd == "start_all":
-                    logger.info("🚀 Dashboard command: START ALL PAIRS")
+                    logger.info(f"🚀 Dashboard command: START ALL PAIRS (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
                     global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE
                     TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
                     STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
@@ -790,6 +790,7 @@ class TradingBot:
                     
                     # Force immediate execution of the cycle
                     self.force_cycle = True
+                    logger.info("⚡ Cycle force-start flag set. Starting trading cycle immediately.")
                 elif cmd == "start_single" or cmd == "trade_single":
                     symbol = cmd_data.get("symbol")
                     logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
@@ -867,8 +868,12 @@ class TradingBot:
                             'trade_decision': 'YES',
                             'analysis': decision.get('reasoning_short', '')
                         })
+                    else:
+                        logger.warning(f"❌ {symbol}: Entry execution failed (insufficient balance or engine error)")
                 else:
-                    logger.info(f"⏳ {symbol}: DeepSeek said NO")
+                    logger.info(f"⏳ {symbol}: DeepSeek said NO. Reason: {decision.get('reasoning_short', 'No reason provided')}")
+            else:
+                logger.info(f"ℹ️ {symbol}: Already in position, skipping entry check.")
 
             # Log current status
             logger.info(f"{symbol}: {current_price:.5f} | ML: {ml_pred['regime_name']} ({ml_pred['confidence']:.1%})")
