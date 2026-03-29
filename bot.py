@@ -211,21 +211,32 @@ class TelegramNotifier:
             await self.send_message(text, self.admin_chat_id)
 
     async def send_daily_summary(self, stats):
-        """Отправка дневного отчета в группу"""
+        """Отправка подробного отчета о портфеле и позициях"""
         if not self.bot or not self.group_id:
             return
             
         text = f"""
-📊 *DAILY TRADING SUMMARY*
+📊 *TRADING PORTFOLIO SUMMARY*
 
 💰 Balance: ${stats.get('balance', 0):.2f}
 📈 Equity: ${stats.get('equity', 0):.2f}
 📊 PnL: {stats.get('pnl', 0):+.2f}%
-🎯 Trades Today: {stats.get('trades_today', 0)}
-✅ Win Rate: {stats.get('win_rate', 0):.1f}%
-📉 Max Drawdown: {stats.get('max_drawdown', 0):.2f}%
+🎯 Open Positions: {stats.get('open_positions', 0)}
+✅ Trades Today: {stats.get('trades_today', 0)}
 
-*Open Positions:* {stats.get('open_positions', 0)}
+*Active Positions:*
+"""
+        positions_info = stats.get('positions_details', [])
+        if not positions_info:
+            text += "_No active positions._"
+        else:
+            for pos in positions_info:
+                emoji = "🟢" if pos['side'] == 'long' else "🔴"
+                text += f"""
+{emoji} *{pos['symbol']}* ({pos['side'].upper()})
+• Entry: {pos['entry_price']:.5f}
+• Current: {pos['current_price']:.5f}
+• P&L: {pos['pnl_percent']:+.2f}% (${pos['pnl_usd']:+.2f})
 """
         await self.send_message(text, self.group_id)
 
@@ -589,6 +600,36 @@ class TradingBot:
         )
         self.running = True
     
+    async def _check_dashboard_commands(self):
+        cmd_path = "data/bot_command.json"
+        if os.path.exists(cmd_path):
+            try:
+                with open(cmd_path, "r") as f:
+                    cmd_data = json.load(f)
+                
+                cmd = cmd_data.get("command")
+                if cmd == "start_all":
+                    logger.info("🚀 Dashboard command: START ALL PAIRS")
+                    # Update settings from dashboard
+                    global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE
+                    TAKE_PROFIT_PERCENT = cmd_data.get("tp", TAKE_PROFIT_PERCENT)
+                    STOP_LOSS_PERCENT = cmd_data.get("sl", STOP_LOSS_PERCENT)
+                    # Use leverage to adjust position size
+                    MAX_POSITION_SIZE = 5.0 * cmd_data.get("leverage", 1)
+                elif cmd == "start_single":
+                    symbol = cmd_data.get("symbol")
+                    logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
+                    # Force process only this symbol
+                    await self.process_symbol(symbol)
+                elif cmd == "stop_all":
+                    logger.info("🛑 Dashboard command: STOP ALL")
+                    self.engine.positions = {} # Emergency close all
+                
+                # Delete command after processing
+                os.remove(cmd_path)
+            except Exception as e:
+                logger.error(f"Error processing dashboard command: {e}")
+
     async def _send_startup(self):
         await asyncio.sleep(2)
         await self.notifier.send_startup_message()
@@ -645,6 +686,9 @@ class TradingBot:
             logger.error(f"Error processing {symbol}: {e}")
 
     async def run_cycle(self):
+        # Check for commands from dashboard
+        await self._check_dashboard_commands()
+        
         logger.info("=" * 60)
         logger.info("STARTING TRADING CYCLE")
         logger.info("=" * 60)
@@ -654,10 +698,25 @@ class TradingBot:
 
         # Send summary
         current_prices = {}
+        positions_details = []
         for symbol in ALL_SYMBOLS:
             df = fetch_data(symbol)
             if df is not None:
-                current_prices[symbol] = df['close'].iloc[-1]
+                price = df['close'].iloc[-1]
+                current_prices[symbol] = price
+                
+                if symbol in self.engine.positions:
+                    pos = self.engine.positions[symbol]
+                    pnl_usd = (price - pos['entry_price']) * pos['size'] if pos['side'] == 'long' else (pos['entry_price'] - price) * pos['size']
+                    pnl_pct = (pnl_usd / (pos['size'] * pos['entry_price'])) * 100
+                    positions_details.append({
+                        'symbol': symbol,
+                        'side': pos['side'],
+                        'entry_price': pos['entry_price'],
+                        'current_price': price,
+                        'pnl_usd': pnl_usd,
+                        'pnl_percent': pnl_pct
+                    })
 
         state = self.engine.get_state(current_prices)
         await self.notifier.send_daily_summary({
@@ -666,8 +725,7 @@ class TradingBot:
             'pnl': state['pnl'],
             'trades_today': self.engine.daily_trades,
             'open_positions': state['positions'],
-            'win_rate': 0,
-            'max_drawdown': 0
+            'positions_details': positions_details
         })
 
         logger.info(f"Portfolio: Balance=${state['balance']:.2f}, Equity=${state['equity']:.2f}, PnL={state['pnl']:.2f}%")
@@ -684,7 +742,7 @@ class TradingBot:
                 await self.run_cycle()
             except Exception as e:
                 logger.error(f"Cycle error: {e}")
-            await asyncio.sleep(600)  # 10 minutes
+            await asyncio.sleep(10800)  # 3 hours (3 * 60 * 60)
 
 
 # ============================================

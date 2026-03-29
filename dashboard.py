@@ -25,7 +25,7 @@ st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide", page_icon=
 # ============================================
 st.sidebar.title("⚙️ Configuration")
 
-# Asset selection
+# Assets
 st.sidebar.subheader("📊 Assets")
 assets = st.sidebar.multiselect(
     "Select assets to display",
@@ -33,8 +33,26 @@ assets = st.sidebar.multiselect(
     default=["EURUSD=X"]
 )
 
+# Risk Settings
+st.sidebar.subheader("🛡️ Risk Management")
+manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 4.0, 0.5)
+manual_sl = st.sidebar.slider("Stop Loss (%)", 0.5, 5.0, 2.0, 0.5)
+leverage = st.sidebar.selectbox("Leverage", [1, 2, 5, 10, 20, 50, 100], index=2)
+
+# Start Trading Button in Sidebar
+col_btn1, col_btn2 = st.sidebar.columns(2)
+if col_btn1.button("🚀 Start All", use_container_width=True):
+    st.sidebar.success("All pairs started!")
+    with open("data/bot_command.json", "w") as f:
+        json.dump({"command": "start_all", "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
+
+if col_btn2.button("🛑 Stop All", use_container_width=True):
+    st.sidebar.warning("All stopped!")
+    with open("data/bot_command.json", "w") as f:
+        json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
+
 # Timeframe
-timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h", "15m"], index=0)
+timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h", "15m"], index=1)
 
 # Update interval
 st.sidebar.caption(f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -95,7 +113,7 @@ portfolio = load_portfolio()
 trades = load_trades()
 
 # ============================================
-# KPI CARDS
+# KPI CARDS & PORTFOLIO DETAILS
 # ============================================
 st.subheader("📊 Portfolio Overview")
 
@@ -105,13 +123,30 @@ if portfolio:
     balance = portfolio.get('balance', 0)
     equity = portfolio.get('equity', 0)
     pnl = (equity - 10000) / 10000 * 100
+    positions = portfolio.get('positions', {})
 
     col1.metric("💰 Balance", f"${balance:.2f}")
     col2.metric("📈 Equity", f"${equity:.2f}")
     col3.metric("📊 PnL", f"{pnl:.2f}%", delta=f"{pnl:.2f}%")
-    col4.metric("🎯 Positions", len(portfolio.get('positions', [])))
+    col4.metric("🎯 Positions", len(positions))
     col5.metric("💹 Trades", len(trades) if not trades.empty else 0)
+
+    # Detailed Portfolio View
+    if st.button("📂 Show Detailed Portfolio / Positions"):
+        st.markdown("### 🎯 Active Positions")
+        if not positions:
+            st.info("No active positions.")
+        else:
+            for symbol, pos in positions.items():
+                with st.container():
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.write(f"**{symbol}**")
+                    c2.write(f"Side: {pos['side'].upper()}")
+                    c3.write(f"Entry: {pos['entry_price']:.5f}")
+                    c4.write(f"Size: {pos['size']:.2f}")
+                    st.divider()
 else:
+    # ... existing code for no portfolio ...
     col1.metric("💰 Balance", "$10,000")
     col2.metric("📈 Equity", "$10,000")
     col3.metric("📊 PnL", "0.00%")
@@ -333,22 +368,30 @@ for symbol in assets:
                     Technical Analysis for {symbol} ({timeframe}).
                     Current Price: {latest['close']:.5f}
                     Last 5 closes: {list(df_analysis['close'].tail(5).values)}
+                    Leverage set: {leverage}x
                     
                     Provide a concise analysis including:
-                    1. Current trend
+                    1. Market Trend & Sentiment
                     2. RSI and Volume interpretation
-                    3. Specific Entry/SL/TP levels
-                    4. Risk rating (1-10)
+                    3. Specific Entry/SL/TP levels (User wants TP around {manual_tp}% and SL around {manual_sl}%)
+                    4. Recommendation on Leverage (Is {leverage}x safe?)
+                    5. Risk rating (1-10)
                     """
                     
                     response = client.chat.completions.create(
                         model="deepseek/deepseek-chat",
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.7 # Higher temperature for more variety
+                        temperature=0.7
                     )
                     
                     st.success(f"Analysis for {symbol} updated!")
                     st.markdown(response.choices[0].message.content)
+                    
+                    # Manual trade button for this specific pair
+                    if st.button(f"🚀 Trade {symbol} ONLY", key=f"trade_single_{symbol}"):
+                        with open("data/bot_command.json", "w") as f:
+                            json.dump({"command": "start_single", "symbol": symbol, "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
+                        st.success(f"Command to trade {symbol} sent!")
                 else:
                     st.error(f"No data for {symbol}")
             except Exception as e:
