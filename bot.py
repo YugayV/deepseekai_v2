@@ -45,12 +45,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", TELEGRAM_CHAT_ID)
 
-# WhatsApp (Twilio)
-TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886") # Twilio Sandbox number
-WHATSAPP_TO = os.getenv("WHATSAPP_TO") # Your WhatsApp number or Group ID
-
 # Exchange Keys (Real Trading)
 EXCHANGE_ID = os.getenv("EXCHANGE_ID", "bybit") # bybit or binance
 EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")

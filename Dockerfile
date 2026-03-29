@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget build-esse
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Set environment variables for TA-Lib
+ENV TA_INCLUDE_PATH=/usr/include
+ENV TA_LIBRARY_PATH=/usr/lib
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
