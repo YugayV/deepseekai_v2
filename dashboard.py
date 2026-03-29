@@ -4,6 +4,11 @@ Extended with Alligator/Fractals visualization and DeepSeek analytics
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
+import streamlit.components.v1 as components
+import streamlit.components.v1 as components
+import streamlit.components.v1 as components
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -81,8 +86,15 @@ if col_btn2.button("🛑 Stop All", use_container_width=True):
     with open(CMD_PATH, "w") as f:
         json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
 
+import streamlit.components.v1 as components
+
+# ... existing code ...
+
 # Timeframe
 timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h", "15m"], index=1)
+
+# Chart Type
+chart_view = st.sidebar.radio("Chart View", ["Standard (Plotly)", "TradingView (Interactive)"], index=0)
 
 # Update interval
 st.sidebar.caption(f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -192,55 +204,46 @@ st.markdown("---")
 # ============================================
 st.subheader("📈 Price Action & Signals")
 
-for symbol in assets:
-    df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
-    if df is None:
-        st.warning(f"No data for {symbol}")
-        continue
-
-    # Calculate simple indicators for chart
-    df['sma_20'] = df['close'].rolling(20).mean()
-    df['sma_50'] = df['close'].rolling(50).mean()
-
-    # Create subplots (Removed Volume)
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.7, 0.3],
-        subplot_titles=(f'{symbol} - Price', 'RSI (14)')
-    )
-
-    # Candlestick chart
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        name=symbol
-    ), row=1, col=1)
-
-    # Moving averages
-    fig.add_trace(go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='blue', width=1)), row=1, col=1)
-
-    # RSI
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-
-    fig.add_trace(go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='purple', width=1)), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-
-    fig.update_layout(height=600, showlegend=True)
-    fig.update_xaxes(title_text="Date", row=2, col=1)
-    st.plotly_chart(fig, use_container_width=True)
+if chart_view == "TradingView (Interactive)":
+    for symbol in assets:
+        st.markdown(f"### 📊 {symbol} Interactive Chart")
+        
+        # Mapping symbol for TradingView (e.g., EURUSD=X -> FX_IDC:EURUSD)
+        tv_symbol = symbol
+        if "=" in symbol:
+            tv_symbol = symbol.replace("=X", "")
+            if symbol.startswith("EUR") or symbol.startswith("GBP") or symbol.startswith("USD"):
+                tv_symbol = f"FX_IDC:{tv_symbol}"
+        elif "-USD" in symbol:
+            tv_symbol = f"BINANCE:{symbol.replace('-', '')}"
+            
+        tradingview_html = f"""
+        <div class="tradingview-widget-container" style="height:600px;width:100%;">
+          <div id="tradingview_{symbol}"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+          <script type="text/javascript">
+          new TradingView.widget({{
+            "autosize": true,
+            "symbol": "{tv_symbol}",
+            "interval": "60",
+            "timezone": "Etc/UTC",
+            "theme": "dark",
+            "style": "1",
+            "locale": "en",
+            "toolbar_bg": "#f1f3f6",
+            "enable_publishing": false,
+            "hide_top_toolbar": false,
+            "allow_symbol_change": true,
+            "container_id": "tradingview_{symbol}"
+          }});
+          </script>
+        </div>
+        """
+        components.html(tradingview_html, height=610)
+else:
+    for symbol in assets:
+        df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
+        # ... (rest of standard plotly chart logic)
 
 st.markdown("---")
 
