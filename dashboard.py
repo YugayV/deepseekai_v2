@@ -283,25 +283,50 @@ else:
 # ============================================
 st.subheader("🧠 DeepSeek Market Analysis")
 
-if st.button("🔮 Get AI Market Analysis"):
-    with st.spinner("DeepSeek analyzing market..."):
-        # Simulate DeepSeek response (would call API in production)
-        st.markdown("""
-        **📊 Market Analysis: EURUSD**
+# Get API Key
+api_key = os.getenv("OPENROUTER_API_KEY")
 
-        *Current Setup:*
-        - RSI at 52.3 (neutral)
-        - MACD histogram turning positive
-        - Alligator lines starting to separate bullishly
-
-        *ML Signal:* Bullish (confidence: 68%)
-
-        *Recommendation:* Consider long entries on pullbacks to 1.0850.
-        Stop loss below 1.0820, target 1.0920.
-
-        *Risk Note:* Market showing early trend signals but low volatility.
-        Use smaller position size.
-        """)
+for symbol in assets:
+    with st.expander(f"🔮 Get AI Market Analysis for {symbol}", expanded=(len(assets) == 1)):
+        if st.button(f"Analyze {symbol} with DeepSeek", key=f"btn_{symbol}"):
+            if not api_key:
+                st.error("API Key not found! Please set OPENROUTER_API_KEY in .env")
+                continue
+                
+            with st.spinner(f"DeepSeek analyzing {symbol}..."):
+                try:
+                    import openai
+                    client = openai.OpenAI(
+                        api_key=api_key,
+                        base_url="https://openrouter.ai/api/v1"
+                    )
+                    
+                    # Fetch fresh data for analysis
+                    df_analysis = fetch_asset_data(symbol, period="1mo", interval=timeframe)
+                    if df_analysis is not None:
+                        latest = df_analysis.iloc[-1]
+                        
+                        # Prepare prompt
+                        prompt = f"""
+                        Act as a professional trader. Analyze {symbol} ({timeframe}).
+                        Price: {latest['close']:.5f}
+                        Volume: {latest['volume']}
+                        Analyze the current market situation and give a short recommendation.
+                        """
+                        
+                        response = client.chat.completions.create(
+                            model="deepseek/deepseek-chat",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.5
+                        )
+                        
+                        st.markdown(f"### 📊 Analysis for {symbol}")
+                        st.write(response.choices[0].message.content)
+                        st.success("Analysis completed!")
+                    else:
+                        st.error(f"Could not fetch data for {symbol}")
+                except Exception as e:
+                    st.error(f"DeepSeek Error: {e}")
 
 st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
