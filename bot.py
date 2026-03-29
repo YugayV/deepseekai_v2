@@ -98,10 +98,8 @@ if RAILWAY:
 # ============================================
 # TELEGRAM NOTIFIER (with group support)
 # ============================================
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-
-# ... существующий код ...
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
 class TelegramNotifier:
     def __init__(self, token=None, group_id=None, admin_chat_id=None):
@@ -114,58 +112,105 @@ class TelegramNotifier:
     async def initialize(self):
         if self.bot_token:
             try:
-                from telegram import Bot
-                from telegram.ext import Application, CommandHandler
                 self.application = Application.builder().token(self.bot_token).build()
                 self.bot = self.application.bot
                 
+                # Handlers
                 self.application.add_handler(CommandHandler("start", self._cmd_start))
-                self.application.add_handler(CommandHandler("status", self._cmd_status))
-                self.application.add_handler(CommandHandler("pairs", self._cmd_pairs))
-                self.application.add_handler(CommandHandler("trade_all", self._cmd_trade_all))
-                self.application.add_handler(CommandHandler("stop_all", self._cmd_stop_all))
-                self.application.add_handler(CommandHandler("demo", self._cmd_demo))
-                self.application.add_handler(CommandHandler("real", self._cmd_real))
+                self.application.add_handler(CommandHandler("menu", self._cmd_start))
+                self.application.add_handler(CallbackQueryHandler(self._handle_callbacks))
                 
                 await self.application.initialize()
                 await self.application.start()
                 if self.application.updater:
                     await self.application.updater.start_polling()
-                logger.info("✅ Telegram bot initialized with command handlers")
+                logger.info("✅ Telegram bot initialized with Main Menu")
             except Exception as e:
                 logger.error(f"Telegram init error: {e}")
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = "🚀 *AI Trading Bot is Active*\n\nCommands:\n/status - Portfolio summary\n/pairs - Tracked symbols"
-        await update.message.reply_text(text, parse_mode='Markdown')
+        keyboard = [
+            [InlineKeyboardButton("📊 Portfolio Status", callback_data='status')],
+            [InlineKeyboardButton("💰 Current Prices", callback_data='prices')],
+            [InlineKeyboardButton("🔮 AI Forecast", callback_data='select_forecast')],
+            [InlineKeyboardButton("🚀 Auto-Trade Controls", callback_data='trade_menu')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "🤖 *AI Trading Bot Control Panel*\nSelect an option below:"
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
-    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("📊 Generating report... use /pairs for symbols.")
+    async def _handle_callbacks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        cmd_path = os.path.join(DATA_DIR, "bot_command.json")
 
-    async def _cmd_pairs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        pairs_text = "🎯 *Tracked Symbols:*\n\n"
-        pairs_text += "\n".join([f"• `{s}`" for s in ALL_SYMBOLS])
-        await update.message.reply_text(pairs_text, parse_mode='Markdown')
+        if data == 'status':
+            # Dynamic status fetching
+            current_prices = {}
+            for s in ALL_SYMBOLS:
+                df = fetch_data(s)
+                if df is not None: current_prices[s] = df['close'].iloc[-1]
+            state = bot_instance.engine.get_state(current_prices) if 'bot_instance' in globals() and bot_instance else {'balance': 0, 'equity': 0, 'pnl': 0}
+            
+            status_text = f"📊 *Portfolio Status*\n\n"
+            status_text += f"💰 Balance: ${state.get('balance', 0):.2f}\n"
+            status_text += f"📈 Equity: ${state.get('equity', 0):.2f}\n"
+            status_text += f"💹 PnL: {state.get('pnl', 0):+.2f}%\n"
+            
+            await query.edit_message_text(status_text, parse_mode='Markdown', 
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='main_menu')]]))
 
-    async def _cmd_trade_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        with open("data/bot_command.json", "w") as f:
-            json.dump({"command": "start_all", "time": str(datetime.now())}, f)
-        await update.message.reply_text("🚀 Command sent: START ALL PAIRS")
+        elif data == 'prices':
+            price_text = "💰 *Current Market Prices*\n\n"
+            for s in ALL_SYMBOLS:
+                df = fetch_data(s)
+                if df is not None:
+                    price_text += f"• `{s}`: {df['close'].iloc[-1]:.5f}\n"
+            await query.edit_message_text(price_text, parse_mode='Markdown', 
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='main_menu')]]))
 
-    async def _cmd_stop_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        with open("data/bot_command.json", "w") as f:
-            json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
-        await update.message.reply_text("🛑 Command sent: STOP ALL")
+        elif data == 'select_forecast':
+            keyboard = [[InlineKeyboardButton(f"🔮 {s}", callback_data=f"get_fc_{s}")] for s in ALL_SYMBOLS]
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='main_menu')])
+            await query.edit_message_text("🔮 *Select Asset for AI Forecast:*", 
+                                          reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    async def _cmd_demo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        global TRADING_MODE
-        TRADING_MODE = "demo"
-        await update.message.reply_text("🔄 Switched to DEMO mode")
+        elif data.startswith('get_fc_'):
+            symbol = data.replace('get_fc_', '')
+            await query.edit_message_text(f"⌛ Requesting DeepSeek analysis for {symbol}...", parse_mode='Markdown')
+            # Trigger analysis logic
+            if 'bot_instance' in globals() and bot_instance:
+                await bot_instance.process_symbol(symbol)
+            await query.edit_message_text(f"✅ AI Analysis for {symbol} triggered. Results will appear in the dashboard/logs.", 
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='select_forecast')]]), parse_mode='Markdown')
 
-    async def _cmd_real(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        global TRADING_MODE
-        TRADING_MODE = "real"
-        await update.message.reply_text("⚠️ Switched to REAL mode (API required)")
+        elif data == 'trade_menu':
+            keyboard = [
+                [InlineKeyboardButton("🚀 START ALL PAIRS", callback_data='start_all')],
+                [InlineKeyboardButton("🛑 STOP ALL PAIRS", callback_data='stop_all')],
+                [InlineKeyboardButton("⬅️ Back", callback_data='main_menu')]
+            ]
+            await query.edit_message_text("⚙️ *Auto-Trade Controls*", 
+                                          reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+        elif data == 'start_all':
+            with open(cmd_path, "w") as f:
+                json.dump({"command": "start_all", "time": str(datetime.now())}, f)
+            await query.edit_message_text("🚀 Command sent: *START ALL*", 
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='trade_menu')]]), parse_mode='Markdown')
+
+        elif data == 'stop_all':
+            with open(cmd_path, "w") as f:
+                json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
+            await query.edit_message_text("🛑 Command sent: *STOP ALL*", 
+                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='trade_menu')]]), parse_mode='Markdown')
+
+        elif data == 'main_menu':
+            await self._cmd_start(update, context)
 
     async def send_message(self, text, chat_id=None):
         if not self.bot: return
@@ -823,10 +868,13 @@ class TradingBot:
 # ============================================
 # ENTRY POINT
 # ============================================
+bot_instance = None
+
 async def main():
+    global bot_instance
     try:
-        bot = TradingBot()
-        await bot.run()
+        bot_instance = TradingBot()
+        await bot_instance.run()
     except Exception as e:
         logger.error(f"FATAL ERROR DURING BOT RUN: {e}")
         if RAILWAY:
