@@ -367,13 +367,23 @@ class MLModelLoader:
         if len(self.feature_cols) == 0 or len(df) == 0:
             return None
 
-        # Extract features
+        # Extract features with case-insensitive matching
         features = pd.DataFrame(index=df.index)
+        df_cols_lower = {c.lower(): c for c in df.columns}
+        
+        missing_cols = []
         for col in self.feature_cols:
-            if col in df.columns:
-                features[col] = df[col]
+            col_lower = col.lower()
+            if col_lower in df_cols_lower:
+                features[col] = df[df_cols_lower[col_lower]]
             else:
                 features[col] = 0
+                missing_cols.append(col)
+        
+        if missing_cols and len(missing_cols) < len(self.feature_cols):
+            logger.debug(f"⚠️ Some features missing, filled with 0: {missing_cols[:5]}...")
+        elif len(missing_cols) == len(self.feature_cols):
+            logger.error("❌ ALL features missing! Check indicator names vs metadata.")
 
         features = features.dropna()
         if len(features) == 0:
@@ -684,11 +694,25 @@ class PaperTradingEngine:
                 logger.error(f"Error loading trade history: {e}")
 
     def execute_entry(self, symbol, decision, price):
-        # ... existing entry logic ...
         if decision.get('action') != 'entry':
             return None
 
-        # ... (rest of entry logic)
+        side = decision.get('side', 'long')
+        stop = decision.get('stop_loss', price * (1 - STOP_LOSS_PERCENT/100 if side == 'long' else 1 + STOP_LOSS_PERCENT/100))
+        target = decision.get('take_profit', price * (1 + TAKE_PROFIT_PERCENT/100 if side == 'long' else 1 - TAKE_PROFIT_PERCENT/100))
+        confidence = decision.get('confidence', 50) / 100
+
+        risk_amount = self.balance * (MAX_POSITION_SIZE / 100) * confidence
+        risk_per_unit = abs(price - stop)
+        if risk_per_unit <= 0:
+            return None
+
+        size = risk_amount / risk_per_unit
+        size = min(size, self.balance * 0.3 / price)
+
+        if size <= 0:
+            return None
+
         self.positions[symbol] = {
             'side': side,
             'entry_price': price,
@@ -707,12 +731,28 @@ class PaperTradingEngine:
         return self.positions[symbol]
 
     def check_exits(self, symbol, price):
-        # ... existing exit logic ...
         if symbol not in self.positions:
             return None
 
         pos = self.positions[symbol]
-        # ... (rest of exit logic)
+        close_reason = None
+        pnl = 0
+
+        if pos['side'] == 'long':
+            if price <= pos['stop_loss']:
+                close_reason = 'stop_loss'
+                pnl = (price - pos['entry_price']) * pos['size']
+            elif price >= pos['take_profit']:
+                close_reason = 'take_profit'
+                pnl = (price - pos['entry_price']) * pos['size']
+        else:
+            if price >= pos['stop_loss']:
+                close_reason = 'stop_loss'
+                pnl = (pos['entry_price'] - price) * pos['size']
+            elif price <= pos['take_profit']:
+                close_reason = 'take_profit'
+                pnl = (pos['entry_price'] - price) * pos['size']
+
         if close_reason:
             self.balance += pos['size'] * price + pnl
             pos['exit_price'] = price
