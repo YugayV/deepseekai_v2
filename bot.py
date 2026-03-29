@@ -435,8 +435,12 @@ Respond ONLY with valid JSON:
                 return json.loads(match.group())
             return {'action': 'hold', 'confidence': 0, 'reasoning': 'Parse error'}
         except Exception as e:
-            logger.error(f"DeepSeek error: {e}")
-            return {'action': 'hold', 'confidence': 0, 'reasoning': str(e)}
+            error_msg = str(e)
+            if "401" in error_msg:
+                logger.error(f"❌ API Key Error: Please check your OPENROUTER_API_KEY in .env")
+            else:
+                logger.error(f"DeepSeek error: {e}")
+            return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {error_msg}"}
 
 
 # ============================================

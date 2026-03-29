@@ -13,8 +13,12 @@ import joblib
 import json
 from datetime import datetime, timedelta
 import os
+from dotenv import load_dotenv
 
-st.set_page_config(page_title="EURUSD AI Trader", layout="wide", page_icon="🤖")
+# Load environment variables
+load_dotenv()
+
+st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide", page_icon="🤖")
 
 # ============================================
 # SIDEBAR - Configuration
