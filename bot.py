@@ -196,25 +196,19 @@ class TelegramNotifier:
             logger.error(f"Telegram send error to {target_chat}: {e}")
 
     async def send_signal(self, signal_type, data):
-        """Отправка сигнала в группу с детальным анализом"""
+        """Отправка упрощенного сигнала"""
         if not self.bot or not self.group_id:
             return
 
         if signal_type == "ENTRY":
             emoji = "🟢" if data.get('side') == 'long' else "🔴"
             text = f"""
-{emoji} *MARKET ANALYSIS: {data['asset']}*
+{emoji} *TRADE SIGNAL: {data['asset']}*
 
-*Current Setup:*
-{data.get('analysis', 'No detailed analysis provided.')}
+*ML Prediction:* {data.get('ml_forecast_pct', '0%')}
+*Decision:* {data.get('trade_decision', 'NO')}
 
-*ML Signal:* {data.get('ml_regime', 'N/A')} (confidence: {data.get('confidence', 0):.1%})
-
-*Recommendation:*
-{data.get('recommendation', 'Wait for better setup.')}
-
-*Risk Note:*
-{data.get('risk_note', 'Standard position size.')}
+*Reason:* {data.get('analysis', '')}
 """
             await self.send_message(text, self.group_id)
 
@@ -442,25 +436,26 @@ class DeepSeekAdvisor:
         prev = df.iloc[-2]
 
         prompt = f"""
-Act as a Quant Trader. Analyze {symbol} based on ML Ensemble Model and Technical Indicators.
+Act as a binary decision engine for trading {symbol}.
 
-ML MODEL DATA:
-- Predicted Regime: {ml_prediction['regime_name'].upper()}
-- Model Confidence: {ml_prediction['confidence']:.1%}
-- Probabilities: {ml_prediction['probabilities']}
-
-TECHNICAL DATA:
-- Price: {latest['close']:.5f}
-- Alligator: {'BULLISH (Hungry)' if latest['alligator_bullish'] else 'BEARISH (Hungry)' if latest['alligator_bearish'] else 'ASLEEP'}
-- Fractals: Bull={latest['fractal_bullish']}, Bear={latest['fractal_bearish']}
+DATA:
+- ML Prediction: {ml_prediction['regime_name'].upper()}
+- ML Confidence: {ml_prediction['confidence']:.1%}
+- ML Probabilities: {ml_prediction['probabilities']}
+- Alligator: {'Bullish' if latest['alligator_bullish'] else 'Bearish' if latest['alligator_bearish'] else 'Neutral'}
 
 TASK:
-1. Explain WHY the ML model predicted this regime based on the Alligator and Fractals setup.
-2. Determine if the ML prediction aligns with the Williams Alligator trend.
-3. Provide Entry/SL/TP levels and recommended leverage (1x to {MAX_POSITION_SIZE}x).
+Based on the ML probabilities and Alligator, decide if we should trade NOW.
+ML model balanced accuracy is ~36.4%, so use Alligator as a filter.
 
 Respond ONLY with valid JSON:
-{{"action": "entry/hold/close", "side": "long/short", "confidence": 0-100, "analysis": "Detailed explanation of ML + Alligator synergy", "recommendation": "Levels and Leverage"}}
+{{
+  "trade_decision": "YES/NO",
+  "reasoning_short": "Short 1-sentence explanation",
+  "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
+  "action": "entry/hold",
+  "side": "long/short"
+}}
 """
 
         try:
@@ -763,18 +758,15 @@ class TradingBot:
             if symbol not in self.engine.positions:
                 decision = self.deepseek.get_decision(symbol, df, ml_pred)
 
-                if decision.get('action') == 'entry':
+                if decision.get('trade_decision') == 'YES':
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
                         await self.notifier.send_signal("ENTRY", {
                             'asset': symbol,
-                            'side': position['side'],
-                            'entry_price': position['entry_price'],
-                            'ml_regime': ml_pred['regime_name'],
-                            'confidence': position['confidence'],
-                            'analysis': decision.get('analysis', ''),
-                            'recommendation': decision.get('recommendation', ''),
-                            'risk_note': decision.get('risk_note', '')
+                            'side': decision.get('side', 'long'),
+                            'ml_forecast_pct': decision.get('ml_forecast_pct', '0%'),
+                            'trade_decision': 'YES',
+                            'analysis': decision.get('reasoning_short', '')
                         })
 
             # Log
