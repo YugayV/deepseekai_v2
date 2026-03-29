@@ -96,7 +96,7 @@ if RAILWAY:
 
 
 # ============================================
-# TELEGRAM NOTIFIER (с поддержкой группы)
+# TELEGRAM NOTIFIER (with group support)
 # ============================================
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -175,12 +175,12 @@ class TelegramNotifier:
             await self.bot.send_message(chat_id=target_chat, text=text, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
-# ... существующий код ...
-        """Отправка сообщения в указанный чат"""
+# ... existing code ...
+        """Send message to the specified chat"""
         if not self.bot:
             return
         
-        # Если chat_id не указан, используем группу
+        # If chat_id is not specified, use the group
         target_chat = chat_id or self.group_id
         if not target_chat:
             return
@@ -196,7 +196,7 @@ class TelegramNotifier:
             logger.error(f"Telegram send error to {target_chat}: {e}")
 
     async def send_signal(self, signal_type, data):
-        """Отправка упрощенного сигнала"""
+        """Send a simplified signal"""
         if not self.bot or not self.group_id:
             return
 
@@ -229,13 +229,13 @@ class TelegramNotifier:
             await self.send_message(text, self.group_id)
 
     async def send_error(self, error_msg):
-        """Отправка ошибок админу (личное сообщение)"""
+        """Send errors to admin (private message)"""
         if self.bot and self.admin_chat_id:
             text = f"⚠️ *ERROR*\n\n{error_msg[:500]}"
             await self.send_message(text, self.admin_chat_id)
 
     async def send_daily_summary(self, stats):
-        """Отправка подробного отчета о портфеле и позициях"""
+        """Send detailed report on portfolio and positions"""
         if not self.bot or not self.group_id:
             return
             
@@ -265,7 +265,7 @@ class TelegramNotifier:
         await self.send_message(text, self.group_id)
 
     async def send_startup_message(self):
-        """Отправка сообщения о запуске бота"""
+        """Send bot startup message"""
         if self.bot and self.group_id:
             text = f"""
 🚀 *TRADING BOT STARTED*
@@ -446,13 +446,13 @@ TASK:
 Decide if we should trade NOW. ML accuracy is low, use Alligator as the main filter.
 
 Respond ONLY with valid JSON:
-{
+{{
   "trade_decision": "YES/NO",
-  "reasoning_short": "Max 1 sentence in Russian",
+  "reasoning_short": "Max 1 sentence in Russian language",
   "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
   "action": "entry/hold",
   "side": "long/short"
-}
+}}
 """
 
         try:
@@ -669,36 +669,41 @@ class TradingBot:
         else:
             self.engine = PaperTradingEngine()
         
-        # Telegram: групповой чат для сигналов, личный для ошибок
+        # Telegram: group chat for signals, private for errors
         self.notifier = TelegramNotifier(
             token=TELEGRAM_TOKEN,
-            group_id=os.getenv("TELEGRAM_GROUP_ID"),      # ID группы
-            admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")   # Ваш личный ID
+            group_id=os.getenv("TELEGRAM_GROUP_ID"),      # Group ID
+            admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")   # Your personal ID
         )
         self.running = True
     
     async def _check_dashboard_commands(self):
-        cmd_path = "data/bot_command.json"
+        cmd_path = os.path.join(DATA_DIR, "bot_command.json")
         if os.path.exists(cmd_path):
             try:
+                logger.info(f"📂 Found command file: {cmd_path}")
                 with open(cmd_path, "r") as f:
                     cmd_data = json.load(f)
                 
-                # Delete command immediately
+                # Delete command immediately to prevent double processing
                 os.remove(cmd_path)
+                logger.info(f"📥 Processing command: {cmd_data.get('command')}")
                 
                 cmd = cmd_data.get("command")
                 if cmd == "start_all":
                     logger.info("🚀 Dashboard command: START ALL PAIRS")
                     global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE
-                    TAKE_PROFIT_PERCENT = cmd_data.get("tp", TAKE_PROFIT_PERCENT)
-                    STOP_LOSS_PERCENT = cmd_data.get("sl", STOP_LOSS_PERCENT)
-                    MAX_POSITION_SIZE = 5.0 * cmd_data.get("leverage", 1)
-                    await self.run_cycle() # Run cycle immediately
-                elif cmd == "start_single":
+                    TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
+                    STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
+                    MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
+                    await self.run_cycle()
+                elif cmd == "start_single" or cmd == "trade_single":
                     symbol = cmd_data.get("symbol")
                     logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
-                    await self.process_symbol(symbol)
+                    if symbol:
+                        await self.process_symbol(symbol)
+                    else:
+                        logger.error("❌ Single trade command missing symbol!")
                 elif cmd == "stop_all":
                     logger.info("🛑 Dashboard command: STOP ALL")
                     self.engine.positions = {}
@@ -717,7 +722,8 @@ class TradingBot:
                         self.engine = PaperTradingEngine()
                 
             except Exception as e:
-                logger.error(f"Error processing dashboard command: {e}")
+                logger.error(f"❌ Error processing dashboard command: {e}")
+                if os.path.exists(cmd_path): os.remove(cmd_path)
 
     async def _send_startup(self):
         await asyncio.sleep(2)
@@ -796,16 +802,16 @@ class TradingBot:
         logger.info("Cycle completed. Next in 10 minutes.")
 
     async def run(self):
-        # Инициализируем Telegram перед циклом
+        # Initialize Telegram before the cycle
         await self.notifier.initialize()
-        # Теперь безопасно отправляем сообщение о запуске
+        # Now safely send the startup message
         await self._send_startup()
         
         while self.running:
             try:
-                # Проверяем команды каждые 10 секунд
-                # Раз в 3 часа запускаем полный цикл
-                for _ in range(18 * 60): # 1080 итераций по 10 сек = 3 часа
+                # Check commands every 10 seconds
+                # Run full cycle every 3 hours
+                for _ in range(18 * 60): # 1080 iterations of 10 sec = 3 hours
                     await self._check_dashboard_commands()
                     await asyncio.sleep(10)
                 

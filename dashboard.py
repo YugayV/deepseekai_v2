@@ -25,25 +25,18 @@ st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide", page_icon=
 # ============================================
 st.sidebar.title("⚙️ Configuration")
 
-# Assets
-st.sidebar.subheader("📊 Assets")
-assets = st.sidebar.multiselect(
-    "Select assets to display",
-    ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD"],
-    default=["EURUSD=X"]
-)
+DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
+CMD_PATH = os.path.join(DATA_DIR, "bot_command.json")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# Trading Mode
-st.sidebar.subheader("🔌 Trading Mode")
-trading_mode = st.sidebar.radio("Select Mode", ["Demo (Paper)", "Real (API)"], index=0)
-is_real = trading_mode == "Real (API)"
+# ... existing code ...
 
 if is_real:
     exchange_id = st.sidebar.selectbox("Exchange", ["bybit", "binance"], index=0)
     api_key_input = st.sidebar.text_input("API Key", type="password")
     api_secret_input = st.sidebar.text_input("API Secret", type="password")
     if st.sidebar.button("💾 Save API Config"):
-        with open("data/bot_command.json", "w") as f:
+        with open(CMD_PATH, "w") as f:
             json.dump({
                 "command": "update_api",
                 "mode": "real",
@@ -55,7 +48,7 @@ if is_real:
         st.sidebar.success("API Config saved!")
 else:
     if st.sidebar.button("🔄 Reset to Demo"):
-        with open("data/bot_command.json", "w") as f:
+        with open(CMD_PATH, "w") as f:
             json.dump({"command": "update_api", "mode": "demo", "time": str(datetime.now())}, f)
         st.sidebar.info("Switched to Demo")
 
@@ -69,12 +62,12 @@ leverage = st.sidebar.selectbox("Leverage", [1, 2, 5, 10, 20, 50, 100], index=2)
 col_btn1, col_btn2 = st.sidebar.columns(2)
 if col_btn1.button("🚀 Start All", use_container_width=True):
     st.sidebar.success("All pairs started!")
-    with open("data/bot_command.json", "w") as f:
-        json.dump({"command": "start_all", "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
+    with open(CMD_PATH, "w") as f:
+        json.dump({"command": "start_all", "tp": float(manual_tp), "sl": float(manual_sl), "leverage": int(leverage), "time": str(datetime.now())}, f)
 
 if col_btn2.button("🛑 Stop All", use_container_width=True):
     st.sidebar.warning("All stopped!")
-    with open("data/bot_command.json", "w") as f:
+    with open(CMD_PATH, "w") as f:
         json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
 
 # Timeframe
@@ -346,14 +339,14 @@ api_key = os.getenv("OPENROUTER_API_KEY")
 
 col_ctrl1, col_ctrl2 = st.columns(2)
 with col_ctrl1:
-    if st.button("🚀 Запустить торговлю (Все пары)", use_container_width=True):
-        st.success("Команда отправлена!")
+    if st.button("🚀 Start AI Trading (All)", use_container_width=True):
+        st.success("Command sent!")
         with open("data/bot_command.json", "w") as f:
             json.dump({"command": "start_all", "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
 
 with col_ctrl2:
-    if st.button("🛑 Остановить всё", use_container_width=True):
-        st.warning("Остановка...")
+    if st.button("🛑 Stop All", use_container_width=True):
+        st.warning("Stopping...")
         with open("data/bot_command.json", "w") as f:
             json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
 
@@ -367,12 +360,12 @@ for symbol in assets:
         pos = portfolio['positions'][symbol]
         st.info(f"📍 Active Position: {pos['side'].upper()} | Entry: {pos['entry_price']:.5f}")
 
-    if st.button(f"Сделать новый анализ {symbol}", key=f"deepseek_{symbol}"):
+    if st.button(f"New Analysis for {symbol}", key=f"deepseek_{symbol}"):
         if not api_key:
             st.error("API Key not found!")
             continue
             
-        with st.spinner(f"DeepSeek анализирует {symbol}..."):
+        with st.spinner(f"DeepSeek analyzing {symbol}..."):
             try:
                 import openai
                 client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
@@ -382,11 +375,11 @@ for symbol in assets:
                     latest = df_analysis.iloc[-1]
                     
                     prompt = f"""
-                    Проанализируй {symbol}. Цена: {latest['close']:.5f}.
-                    Стратегия: Alligator + Fractals.
-                    TP: {manual_tp}%, SL: {manual_sl}%, Плечо: {leverage}x.
+                    Analyze {symbol}. Price: {latest['close']:.5f}.
+                    Strategy: Alligator + Fractals.
+                    TP: {manual_tp}%, SL: {manual_sl}%, Leverage: {leverage}x.
                     
-                    ОТВЕТЬ СТРОГО НА РУССКОМ (макс 30 слов):
+                    RESPOND ONLY IN RUSSIAN (max 30 words):
                     1. ПРОГНОЗ: [ВВЕРХ/ВНИЗ/ФЛЕТ]
                     2. ВЕРОЯТНОСТЬ: [0-100]%
                     3. РЕКОМЕНДАЦИЯ: [ТОРГОВАТЬ/ЖДАТЬ]
@@ -400,23 +393,16 @@ for symbol in assets:
                         max_tokens=150
                     )
                     
-                    st.success(f"Анализ для {symbol} готов!")
+                    st.success(f"Analysis for {symbol} ready!")
                     st.info(response.choices[0].message.content)
                 else:
-                    st.error(f"Нет данных для {symbol}")
+                    st.error(f"No data for {symbol}")
             except Exception as e:
-                st.error(f"Ошибка AI: {e}")
+                st.error(f"AI Error: {e}")
     
-    if st.button(f"🚀 Торговать {symbol}", key=f"trade_single_{symbol}"):
-        with open("data/bot_command.json", "w") as f:
-            json.dump({
-                "command": "start_single", 
-                "symbol": symbol, 
-                "tp": manual_tp, 
-                "sl": manual_sl, 
-                "leverage": leverage, 
-                "time": str(datetime.now())
-            }, f)
-        st.success(f"Команда на торговлю {symbol} отправлена!")
+    if st.button(f"🚀 Trade {symbol}", key=f"trade_single_{symbol}"):
+        with open(CMD_PATH, "w") as f:
+            json.dump({"command": "start_single", "symbol": symbol, "tp": float(manual_tp), "sl": float(manual_sl), "leverage": int(leverage), "time": str(datetime.now())}, f)
+        st.success(f"Trade command for {symbol} sent!")
     st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
