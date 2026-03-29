@@ -31,7 +31,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV RAILWAY=true
 
-HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=5 \
-    CMD python -c "import urllib.request; import os; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health').read()" || exit 1
-
 CMD ["python", "bot.py"]

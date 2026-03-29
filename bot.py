@@ -19,6 +19,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
+        self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(b'OK')
     def log_message(self, format, *args): return
@@ -26,11 +27,12 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
     try:
         server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+        server.timeout = 5
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        print(f"✅ Health check server started on port {PORT}")
+        print(f"✅ Health check server ready on port {PORT}")
     except Exception as e:
-        print(f"❌ Failed to start health server: {e}")
+        print(f"❌ Health server failed: {e}")
 
 if os.getenv("RAILWAY", "false").lower() == "true":
     start_health_server()
