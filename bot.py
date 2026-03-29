@@ -583,9 +583,6 @@ class TradingBot:
             admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")   # Ваш личный ID
         )
         self.running = True
-        
-        # Отправляем сообщение о запуске
-        asyncio.create_task(self._send_startup())
     
     async def _send_startup(self):
         await asyncio.sleep(2)
@@ -674,6 +671,8 @@ class TradingBot:
     async def run(self):
         # Инициализируем Telegram перед циклом
         await self.notifier.initialize()
+        # Теперь безопасно отправляем сообщение о запуске
+        await self._send_startup()
         
         while self.running:
             try:
@@ -686,13 +685,15 @@ class TradingBot:
 # ============================================
 # ENTRY POINT
 # ============================================
+async def main():
+    bot = TradingBot()
+    await bot.run()
+
 if __name__ == "__main__":
     try:
-        bot = TradingBot()
-        asyncio.run(bot.run())
+        asyncio.run(main())
     except Exception as e:
-        logger.error(f"FATAL ERROR DURING INIT/RUN: {e}")
-        # If on Railway, keep the process alive so health check stays green and we see logs
+        logger.error(f"FATAL ERROR: {e}")
         if RAILWAY:
             logger.info("Keeping process alive for health check...")
             while True:
