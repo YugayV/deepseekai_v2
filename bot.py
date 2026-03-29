@@ -440,21 +440,19 @@ Act as a binary decision engine for trading {symbol}.
 
 DATA:
 - ML Prediction: {ml_prediction['regime_name'].upper()}
-- ML Confidence: {ml_prediction['confidence']:.1%}
-- ML Probabilities: {ml_prediction['probabilities']}
 - Alligator: {'Bullish' if latest['alligator_bullish'] else 'Bearish' if latest['alligator_bearish'] else 'Neutral'}
 
 TASK:
 Decide if we should trade NOW. ML accuracy is low, use Alligator as the main filter.
 
 Respond ONLY with valid JSON:
-{{
+{
   "trade_decision": "YES/NO",
   "reasoning_short": "Max 1 sentence in Russian",
   "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
   "action": "entry/hold",
   "side": "long/short"
-}}
+}
 """
 
         try:
@@ -686,7 +684,7 @@ class TradingBot:
                 with open(cmd_path, "r") as f:
                     cmd_data = json.load(f)
                 
-                # Delete command after processing
+                # Delete command immediately
                 os.remove(cmd_path)
                 
                 cmd = cmd_data.get("command")
@@ -696,7 +694,7 @@ class TradingBot:
                     TAKE_PROFIT_PERCENT = cmd_data.get("tp", TAKE_PROFIT_PERCENT)
                     STOP_LOSS_PERCENT = cmd_data.get("sl", STOP_LOSS_PERCENT)
                     MAX_POSITION_SIZE = 5.0 * cmd_data.get("leverage", 1)
-                    await self.run_cycle() # Run immediately
+                    await self.run_cycle() # Run cycle immediately
                 elif cmd == "start_single":
                     symbol = cmd_data.get("symbol")
                     logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")

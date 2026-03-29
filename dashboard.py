@@ -264,7 +264,6 @@ for symbol in assets:
     df['fractal_bullish'] = 0
     df['fractal_bearish'] = 0
 
-    # ... existing code for fractal calculation ...
     for i in range(window, len(df) - window):
         if all(df['low'].iloc[i] < df['low'].iloc[i - j] for j in range(1, window + 1)) and \
            all(df['low'].iloc[i] < df['low'].iloc[i + j] for j in range(1, window + 1)):
@@ -337,9 +336,6 @@ if metadata:
 
     with st.expander("📊 Model Performance Details"):
         st.json(metadata.get('performance', {}))
-
-    with st.expander("📈 Feature Importance (Top 10)"):
-        st.info("Feature importance from XGBoost component")
 else:
     st.warning("Model not loaded. Train models first.")
 
@@ -353,14 +349,14 @@ api_key = os.getenv("OPENROUTER_API_KEY")
 
 col_ctrl1, col_ctrl2 = st.columns(2)
 with col_ctrl1:
-    if st.button("🚀 Start AI Trading (All Pairs)", use_container_width=True):
-        st.success("AI Trading command sent to bot! Processing all symbols...")
+    if st.button("🚀 Запустить торговлю (Все пары)", use_container_width=True):
+        st.success("Команда отправлена!")
         with open("data/bot_command.json", "w") as f:
             json.dump({"command": "start_all", "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
 
 with col_ctrl2:
-    if st.button("🛑 Stop AI Trading", use_container_width=True):
-        st.warning("Stop command sent. Bot will finish current cycle.")
+    if st.button("🛑 Остановить всё", use_container_width=True):
+        st.warning("Остановка...")
         with open("data/bot_command.json", "w") as f:
             json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
 
@@ -374,12 +370,12 @@ for symbol in assets:
         pos = portfolio['positions'][symbol]
         st.info(f"📍 Active Position: {pos['side'].upper()} | Entry: {pos['entry_price']:.5f}")
 
-    if st.button(f"Generate New Analysis for {symbol}", key=f"deepseek_{symbol}"):
+    if st.button(f"Сделать новый анализ {symbol}", key=f"deepseek_{symbol}"):
         if not api_key:
             st.error("API Key not found!")
             continue
             
-        with st.spinner(f"DeepSeek analyzing {symbol}..."):
+        with st.spinner(f"DeepSeek анализирует {symbol}..."):
             try:
                 import openai
                 client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
@@ -388,37 +384,33 @@ for symbol in assets:
                 if df_analysis is not None:
                     latest = df_analysis.iloc[-1]
                     
-                    # СТРОГИЙ КРАТКИЙ ПРОМПТ
                     prompt = f"""
-                    Analyze {symbol}. Current Price: {latest['close']:.5f}.
-                    ML Strategy: Alligator + Fractals.
-                    TP: {manual_tp}%, SL: {manual_sl}%, Leverage: {leverage}x.
+                    Проанализируй {symbol}. Цена: {latest['close']:.5f}.
+                    Стратегия: Alligator + Fractals.
+                    TP: {manual_tp}%, SL: {manual_sl}%, Плечо: {leverage}x.
                     
-                    TASK:
-                    Return ONLY a concise prediction in Russian:
+                    ОТВЕТЬ СТРОГО НА РУССКОМ (макс 30 слов):
                     1. ПРОГНОЗ: [ВВЕРХ/ВНИЗ/ФЛЕТ]
-                    2. ВЕРОЯТНОСТЬ: [0-100]% (на основе ML и индикаторов)
+                    2. ВЕРОЯТНОСТЬ: [0-100]%
                     3. РЕКОМЕНДАЦИЯ: [ТОРГОВАТЬ/ЖДАТЬ]
-                    4. ПРИЧИНА: [Одно короткое предложение]
+                    4. ПРИЧИНА: [Короткое пояснение по Alligator]
                     """
                     
                     response = client.chat.completions.create(
                         model="deepseek/deepseek-chat",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.3,
-                        max_tokens=200
+                        max_tokens=150
                     )
                     
-                    st.success(f"Analysis for {symbol} updated!")
-                    st.markdown(f"### 🎯 Результат анализа {symbol}")
+                    st.success(f"Анализ для {symbol} готов!")
                     st.info(response.choices[0].message.content)
                 else:
-                    st.error(f"No data for {symbol}")
+                    st.error(f"Нет данных для {symbol}")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Ошибка AI: {e}")
     
-    # Move trade button outside analysis check to be always available
-    if st.button(f"🚀 Trade {symbol} ONLY", key=f"trade_single_{symbol}"):
+    if st.button(f"🚀 Торговать {symbol}", key=f"trade_single_{symbol}"):
         with open("data/bot_command.json", "w") as f:
             json.dump({
                 "command": "start_single", 
@@ -428,6 +420,6 @@ for symbol in assets:
                 "leverage": leverage, 
                 "time": str(datetime.now())
             }, f)
-        st.success(f"Command to trade {symbol} sent!")
+        st.success(f"Команда на торговлю {symbol} отправлена!")
     st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
