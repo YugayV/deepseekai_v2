@@ -9,92 +9,37 @@ import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import time
-import json
-import asyncio
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import talib
-import joblib
-from datetime import datetime
-from dotenv import load_dotenv
-import openai
-
-load_dotenv()
 
 # ============================================
-# CONFIGURATION
+# HEALTH CHECK SERVER (Start immediately for Railway)
 # ============================================
-RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 PORT = int(os.getenv("PORT", 8000))
 
-# Assets
-FOREX_SYMBOLS = os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(',')
-CRYPTO_SYMBOLS = os.getenv("CRYPTO_SYMBOLS", "").split(',') if os.getenv("CRYPTO_SYMBOLS") else []
-ALL_SYMBOLS = FOREX_SYMBOLS + CRYPTO_SYMBOLS
-
-# Trading
-PAPER_CAPITAL = float(os.getenv("PAPER_START_CAPITAL", 10000))
-MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 5.0))
-STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
-TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
-
-# API Keys
-DEEPSEEK_API_KEY = os.getenv("OPENROUTER_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", TELEGRAM_CHAT_ID)
-
-# Exchange Keys (Real Trading)
-EXCHANGE_ID = os.getenv("EXCHANGE_ID", "bybit") # bybit or binance
-EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
-EXCHANGE_API_SECRET = os.getenv("EXCHANGE_API_SECRET")
-TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower() # demo or real
-
-# Paths
-MODEL_PATH = "models/voting_ensemble.pkl"
-SCALER_PATH = "models/feature_scaler.pkl"
-METADATA_PATH = "models/model_metadata.json"
-DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
-PORTFOLIO_PATH = os.path.join(DATA_DIR, "portfolio_state.json")
-TRADES_PATH = os.path.join(DATA_DIR, "trade_history.csv")
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Create data directory
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs("models", exist_ok=True)
-
-
-# ============================================
-# HEALTH CHECK SERVER (for Railway)
-# ============================================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
     def log_message(self, format, *args): return
 
 def start_health_server():
     try:
         server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        logger.info(f"✅ Health check server started on port {PORT}")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        print(f"✅ Health check server started on port {PORT}")
     except Exception as e:
-        logger.error(f"❌ Failed to start health server: {e}")
+        print(f"❌ Failed to start health server: {e}")
 
-if RAILWAY:
+if os.getenv("RAILWAY", "false").lower() == "true":
     start_health_server()
+
+# Now import heavy libraries
+import json
+import asyncio
+import pandas as pd
+# ... (rest of imports)
 
 
 # ============================================
