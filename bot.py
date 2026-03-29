@@ -45,6 +45,12 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", TELEGRAM_CHAT_ID)
 
+# WhatsApp (Twilio)
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886") # Twilio Sandbox number
+WHATSAPP_TO = os.getenv("WHATSAPP_TO") # Your WhatsApp number or Group ID
+
 # Exchange Keys (Real Trading)
 EXCHANGE_ID = os.getenv("EXCHANGE_ID", "bybit") # bybit or binance
 EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
@@ -96,18 +102,29 @@ if RAILWAY:
 
 
 # ============================================
-# TELEGRAM NOTIFIER (with group support)
+# MULTI-CHANNEL NOTIFIER (Telegram + WhatsApp)
 # ============================================
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
-class TelegramNotifier:
+class MultiChannelNotifier:
     def __init__(self, token=None, group_id=None, admin_chat_id=None):
         self.bot_token = token
         self.group_id = group_id
         self.admin_chat_id = admin_chat_id
         self.application = None
         self.bot = None
+        
+        # Twilio setup
+        self.whatsapp_enabled = all([TWILIO_SID, TWILIO_AUTH_TOKEN, WHATSAPP_TO])
+        if self.whatsapp_enabled:
+            try:
+                from twilio.rest import Client
+                self.twilio_client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
+                logger.info("✅ WhatsApp (Twilio) notifications enabled")
+            except Exception as e:
+                logger.error(f"❌ Failed to init Twilio: {e}")
+                self.whatsapp_enabled = False
 
     async def initialize(self):
         if self.bot_token:
@@ -212,33 +229,35 @@ class TelegramNotifier:
         elif data == 'main_menu':
             await self._cmd_start(update, context)
 
-    async def send_message(self, text, chat_id=None):
-        if not self.bot: return
-        target_chat = chat_id or self.group_id
-        if not target_chat: return
-        try:
-            await self.bot.send_message(chat_id=target_chat, text=text, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Telegram send error: {e}")
-# ... existing code ...
-        """Send message to the specified chat"""
-        if not self.bot:
-            return
-        
-        # If chat_id is not specified, use the group
-        target_chat = chat_id or self.group_id
-        if not target_chat:
-            return
-            
-        try:
-            await self.bot.send_message(
-                chat_id=target_chat,
-                text=text,
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            logger.error(f"Telegram send error to {target_chat}: {e}")
+    async def send_message(self, text, chat_id=None, send_whatsapp=True):
+        """Send message to Telegram and optionally WhatsApp"""
+        # 1. Send to Telegram
+        if self.bot:
+            target_chat = chat_id or self.group_id
+            if target_chat:
+                try:
+                    await self.bot.send_message(
+                        chat_id=target_chat,
+                        text=text,
+                        parse_mode='Markdown',
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    logger.error(f"Telegram send error: {e}")
+
+        # 2. Send to WhatsApp (if enabled and requested)
+        if send_whatsapp and self.whatsapp_enabled:
+            try:
+                # Clean markdown for WhatsApp (it supports basic *bold* and _italic_)
+                clean_text = text.replace('*', '*').replace('_', '_').replace('`', '')
+                self.twilio_client.messages.create(
+                    body=clean_text,
+                    from_=TWILIO_WHATSAPP_FROM,
+                    to=f"whatsapp:{WHATSAPP_TO}"
+                )
+                logger.info("✅ WhatsApp signal sent")
+            except Exception as e:
+                logger.error(f"WhatsApp send error: {e}")
 
     async def send_signal(self, signal_type, data):
         """Send a simplified signal"""
@@ -714,8 +733,8 @@ class TradingBot:
         else:
             self.engine = PaperTradingEngine()
         
-        # Telegram: group chat for signals, private for errors
-        self.notifier = TelegramNotifier(
+        # Multi-channel: group chat for signals, private for errors
+        self.notifier = MultiChannelNotifier(
             token=TELEGRAM_TOKEN,
             group_id=os.getenv("TELEGRAM_GROUP_ID"),      # Group ID
             admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")   # Your personal ID
