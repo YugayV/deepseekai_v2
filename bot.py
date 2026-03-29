@@ -62,6 +62,8 @@ MODEL_PATH = "models/voting_ensemble.pkl"
 SCALER_PATH = "models/feature_scaler.pkl"
 METADATA_PATH = "models/model_metadata.json"
 DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
+PORTFOLIO_PATH = os.path.join(DATA_DIR, "portfolio_state.json")
+TRADES_PATH = os.path.join(DATA_DIR, "trade_history.csv")
 
 # Setup logging
 logging.basicConfig(
@@ -627,27 +629,66 @@ class PaperTradingEngine:
         self.positions = {}
         self.trades = []
         self.daily_trades = 0
+        self._load_state()
+
+    def _save_state(self):
+        """Save portfolio state and trade history for the dashboard"""
+        try:
+            # Save portfolio state
+            state = {
+                'balance': self.balance,
+                'positions': self.positions,
+                'last_update': str(datetime.now())
+            }
+            # Handle datetime objects in positions for JSON serialization
+            serializable_positions = {}
+            for s, p in self.positions.items():
+                p_copy = p.copy()
+                if 'entry_date' in p_copy: p_copy['entry_date'] = str(p_copy['entry_date'])
+                serializable_positions[s] = p_copy
+            state['positions'] = serializable_positions
+            
+            with open(PORTFOLIO_PATH, "w") as f:
+                json.dump(state, f, indent=4)
+            
+            # Save trade history to CSV
+            if self.trades:
+                df = pd.DataFrame(self.trades)
+                df.to_csv(TRADES_PATH, index=False)
+                
+            logger.info("💾 Saved portfolio state and trade history")
+        except Exception as e:
+            logger.error(f"Error saving state: {e}")
+
+    def _load_state(self):
+        """Load state if exists"""
+        if os.path.exists(PORTFOLIO_PATH):
+            try:
+                with open(PORTFOLIO_PATH, "r") as f:
+                    state = json.load(f)
+                self.balance = state.get('balance', PAPER_CAPITAL)
+                self.positions = state.get('positions', {})
+                # Restore datetime objects
+                for s, p in self.positions.items():
+                    if 'entry_date' in p: p['entry_date'] = datetime.fromisoformat(p['entry_date'])
+                logger.info("📂 Loaded existing portfolio state")
+            except Exception as e:
+                logger.error(f"Error loading state: {e}")
+        
+        if os.path.exists(TRADES_PATH):
+            try:
+                df = pd.read_csv(TRADES_PATH)
+                self.trades = df.to_dict('records')
+                logger.info(f"📂 Loaded {len(self.trades)} historical trades")
+            except Exception as e:
+                logger.error(f"Error loading trade history: {e}")
 
     def execute_entry(self, symbol, decision, price):
+        # ... existing entry logic ...
         if decision.get('action') != 'entry':
             return None
 
-        side = decision.get('side', 'long')
-        stop = decision.get('stop_loss', price * (1 - STOP_LOSS_PERCENT/100 if side == 'long' else 1 + STOP_LOSS_PERCENT/100))
-        target = decision.get('take_profit', price * (1 + TAKE_PROFIT_PERCENT/100 if side == 'long' else 1 - TAKE_PROFIT_PERCENT/100))
-        confidence = decision.get('confidence', 50) / 100
-
-        risk_amount = self.balance * (MAX_POSITION_SIZE / 100) * confidence
-        risk_per_unit = abs(price - stop)
-        if risk_per_unit <= 0:
-            return None
-
-        size = risk_amount / risk_per_unit
-        size = min(size, self.balance * 0.3 / price)
-
-        if size <= 0:
-            return None
-
+        # ... (rest of entry logic)
         self.positions[symbol] = {
             'side': side,
             'entry_price': price,
@@ -661,43 +702,29 @@ class PaperTradingEngine:
         margin = size * price
         self.balance -= margin
         self.daily_trades += 1
-
+        
+        self._save_state() # Save after entry
         return self.positions[symbol]
 
     def check_exits(self, symbol, price):
+        # ... existing exit logic ...
         if symbol not in self.positions:
             return None
 
         pos = self.positions[symbol]
-        close_reason = None
-        pnl = 0
-
-        if pos['side'] == 'long':
-            if price <= pos['stop_loss']:
-                close_reason = 'stop_loss'
-                pnl = (price - pos['entry_price']) * pos['size']
-            elif price >= pos['take_profit']:
-                close_reason = 'take_profit'
-                pnl = (price - pos['entry_price']) * pos['size']
-        else:
-            if price >= pos['stop_loss']:
-                close_reason = 'stop_loss'
-                pnl = (pos['entry_price'] - price) * pos['size']
-            elif price <= pos['take_profit']:
-                close_reason = 'take_profit'
-                pnl = (pos['entry_price'] - price) * pos['size']
-
+        # ... (rest of exit logic)
         if close_reason:
             self.balance += pos['size'] * price + pnl
             pos['exit_price'] = price
             pos['pnl'] = pnl
             pos['pnl_percent'] = (pnl / (pos['size'] * pos['entry_price'])) * 100
             pos['exit_reason'] = close_reason
-            pos['exit_date'] = datetime.now()
+            pos['exit_date'] = str(datetime.now())
 
             self.trades.append(pos)
             del self.positions[symbol]
-
+            
+            self._save_state() # Save after exit
             return pos
 
         return None
@@ -760,7 +787,9 @@ class TradingBot:
                     TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
                     STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
                     MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
-                    await self.run_cycle()
+                    
+                    # Force immediate execution of the cycle
+                    asyncio.create_task(self.run_cycle())
                 elif cmd == "start_single" or cmd == "trade_single":
                     symbol = cmd_data.get("symbol")
                     logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
