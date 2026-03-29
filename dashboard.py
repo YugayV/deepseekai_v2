@@ -33,6 +33,32 @@ assets = st.sidebar.multiselect(
     default=["EURUSD=X"]
 )
 
+# Trading Mode
+st.sidebar.subheader("🔌 Trading Mode")
+trading_mode = st.sidebar.radio("Select Mode", ["Demo (Paper)", "Real (API)"], index=0)
+is_real = trading_mode == "Real (API)"
+
+if is_real:
+    exchange_id = st.sidebar.selectbox("Exchange", ["bybit", "binance"], index=0)
+    api_key_input = st.sidebar.text_input("API Key", type="password")
+    api_secret_input = st.sidebar.text_input("API Secret", type="password")
+    if st.sidebar.button("💾 Save API Config"):
+        with open("data/bot_command.json", "w") as f:
+            json.dump({
+                "command": "update_api",
+                "mode": "real",
+                "exchange": exchange_id,
+                "key": api_key_input,
+                "secret": api_secret_input,
+                "time": str(datetime.now())
+            }, f)
+        st.sidebar.success("API Config saved!")
+else:
+    if st.sidebar.button("🔄 Reset to Demo"):
+        with open("data/bot_command.json", "w") as f:
+            json.dump({"command": "update_api", "mode": "demo", "time": str(datetime.now())}, f)
+        st.sidebar.info("Switched to Demo")
+
 # Risk Settings
 st.sidebar.subheader("🛡️ Risk Management")
 manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 4.0, 0.5)
@@ -363,19 +389,21 @@ for symbol in assets:
                 if df_analysis is not None:
                     latest = df_analysis.iloc[-1]
                     
-                    # More detailed prompt to ensure variety
+                    # More detailed prompt based on ML predictions
                     prompt = f"""
-                    Technical Analysis for {symbol} ({timeframe}).
+                    Analyze {symbol} as a Quant Trader.
                     Current Price: {latest['close']:.5f}
-                    Last 5 closes: {list(df_analysis['close'].tail(5).values)}
-                    Leverage set: {leverage}x
                     
-                    Provide a concise analysis including:
-                    1. Market Trend & Sentiment
-                    2. RSI and Volume interpretation
-                    3. Specific Entry/SL/TP levels (User wants TP around {manual_tp}% and SL around {manual_sl}%)
-                    4. Recommendation on Leverage (Is {leverage}x safe?)
-                    5. Risk rating (1-10)
+                    ML CONTEXT (from Notebook logic):
+                    The model uses a Voting Ensemble (XGBoost, RF, GB) with Alligator + Fractals.
+                    User wants TP: {manual_tp}% and SL: {manual_sl}%.
+                    Leverage set to {leverage}x.
+                    
+                    TASK:
+                    1. Explain the market movement based on Alligator lines (Jaw, Teeth, Lips).
+                    2. Explain how the ML model interprets recent fractals for this {symbol}.
+                    3. Give a clear verdict: Strong Buy / Buy / Neutral / Sell / Strong Sell.
+                    4. Comment on the {leverage}x leverage safety for current volatility.
                     """
                     
                     response = client.chat.completions.create(

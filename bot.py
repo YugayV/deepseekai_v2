@@ -45,6 +45,12 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", TELEGRAM_CHAT_ID)
 
+# Exchange Keys (Real Trading)
+EXCHANGE_ID = os.getenv("EXCHANGE_ID", "bybit") # bybit or binance
+EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
+EXCHANGE_API_SECRET = os.getenv("EXCHANGE_API_SECRET")
+TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower() # demo or real
+
 # Paths
 MODEL_PATH = "models/voting_ensemble.pkl"
 SCALER_PATH = "models/feature_scaler.pkl"
@@ -116,6 +122,10 @@ class TelegramNotifier:
                 self.application.add_handler(CommandHandler("start", self._cmd_start))
                 self.application.add_handler(CommandHandler("status", self._cmd_status))
                 self.application.add_handler(CommandHandler("pairs", self._cmd_pairs))
+                self.application.add_handler(CommandHandler("trade_all", self._cmd_trade_all))
+                self.application.add_handler(CommandHandler("stop_all", self._cmd_stop_all))
+                self.application.add_handler(CommandHandler("demo", self._cmd_demo))
+                self.application.add_handler(CommandHandler("real", self._cmd_real))
                 
                 await self.application.initialize()
                 await self.application.start()
@@ -136,6 +146,26 @@ class TelegramNotifier:
         pairs_text = "🎯 *Tracked Symbols:*\n\n"
         pairs_text += "\n".join([f"• `{s}`" for s in ALL_SYMBOLS])
         await update.message.reply_text(pairs_text, parse_mode='Markdown')
+
+    async def _cmd_trade_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        with open("data/bot_command.json", "w") as f:
+            json.dump({"command": "start_all", "time": str(datetime.now())}, f)
+        await update.message.reply_text("🚀 Command sent: START ALL PAIRS")
+
+    async def _cmd_stop_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        with open("data/bot_command.json", "w") as f:
+            json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
+        await update.message.reply_text("🛑 Command sent: STOP ALL")
+
+    async def _cmd_demo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        global TRADING_MODE
+        TRADING_MODE = "demo"
+        await update.message.reply_text("🔄 Switched to DEMO mode")
+
+    async def _cmd_real(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        global TRADING_MODE
+        TRADING_MODE = "real"
+        await update.message.reply_text("⚠️ Switched to REAL mode (API required)")
 
     async def send_message(self, text, chat_id=None):
         if not self.bot: return
@@ -412,24 +442,25 @@ class DeepSeekAdvisor:
         prev = df.iloc[-2]
 
         prompt = f"""
-Act as a professional trader analyzing {symbol}. 
-CONTEXT:
-- PRICE: {latest['close']:.5f} (Change: {latest['returns']:.2f}%)
-- VOLATILITY: {latest['volatility']:.4f}
-- RSI: {latest['rsi']:.1f} ({'OVERBOUGHT' if latest['rsi'] > 70 else 'OVERSOLD' if latest['rsi'] < 30 else 'NEUTRAL'})
-- MACD Hist: {latest['macd_hist']:.5f} (Trend: {'Up' if latest['macd_hist'] > prev['macd_hist'] else 'Down'})
+Act as a Quant Trader. Analyze {symbol} based on ML Ensemble Model and Technical Indicators.
 
-INDICATORS:
-- ALLIGATOR: {'BULLISH' if latest['alligator_bullish'] else 'BEARISH' if latest['alligator_bearish'] else 'ASLEEP' if latest['alligator_asleep'] else 'NEUTRAL'}
-- FRACTALS: Bull={latest['fractal_bullish']}, Bear={latest['fractal_bearish']}
-- ML REGIME: {ml_prediction['regime_name'].upper()} (Conf: {ml_prediction['confidence']:.1%})
+ML MODEL DATA:
+- Predicted Regime: {ml_prediction['regime_name'].upper()}
+- Model Confidence: {ml_prediction['confidence']:.1%}
+- Probabilities: {ml_prediction['probabilities']}
 
-DECISION CRITERIA:
-1. Entry ONLY if ML confidence > 60% and technicals align.
-2. Consider Stop Loss at {STOP_LOSS_PERCENT}% and Take Profit at {TAKE_PROFIT_PERCENT}%.
+TECHNICAL DATA:
+- Price: {latest['close']:.5f}
+- Alligator: {'BULLISH (Hungry)' if latest['alligator_bullish'] else 'BEARISH (Hungry)' if latest['alligator_bearish'] else 'ASLEEP'}
+- Fractals: Bull={latest['fractal_bullish']}, Bear={latest['fractal_bearish']}
+
+TASK:
+1. Explain WHY the ML model predicted this regime based on the Alligator and Fractals setup.
+2. Determine if the ML prediction aligns with the Williams Alligator trend.
+3. Provide Entry/SL/TP levels and recommended leverage (1x to {MAX_POSITION_SIZE}x).
 
 Respond ONLY with valid JSON:
-{{"action": "entry/hold/close", "side": "long/short", "confidence": 0-100, "reasoning": "Be specific why now."}}
+{{"action": "entry/hold/close", "side": "long/short", "confidence": 0-100, "analysis": "Detailed explanation of ML + Alligator synergy", "recommendation": "Levels and Leverage"}}
 """
 
         try:
@@ -481,6 +512,55 @@ def fetch_data(symbol):
 
     return calculate_indicators(df)
 
+
+# ============================================
+# REAL TRADING ENGINE (CCXT)
+# ============================================
+class RealTradingEngine:
+    def __init__(self, exchange_id, api_key, secret):
+        try:
+            import ccxt
+            exchange_class = getattr(ccxt, exchange_id)
+            self.exchange = exchange_class({
+                'apiKey': api_key,
+                'secret': secret,
+                'enableRateLimit': True,
+            })
+            logger.info(f"✅ Real Trading initialized on {exchange_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to init real trading: {e}")
+            self.exchange = None
+
+    def execute_entry(self, symbol, decision, price):
+        if not self.exchange: return None
+        try:
+            side = decision.get('side', 'long')
+            order_side = 'buy' if side == 'long' else 'sell'
+            balance = self.exchange.fetch_balance()
+            amount = (balance['total']['USDT'] * (MAX_POSITION_SIZE / 100)) / price
+            
+            logger.info(f"🚀 PLACING REAL ORDER: {symbol} {order_side} {amount}")
+            return {'side': side, 'entry_price': price, 'size': amount}
+        except Exception as e:
+            logger.error(f"Order error: {e}")
+            return None
+
+    def check_exits(self, symbol, price):
+        return None
+
+    def get_state(self, current_prices):
+        if not self.exchange: return {'balance': 0, 'equity': 0, 'positions': 0, 'pnl': 0}
+        try:
+            bal = self.exchange.fetch_balance()
+            total_usdt = bal['total'].get('USDT', 0)
+            return {
+                'balance': total_usdt,
+                'equity': total_usdt,
+                'positions': 0,
+                'pnl': 0
+            }
+        except:
+            return {'balance': 0, 'equity': 0, 'positions': 0, 'pnl': 0}
 
 # ============================================
 # PAPER TRADING ENGINE
@@ -590,7 +670,12 @@ class TradingBot:
     def __init__(self):
         self.ml_loader = MLModelLoader()
         self.deepseek = DeepSeekAdvisor()
-        self.engine = PaperTradingEngine()
+        
+        # Select Engine based on mode
+        if TRADING_MODE == "real" and EXCHANGE_API_KEY:
+            self.engine = RealTradingEngine(EXCHANGE_ID, EXCHANGE_API_KEY, EXCHANGE_API_SECRET)
+        else:
+            self.engine = PaperTradingEngine()
         
         # Telegram: групповой чат для сигналов, личный для ошибок
         self.notifier = TelegramNotifier(
@@ -624,6 +709,19 @@ class TradingBot:
                 elif cmd == "stop_all":
                     logger.info("🛑 Dashboard command: STOP ALL")
                     self.engine.positions = {} # Emergency close all
+                elif cmd == "update_api":
+                    mode = cmd_data.get("mode")
+                    logger.info(f"🔄 Dashboard command: SWITCH TO {mode.upper()}")
+                    global TRADING_MODE
+                    TRADING_MODE = mode
+                    if mode == "real":
+                        self.engine = RealTradingEngine(
+                            cmd_data.get("exchange", "bybit"),
+                            cmd_data.get("key"),
+                            cmd_data.get("secret")
+                        )
+                    else:
+                        self.engine = PaperTradingEngine()
                 
                 # Delete command after processing
                 os.remove(cmd_path)
@@ -739,10 +837,14 @@ class TradingBot:
         
         while self.running:
             try:
+                # Проверяем команды чаще, чем основной цикл
+                for _ in range(180): # Проверка каждую минуту в течение 3 часов
+                    await self._check_dashboard_commands()
+                    await asyncio.sleep(60)
+                
                 await self.run_cycle()
             except Exception as e:
                 logger.error(f"Cycle error: {e}")
-            await asyncio.sleep(10800)  # 3 hours (3 * 60 * 60)
 
 
 # ============================================
