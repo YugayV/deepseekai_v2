@@ -5,22 +5,10 @@ Optimized models with Alligator + Fractals
 """
 
 import os
-import json
-import asyncio
 import logging
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import talib
-import joblib
-from datetime import datetime
-from dotenv import load_dotenv
-import openai
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import time
-
-load_dotenv()
 
 # ============================================
 # CONFIGURATION
@@ -66,25 +54,26 @@ os.makedirs("models", exist_ok=True)
 # ============================================
 # HEALTH CHECK SERVER (for Railway)
 # ============================================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def log_message(self, format, *args): return
+
+def start_health_server():
+    try:
+        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        logger.info(f"✅ Health check server started on port {PORT}")
+    except Exception as e:
+        logger.error(f"❌ Failed to start health server: {e}")
+
 if RAILWAY:
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health':
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'OK')
-            else:
-                self.send_response(404)
-                self.end_headers()
-
-    def start_health_server():
-        try:
-            server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            logger.info(f"✅ Health check server started on port {PORT}")
-        except Exception as e:
-            logger.error(f"❌ Failed to start health server: {e}")
-
     start_health_server()
 
 
@@ -686,15 +675,35 @@ class TradingBot:
 # ENTRY POINT
 # ============================================
 async def main():
-    bot = TradingBot()
-    await bot.run()
+    import json
+    import asyncio
+    import pandas as pd
+    import numpy as np
+    import yfinance as yf
+    import talib
+    import joblib
+    from datetime import datetime
+    from dotenv import load_dotenv
+    import openai
+
+    load_dotenv()
+
+    try:
+        bot = TradingBot()
+        await bot.run()
+    except Exception as e:
+        logger.error(f"FATAL ERROR DURING BOT RUN: {e}")
+        if RAILWAY:
+            logger.info("Keeping process alive for health check...")
+            while True:
+                await asyncio.sleep(10)
 
 if __name__ == "__main__":
+    import asyncio
     try:
         asyncio.run(main())
     except Exception as e:
         logger.error(f"FATAL ERROR: {e}")
-        if RAILWAY:
-            logger.info("Keeping process alive for health check...")
+        if os.getenv("RAILWAY", "false").lower() == "true":
             while True:
                 time.sleep(10)
