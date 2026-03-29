@@ -920,31 +920,35 @@ class TradingBot:
         await self._send_startup()
         
         last_summary_time = time.time()
+        last_cycle_time = 0
         self.force_cycle = False
         
-        logger.info("🤖 Bot is now running and waiting for commands...")
+        logger.info("📡 Bot is active and waiting for dashboard commands...")
         
         while self.running:
             try:
-                # Check for dashboard commands more frequently
-                for _ in range(60): # 10 minutes wait total (60 * 10s)
-                    await self._check_dashboard_commands()
-                    
-                    if getattr(self, 'force_cycle', False):
-                        self.force_cycle = False
-                        logger.info("⚡ Forced cycle triggered by command")
-                        await self.run_cycle()
-                    
-                    # Auto Summary every 12 hours
-                    if time.time() - last_summary_time > 12 * 3600:
-                        logger.info("🕒 Sending scheduled 12-hour summary...")
-                        await self.send_portfolio_summary()
-                        last_summary_time = time.time()
-                        
-                    await asyncio.sleep(10)
+                # 1. Check for commands from dashboard
+                await self._check_dashboard_commands()
                 
-                # Standard scheduled cycle every 10 minutes (based on loop above)
-                await self.run_cycle()
+                current_time = time.time()
+                
+                # 2. Check if it's time for a scheduled trading cycle (every 10 mins) or forced
+                if (current_time - last_cycle_time > 600) or getattr(self, 'force_cycle', False):
+                    if getattr(self, 'force_cycle', False):
+                        logger.info("⚡ Forced cycle triggered by command")
+                        self.force_cycle = False
+                    
+                    await self.run_cycle()
+                    last_cycle_time = current_time
+                
+                # 3. Check if it's time for 12-hour summary
+                if current_time - last_summary_time > 12 * 3600:
+                    logger.info("🕒 Sending scheduled 12-hour summary...")
+                    await self.send_portfolio_summary()
+                    last_summary_time = current_time
+                
+                # Frequent polling for commands (every 2 seconds)
+                await asyncio.sleep(2)
                 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
