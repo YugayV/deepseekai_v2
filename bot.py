@@ -40,11 +40,31 @@ def start_health_server():
 if os.getenv("RAILWAY") or os.getenv("PORT"):
     start_health_server()
 
-# Now import heavy libraries
-import json
-import asyncio
-import pandas as pd
-# ... (rest of imports)
+# Now import heavy libraries with safety
+try:
+    import json
+    import asyncio
+    import pandas as pd
+    import numpy as np
+    import yfinance as yf
+    import talib
+    import joblib
+    from datetime import datetime
+    from dotenv import load_dotenv
+    import openai
+    
+    # Flag to indicate imports were successful
+    IMPORTS_OK = True
+except Exception as e:
+    print(f"❌ CRITICAL IMPORT ERROR: {e}")
+    IMPORTS_OK = False
+
+if not IMPORTS_OK:
+    print("Keeping process alive for health check...")
+    while True:
+        time.sleep(10)
+
+load_dotenv()
 
 
 # ============================================
@@ -963,10 +983,15 @@ async def main():
                 await asyncio.sleep(10)
 
 if __name__ == "__main__":
+    if not IMPORTS_OK:
+        print("🚨 BOT CANNOT START DUE TO IMPORT ERRORS. Keeping process alive for health check...")
+        while True:
+            time.sleep(60)
+            
     try:
         asyncio.run(main())
     except Exception as e:
-        logger.error(f"FATAL ERROR: {e}")
+        print(f"FATAL ERROR: {e}")
         if os.getenv("RAILWAY", "false").lower() == "true":
             while True:
                 time.sleep(10)
