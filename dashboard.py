@@ -112,21 +112,25 @@ def load_models():
         st.error(f"Model load error: {e}")
         return None, None, None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=5) # Reduced TTL for faster updates
 def load_portfolio():
     try:
-        with open("data/portfolio_state.json", "r") as f:
-            return json.load(f)
-    except:
-        return None
+        if os.path.exists("data/portfolio_state.json"):
+            with open("data/portfolio_state.json", "r") as f:
+                return json.load(f)
+    except Exception as e:
+        st.error(f"Error loading portfolio: {e}")
+    return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=5)
 def load_trades():
     try:
-        df = pd.read_csv("data/trade_history.csv")
-        return df
-    except:
-        return pd.DataFrame()
+        if os.path.exists("data/trade_history.csv"):
+            df = pd.read_csv("data/trade_history.csv")
+            return df
+    except Exception as e:
+        st.error(f"Error loading trades: {e}")
+    return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def fetch_asset_data(symbol, period="3mo", interval="1d"):
@@ -150,38 +154,36 @@ st.subheader("📊 Portfolio Overview")
 col1, col2, col3, col4, col5 = st.columns(5)
 
 if portfolio:
-    balance = portfolio.get('balance', 0)
-    equity = portfolio.get('equity', 0)
-    pnl = (equity - 10000) / 10000 * 100
+    balance = portfolio.get('balance', 10000.0)
+    equity = portfolio.get('equity', balance)
+    pnl_pct = ((equity - 10000.0) / 10000.0) * 100
     positions = portfolio.get('positions', {})
 
     col1.metric("💰 Balance", f"${balance:.2f}")
     col2.metric("📈 Equity", f"${equity:.2f}")
-    col3.metric("📊 PnL", f"{pnl:.2f}%", delta=f"{pnl:.2f}%")
-    col4.metric("🎯 Positions", len(positions))
-    col5.metric("💹 Trades", len(trades) if not trades.empty else 0)
+    col3.metric("📊 Total PnL", f"{pnl_pct:+.2f}%")
+    col4.metric("🎯 Active Positions", len(positions))
+    col5.metric("💹 Total Trades", len(trades) if not trades.empty else 0)
 
     # Detailed Portfolio View
-    if st.button("📂 Show Detailed Portfolio / Positions"):
-        st.markdown("### 🎯 Active Positions")
-        if not positions:
-            st.info("No active positions.")
-        else:
-            for symbol, pos in positions.items():
-                with st.container():
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.write(f"**{symbol}**")
-                    c2.write(f"Side: {pos['side'].upper()}")
-                    c3.write(f"Entry: {pos['entry_price']:.5f}")
-                    c4.write(f"Size: {pos['size']:.2f}")
-                    st.divider()
+    st.markdown("### 🎯 Active Positions")
+    if not positions:
+        st.info("No active positions.")
+    else:
+        for symbol, pos in positions.items():
+            with st.expander(f"📍 {symbol} - {pos['side'].upper()}", expanded=True):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.write(f"**Entry Price:** {pos['entry_price']:.5f}")
+                c2.write(f"**Size:** {pos['size']:.4f}")
+                c3.write(f"**TP / SL:** {pos.get('take_profit', 0):.5f} / {pos.get('stop_loss', 0):.5f}")
+                c4.write(f"**Date:** {pos.get('entry_date', 'N/A')}")
 else:
-    # ... existing code for no portfolio ...
     col1.metric("💰 Balance", "$10,000")
     col2.metric("📈 Equity", "$10,000")
     col3.metric("📊 PnL", "0.00%")
     col4.metric("🎯 Positions", "0")
     col5.metric("💹 Trades", "0")
+    st.info("Portfolio data not found. Start the bot to generate state.")
 
 st.markdown("---")
 

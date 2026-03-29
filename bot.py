@@ -647,10 +647,11 @@ class PaperTradingEngine:
             # Save portfolio state
             state = {
                 'balance': self.balance,
+                'equity': self.balance, # Initial equity equals balance
                 'positions': self.positions,
                 'last_update': str(datetime.now())
             }
-            # Handle datetime objects in positions for JSON serialization
+            # Handle datetime objects for JSON
             serializable_positions = {}
             for s, p in self.positions.items():
                 p_copy = p.copy()
