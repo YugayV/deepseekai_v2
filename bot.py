@@ -17,24 +17,27 @@ PORT = int(os.getenv("PORT", 8000))
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Respond 200 OK to ANY request to ensure healthcheck passes
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
-        self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(b'OK')
     def log_message(self, format, *args): return
 
 def start_health_server():
-    try:
-        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
-        server.timeout = 5
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        print(f"✅ Health check server ready on port {PORT}")
-    except Exception as e:
-        print(f"❌ Health server failed: {e}")
+    def run_server():
+        try:
+            server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+            print(f"✅ Health check server listening on port {PORT}")
+            server.serve_forever()
+        except Exception as e:
+            print(f"❌ Health server error: {e}")
 
-if os.getenv("RAILWAY", "false").lower() == "true":
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+
+# Start health server immediately
+if os.getenv("RAILWAY") or os.getenv("PORT"):
     start_health_server()
 
 # Now import heavy libraries
@@ -850,7 +853,7 @@ class TradingBot:
                     if position:
                         await self.notifier.send_signal("ENTRY", {
                             'asset': symbol,
-                            'side': decision.get('side', 'long'),
+                            'side': position.get('side', 'long'),
                             'ml_forecast_pct': decision.get('ml_forecast_pct', '0%'),
                             'trade_decision': 'YES',
                             'analysis': decision.get('reasoning_short', '')
