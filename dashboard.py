@@ -29,7 +29,18 @@ DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
 CMD_PATH = os.path.join(DATA_DIR, "bot_command.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ... existing code ...
+# Assets
+st.sidebar.subheader("📊 Assets")
+assets = st.sidebar.multiselect(
+    "Select assets to display",
+    ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD"],
+    default=["EURUSD=X"]
+)
+
+# Trading Mode
+st.sidebar.subheader("🔌 Trading Mode")
+trading_mode = st.sidebar.radio("Select Mode", ["Demo (Paper)", "Real (API)"], index=0)
+is_real = trading_mode == "Real (API)"
 
 if is_real:
     exchange_id = st.sidebar.selectbox("Exchange", ["bybit", "binance"], index=0)
