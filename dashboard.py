@@ -279,54 +279,75 @@ else:
     st.warning("Model not loaded. Train models first.")
 
 # ============================================
-# DEEPSEEK ANALYTICS (Interactive)
+# DEEPSEEK ANALYTICS & CONTROL
 # ============================================
-st.subheader("🧠 DeepSeek Market Analysis")
+st.subheader("🧠 DeepSeek AI Control & Analysis")
 
 # Get API Key
 api_key = os.getenv("OPENROUTER_API_KEY")
 
-for symbol in assets:
-    with st.expander(f"🔮 Get AI Market Analysis for {symbol}", expanded=(len(assets) == 1)):
-        if st.button(f"Analyze {symbol} with DeepSeek", key=f"btn_{symbol}"):
-            if not api_key:
-                st.error("API Key not found! Please set OPENROUTER_API_KEY in .env")
-                continue
-                
-            with st.spinner(f"DeepSeek analyzing {symbol}..."):
-                try:
-                    import openai
-                    client = openai.OpenAI(
-                        api_key=api_key,
-                        base_url="https://openrouter.ai/api/v1"
-                    )
-                    
-                    # Fetch fresh data for analysis
-                    df_analysis = fetch_asset_data(symbol, period="1mo", interval=timeframe)
-                    if df_analysis is not None:
-                        latest = df_analysis.iloc[-1]
-                        
-                        # Prepare prompt
-                        prompt = f"""
-                        Act as a professional trader. Analyze {symbol} ({timeframe}).
-                        Price: {latest['close']:.5f}
-                        Volume: {latest['volume']}
-                        Analyze the current market situation and give a short recommendation.
-                        """
-                        
-                        response = client.chat.completions.create(
-                            model="deepseek/deepseek-chat",
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.5
-                        )
-                        
-                        st.markdown(f"### 📊 Analysis for {symbol}")
-                        st.write(response.choices[0].message.content)
-                        st.success("Analysis completed!")
-                    else:
-                        st.error(f"Could not fetch data for {symbol}")
-                except Exception as e:
-                    st.error(f"DeepSeek Error: {e}")
+col_ctrl1, col_ctrl2 = st.columns(2)
+with col_ctrl1:
+    if st.button("🚀 Start AI Trading (All Pairs)", use_container_width=True):
+        st.success("AI Trading command sent to bot! Processing all symbols...")
+        # Здесь можно создать флаг-файл для бота, если нужно
+        with open("data/bot_command.json", "w") as f:
+            json.dump({"command": "start", "time": str(datetime.now())}, f)
+
+with col_ctrl2:
+    if st.button("🛑 Stop AI Trading", use_container_width=True):
+        st.warning("Stop command sent. Bot will finish current cycle.")
+        with open("data/bot_command.json", "w") as f:
+            json.dump({"command": "stop", "time": str(datetime.now())}, f)
 
 st.markdown("---")
+
+for symbol in assets:
+    st.write(f"### 🔮 AI Analysis for {symbol}")
+    
+    # Show last known signal if exists
+    if portfolio and symbol in portfolio.get('positions', {}):
+        pos = portfolio['positions'][symbol]
+        st.info(f"📍 Active Position: {pos['side'].upper()} | Entry: {pos['entry_price']:.5f}")
+
+    if st.button(f"Generate New Analysis for {symbol}", key=f"deepseek_{symbol}"):
+        if not api_key:
+            st.error("API Key not found!")
+            continue
+            
+        with st.spinner(f"DeepSeek analyzing {symbol}..."):
+            try:
+                import openai
+                client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+                
+                df_analysis = fetch_asset_data(symbol, period="1mo", interval=timeframe)
+                if df_analysis is not None:
+                    latest = df_analysis.iloc[-1]
+                    
+                    # More detailed prompt to ensure variety
+                    prompt = f"""
+                    Technical Analysis for {symbol} ({timeframe}).
+                    Current Price: {latest['close']:.5f}
+                    Last 5 closes: {list(df_analysis['close'].tail(5).values)}
+                    
+                    Provide a concise analysis including:
+                    1. Current trend
+                    2. RSI and Volume interpretation
+                    3. Specific Entry/SL/TP levels
+                    4. Risk rating (1-10)
+                    """
+                    
+                    response = client.chat.completions.create(
+                        model="deepseek/deepseek-chat",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.7 # Higher temperature for more variety
+                    )
+                    
+                    st.success(f"Analysis for {symbol} updated!")
+                    st.markdown(response.choices[0].message.content)
+                else:
+                    st.error(f"No data for {symbol}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+    st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

@@ -9,6 +9,18 @@ import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import time
+import json
+import asyncio
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import talib
+import joblib
+from datetime import datetime
+from dotenv import load_dotenv
+import openai
+
+load_dotenv()
 
 # ============================================
 # CONFIGURATION
@@ -675,19 +687,6 @@ class TradingBot:
 # ENTRY POINT
 # ============================================
 async def main():
-    import json
-    import asyncio
-    import pandas as pd
-    import numpy as np
-    import yfinance as yf
-    import talib
-    import joblib
-    from datetime import datetime
-    from dotenv import load_dotenv
-    import openai
-
-    load_dotenv()
-
     try:
         bot = TradingBot()
         await bot.run()
@@ -699,7 +698,6 @@ async def main():
                 await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    import asyncio
     try:
         asyncio.run(main())
     except Exception as e:
