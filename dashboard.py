@@ -354,13 +354,13 @@ col_ctrl1, col_ctrl2 = st.columns(2)
 with col_ctrl1:
     if st.button("🚀 Start AI Trading (All)", use_container_width=True):
         st.success("Command sent!")
-        with open("data/bot_command.json", "w") as f:
-            json.dump({"command": "start_all", "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
+        with open(CMD_PATH, "w") as f:
+            json.dump({"command": "start_all", "tp": float(manual_tp), "sl": float(manual_sl), "leverage": int(leverage), "time": str(datetime.now())}, f)
 
 with col_ctrl2:
     if st.button("🛑 Stop All", use_container_width=True):
         st.warning("Stopping...")
-        with open("data/bot_command.json", "w") as f:
+        with open(CMD_PATH, "w") as f:
             json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
 
 st.markdown("---")

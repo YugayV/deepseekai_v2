@@ -690,22 +690,26 @@ class PaperTradingEngine:
 
     def execute_entry(self, symbol, decision, price):
         if decision.get('action') != 'entry':
+            logger.info(f"⏳ {symbol}: Action is not 'entry' ({decision.get('action')})")
             return None
 
         side = decision.get('side', 'long')
         stop = decision.get('stop_loss', price * (1 - STOP_LOSS_PERCENT/100 if side == 'long' else 1 + STOP_LOSS_PERCENT/100))
         target = decision.get('take_profit', price * (1 + TAKE_PROFIT_PERCENT/100 if side == 'long' else 1 - TAKE_PROFIT_PERCENT/100))
-        confidence = decision.get('confidence', 50) / 100
+        confidence = float(decision.get('confidence', 50)) / 100
 
         risk_amount = self.balance * (MAX_POSITION_SIZE / 100) * confidence
         risk_per_unit = abs(price - stop)
+        
         if risk_per_unit <= 0:
+            logger.warning(f"❌ {symbol}: Risk per unit is 0 (Price={price}, SL={stop})")
             return None
 
         size = risk_amount / risk_per_unit
-        size = min(size, self.balance * 0.3 / price)
+        size = min(size, self.balance * 0.3 / price) # Max 30% of balance
 
         if size <= 0:
+            logger.warning(f"❌ {symbol}: Calculated size is 0 (Risk={risk_amount}, UnitRisk={risk_per_unit})")
             return None
 
         self.positions[symbol] = {
@@ -722,6 +726,7 @@ class PaperTradingEngine:
         self.balance -= margin
         self.daily_trades += 1
         
+        logger.info(f"🚀 {symbol} ENTRY EXECUTED: {side.upper()} {size:.4f} @ {price:.5f}")
         self._save_state() # Save after entry
         return self.positions[symbol]
 
