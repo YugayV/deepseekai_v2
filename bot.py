@@ -445,13 +445,12 @@ DATA:
 - Alligator: {'Bullish' if latest['alligator_bullish'] else 'Bearish' if latest['alligator_bearish'] else 'Neutral'}
 
 TASK:
-Based on the ML probabilities and Alligator, decide if we should trade NOW.
-ML model balanced accuracy is ~36.4%, so use Alligator as a filter.
+Decide if we should trade NOW. ML accuracy is low, use Alligator as the main filter.
 
 Respond ONLY with valid JSON:
 {{
   "trade_decision": "YES/NO",
-  "reasoning_short": "Short 1-sentence explanation",
+  "reasoning_short": "Max 1 sentence in Russian",
   "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
   "action": "entry/hold",
   "side": "long/short"
@@ -687,23 +686,24 @@ class TradingBot:
                 with open(cmd_path, "r") as f:
                     cmd_data = json.load(f)
                 
+                # Delete command after processing
+                os.remove(cmd_path)
+                
                 cmd = cmd_data.get("command")
                 if cmd == "start_all":
                     logger.info("🚀 Dashboard command: START ALL PAIRS")
-                    # Update settings from dashboard
                     global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE
                     TAKE_PROFIT_PERCENT = cmd_data.get("tp", TAKE_PROFIT_PERCENT)
                     STOP_LOSS_PERCENT = cmd_data.get("sl", STOP_LOSS_PERCENT)
-                    # Use leverage to adjust position size
                     MAX_POSITION_SIZE = 5.0 * cmd_data.get("leverage", 1)
+                    await self.run_cycle() # Run immediately
                 elif cmd == "start_single":
                     symbol = cmd_data.get("symbol")
                     logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
-                    # Force process only this symbol
                     await self.process_symbol(symbol)
                 elif cmd == "stop_all":
                     logger.info("🛑 Dashboard command: STOP ALL")
-                    self.engine.positions = {} # Emergency close all
+                    self.engine.positions = {}
                 elif cmd == "update_api":
                     mode = cmd_data.get("mode")
                     logger.info(f"🔄 Dashboard command: SWITCH TO {mode.upper()}")
@@ -718,8 +718,6 @@ class TradingBot:
                     else:
                         self.engine = PaperTradingEngine()
                 
-                # Delete command after processing
-                os.remove(cmd_path)
             except Exception as e:
                 logger.error(f"Error processing dashboard command: {e}")
 
@@ -829,10 +827,11 @@ class TradingBot:
         
         while self.running:
             try:
-                # Проверяем команды чаще, чем основной цикл
-                for _ in range(180): # Проверка каждую минуту в течение 3 часов
+                # Проверяем команды каждые 10 секунд
+                # Раз в 3 часа запускаем полный цикл
+                for _ in range(18 * 60): # 1080 итераций по 10 сек = 3 часа
                     await self._check_dashboard_commands()
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(10)
                 
                 await self.run_cycle()
             except Exception as e:

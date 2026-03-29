@@ -355,15 +355,14 @@ col_ctrl1, col_ctrl2 = st.columns(2)
 with col_ctrl1:
     if st.button("🚀 Start AI Trading (All Pairs)", use_container_width=True):
         st.success("AI Trading command sent to bot! Processing all symbols...")
-        # Здесь можно создать флаг-файл для бота, если нужно
         with open("data/bot_command.json", "w") as f:
-            json.dump({"command": "start", "time": str(datetime.now())}, f)
+            json.dump({"command": "start_all", "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
 
 with col_ctrl2:
     if st.button("🛑 Stop AI Trading", use_container_width=True):
         st.warning("Stop command sent. Bot will finish current cycle.")
         with open("data/bot_command.json", "w") as f:
-            json.dump({"command": "stop", "time": str(datetime.now())}, f)
+            json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
 
 st.markdown("---")
 
@@ -389,40 +388,46 @@ for symbol in assets:
                 if df_analysis is not None:
                     latest = df_analysis.iloc[-1]
                     
-                    # More detailed prompt based on ML predictions
+                    # СТРОГИЙ КРАТКИЙ ПРОМПТ
                     prompt = f"""
-                    Analyze {symbol} as a Quant Trader.
-                    Current Price: {latest['close']:.5f}
-                    
-                    ML CONTEXT (from Notebook logic):
-                    The model uses a Voting Ensemble (XGBoost, RF, GB) with Alligator + Fractals.
-                    User wants TP: {manual_tp}% and SL: {manual_sl}%.
-                    Leverage set to {leverage}x.
+                    Analyze {symbol}. Current Price: {latest['close']:.5f}.
+                    ML Strategy: Alligator + Fractals.
+                    TP: {manual_tp}%, SL: {manual_sl}%, Leverage: {leverage}x.
                     
                     TASK:
-                    1. Explain the market movement based on Alligator lines (Jaw, Teeth, Lips).
-                    2. Explain how the ML model interprets recent fractals for this {symbol}.
-                    3. Give a clear verdict: Strong Buy / Buy / Neutral / Sell / Strong Sell.
-                    4. Comment on the {leverage}x leverage safety for current volatility.
+                    Return ONLY a concise prediction in Russian:
+                    1. ПРОГНОЗ: [ВВЕРХ/ВНИЗ/ФЛЕТ]
+                    2. ВЕРОЯТНОСТЬ: [0-100]% (на основе ML и индикаторов)
+                    3. РЕКОМЕНДАЦИЯ: [ТОРГОВАТЬ/ЖДАТЬ]
+                    4. ПРИЧИНА: [Одно короткое предложение]
                     """
                     
                     response = client.chat.completions.create(
                         model="deepseek/deepseek-chat",
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.7
+                        temperature=0.3,
+                        max_tokens=200
                     )
                     
                     st.success(f"Analysis for {symbol} updated!")
-                    st.markdown(response.choices[0].message.content)
-                    
-                    # Manual trade button for this specific pair
-                    if st.button(f"🚀 Trade {symbol} ONLY", key=f"trade_single_{symbol}"):
-                        with open("data/bot_command.json", "w") as f:
-                            json.dump({"command": "start_single", "symbol": symbol, "tp": manual_tp, "sl": manual_sl, "leverage": leverage, "time": str(datetime.now())}, f)
-                        st.success(f"Command to trade {symbol} sent!")
+                    st.markdown(f"### 🎯 Результат анализа {symbol}")
+                    st.info(response.choices[0].message.content)
                 else:
                     st.error(f"No data for {symbol}")
             except Exception as e:
                 st.error(f"Error: {e}")
+    
+    # Move trade button outside analysis check to be always available
+    if st.button(f"🚀 Trade {symbol} ONLY", key=f"trade_single_{symbol}"):
+        with open("data/bot_command.json", "w") as f:
+            json.dump({
+                "command": "start_single", 
+                "symbol": symbol, 
+                "tp": manual_tp, 
+                "sl": manual_sl, 
+                "leverage": leverage, 
+                "time": str(datetime.now())
+            }, f)
+        st.success(f"Command to trade {symbol} sent!")
     st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
