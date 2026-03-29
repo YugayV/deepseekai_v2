@@ -41,8 +41,8 @@ if st.sidebar.button("🔄 Refresh Data"):
 # ============================================
 # MAIN TITLE
 # ============================================
-st.title("🤖 EURUSD AI Trading Bot with DeepSeek")
-st.markdown("**Multi-Asset | Alligator + Fractals | Ensemble ML | Real-time Signals**")
+st.title("🤖 Multi-Asset AI Trading Bot with DeepSeek")
+st.markdown("**Alligator + Fractals | Ensemble ML | Real-time Signals**")
 st.markdown("---")
 
 # ============================================
@@ -181,21 +181,25 @@ st.markdown("---")
 # ============================================
 st.subheader("🐊 Alligator Indicator & Fractals")
 
-for symbol in assets[:1]:
-    df = fetch_asset_data(symbol, period="3mo", interval="1d")
+for symbol in assets:
+    df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
     if df is None:
         continue
 
     # Calculate Alligator
+    # Jaws (Blue line): 13-period smoothed moving average, shifted 8 bars into the future.
+    # Teeth (Red line): 8-period smoothed moving average, shifted 5 bars into the future.
+    # Lips (Green line): 5-period smoothed moving average, shifted 3 bars into the future.
     df['jaw'] = df['close'].rolling(13).mean().shift(8)
     df['teeth'] = df['close'].rolling(8).mean().shift(5)
     df['lips'] = df['close'].rolling(5).mean().shift(3)
 
-    # Fractal detection
+    # Fractal detection (Williams Fractals)
     window = 2
     df['fractal_bullish'] = 0
     df['fractal_bearish'] = 0
 
+    # ... existing code for fractal calculation ...
     for i in range(window, len(df) - window):
         if all(df['low'].iloc[i] < df['low'].iloc[i - j] for j in range(1, window + 1)) and \
            all(df['low'].iloc[i] < df['low'].iloc[i + j] for j in range(1, window + 1)):
@@ -206,23 +210,31 @@ for symbol in assets[:1]:
 
     fig = go.Figure()
 
-    # Price
-    fig.add_trace(go.Scatter(x=df.index, y=df['close'], name='Close', line=dict(color='black', width=1)))
+    # Price Candlestick instead of just line
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df['open'],
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        name='Price',
+        opacity=0.4
+    ))
 
     # Alligator
-    fig.add_trace(go.Scatter(x=df.index, y=df['jaw'], name='Jaws (SMA13, shift8)', line=dict(color='blue', width=1.5)))
-    fig.add_trace(go.Scatter(x=df.index, y=df['teeth'], name='Teeth (SMA8, shift5)', line=dict(color='red', width=1.5)))
-    fig.add_trace(go.Scatter(x=df.index, y=df['lips'], name='Lips (SMA5, shift3)', line=dict(color='green', width=1.5)))
+    fig.add_trace(go.Scatter(x=df.index, y=df['jaw'], name='Jaws (13,8)', line=dict(color='blue', width=2)))
+    fig.add_trace(go.Scatter(x=df.index, y=df['teeth'], name='Teeth (8,5)', line=dict(color='red', width=2)))
+    fig.add_trace(go.Scatter(x=df.index, y=df['lips'], name='Lips (5,3)', line=dict(color='green', width=2)))
 
     # Fractals
     bullish_idx = df[df['fractal_bullish'] == 1].index
     bearish_idx = df[df['fractal_bearish'] == 1].index
     fig.add_trace(go.Scatter(x=bullish_idx, y=df.loc[bullish_idx, 'low'], mode='markers',
-                              marker=dict(symbol='triangle-up', size=10, color='green'), name='Bullish Fractal'))
+                              marker=dict(symbol='triangle-up', size=12, color='green'), name='Bullish Fractal'))
     fig.add_trace(go.Scatter(x=bearish_idx, y=df.loc[bearish_idx, 'high'], mode='markers',
-                              marker=dict(symbol='triangle-down', size=10, color='red'), name='Bearish Fractal'))
+                              marker=dict(symbol='triangle-down', size=12, color='red'), name='Bearish Fractal'))
 
-    fig.update_layout(title=f'{symbol} - Alligator + Fractals', height=500)
+    fig.update_layout(title=f'{symbol} ({timeframe}) - Alligator + Fractals', height=600, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")

@@ -102,31 +102,33 @@ class TelegramNotifier:
         self.group_id = group_id
         self.admin_chat_id = admin_chat_id
         self.application = None
+        self.bot = None
 
-        if token:
+    async def initialize(self):
+        if self.bot_token:
             try:
-                self.application = Application.builder().token(token).build()
-                self._setup_handlers()
-                # Запуск обработчика команд в фоновом режиме
-                asyncio.create_task(self.application.initialize())
-                asyncio.create_task(self.application.start())
-                asyncio.create_task(self.application.updater.start_polling())
+                from telegram import Bot
+                from telegram.ext import Application, CommandHandler
+                self.application = Application.builder().token(self.bot_token).build()
+                self.bot = self.application.bot
+                
+                self.application.add_handler(CommandHandler("start", self._cmd_start))
+                self.application.add_handler(CommandHandler("status", self._cmd_status))
+                self.application.add_handler(CommandHandler("pairs", self._cmd_pairs))
+                
+                await self.application.initialize()
+                await self.application.start()
+                if self.application.updater:
+                    await self.application.updater.start_polling()
                 logger.info("✅ Telegram bot initialized with command handlers")
             except Exception as e:
                 logger.error(f"Telegram init error: {e}")
 
-    def _setup_handlers(self):
-        self.application.add_handler(CommandHandler("start", self._cmd_start))
-        self.application.add_handler(CommandHandler("status", self._cmd_status))
-        self.application.add_handler(CommandHandler("pairs", self._cmd_pairs))
-
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = "🚀 *EURUSD AI Bot is Active*\n\nCommands:\n/status - Portfolio summary\n/pairs - Tracked symbols"
+        text = "🚀 *AI Trading Bot is Active*\n\nCommands:\n/status - Portfolio summary\n/pairs - Tracked symbols"
         await update.message.reply_text(text, parse_mode='Markdown')
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Эта команда будет вызывать глобальный статус
-        # Мы можем использовать глобальную переменную или передать ссылку на бота
         await update.message.reply_text("📊 Generating report... use /pairs for symbols.")
 
     async def _cmd_pairs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -135,6 +137,13 @@ class TelegramNotifier:
         await update.message.reply_text(pairs_text, parse_mode='Markdown')
 
     async def send_message(self, text, chat_id=None):
+        if not self.bot: return
+        target_chat = chat_id or self.group_id
+        if not target_chat: return
+        try:
+            await self.bot.send_message(chat_id=target_chat, text=text, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Telegram send error: {e}")
 # ... существующий код ...
         """Отправка сообщения в указанный чат"""
         if not self.bot:
@@ -156,25 +165,25 @@ class TelegramNotifier:
             logger.error(f"Telegram send error to {target_chat}: {e}")
 
     async def send_signal(self, signal_type, data):
-        """Отправка сигнала в группу (формат как в оригинальном проекте)"""
+        """Отправка сигнала в группу с детальным анализом"""
         if not self.bot or not self.group_id:
             return
 
         if signal_type == "ENTRY":
             emoji = "🟢" if data.get('side') == 'long' else "🔴"
             text = f"""
-{emoji} *{signal_type} SIGNAL*
+{emoji} *MARKET ANALYSIS: {data['asset']}*
 
-*Asset:* {data['asset']}
-*Direction:* {data.get('side', 'N/A').upper()}
-*Entry:* {data.get('entry_price', 0):.5f}
-*Stop Loss:* {data.get('stop_loss', 0):.5f}
-*Take Profit:* {data.get('take_profit', 0):.5f}
-*Risk:* {data.get('risk_percent', 0)}%
-*Confidence:* {data.get('confidence', 0):.1%}
+*Current Setup:*
+{data.get('analysis', 'No detailed analysis provided.')}
 
-*Reasoning:*
-{data.get('reasoning', '')[:200]}
+*ML Signal:* {data.get('ml_regime', 'N/A')} (confidence: {data.get('confidence', 0):.1%})
+
+*Recommendation:*
+{data.get('recommendation', 'Wait for better setup.')}
+
+*Risk Note:*
+{data.get('risk_note', 'Standard position size.')}
 """
             await self.send_message(text, self.group_id)
 
@@ -388,43 +397,34 @@ class DeepSeekAdvisor:
             return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
 
         latest = df.iloc[-1]
+        prev = df.iloc[-2]
 
         prompt = f"""
-Analyze {symbol} and provide trading decision.
+Act as a professional trader analyzing {symbol}. 
+CONTEXT:
+- PRICE: {latest['close']:.5f} (Change: {latest['returns']:.2f}%)
+- VOLATILITY: {latest['volatility']:.4f}
+- RSI: {latest['rsi']:.1f} ({'OVERBOUGHT' if latest['rsi'] > 70 else 'OVERSOLD' if latest['rsi'] < 30 else 'NEUTRAL'})
+- MACD Hist: {latest['macd_hist']:.5f} (Trend: {'Up' if latest['macd_hist'] > prev['macd_hist'] else 'Down'})
 
-PRICE: {latest['close']:.5f}
-RSI: {latest['rsi']:.1f}
-MACD: {latest['macd_hist']:.5f}
-ATR: {latest['atr']:.5f}
+INDICATORS:
+- ALLIGATOR: {'BULLISH' if latest['alligator_bullish'] else 'BEARISH' if latest['alligator_bearish'] else 'ASLEEP' if latest['alligator_asleep'] else 'NEUTRAL'}
+- FRACTALS: Bull={latest['fractal_bullish']}, Bear={latest['fractal_bearish']}
+- ML REGIME: {ml_prediction['regime_name'].upper()} (Conf: {ml_prediction['confidence']:.1%})
 
-ALLIGATOR:
-- State: {'ASLEEP' if latest['alligator_asleep'] else 'AWAKE'}
-- Direction: {'BULLISH' if latest['alligator_bullish'] else 'BEARISH' if latest['alligator_bearish'] else 'NEUTRAL'}
+DECISION CRITERIA:
+1. Entry ONLY if ML confidence > 60% and technicals align.
+2. Consider Stop Loss at {STOP_LOSS_PERCENT}% and Take Profit at {TAKE_PROFIT_PERCENT}%.
 
-FRACTALS:
-- Bullish: {latest['fractal_bullish']}
-- Bearish: {latest['fractal_bearish']}
-- Strong Bullish: {latest['strong_bullish']}
-- Strong Bearish: {latest['strong_bearish']}
-
-ML PREDICTION:
-- Regime: {ml_prediction['regime_name'].upper()}
-- Confidence: {ml_prediction['confidence']:.1%}
-
-RISK RULES:
-- Max risk: 2% of capital
-- Stop loss: {STOP_LOSS_PERCENT}%
-- Take profit: {TAKE_PROFIT_PERCENT}%
-
-Respond ONLY with JSON:
-{{"action": "entry/hold/close", "side": "long/short", "confidence": 0-100, "reasoning": "..."}}
+Respond ONLY with valid JSON:
+{{"action": "entry/hold/close", "side": "long/short", "confidence": 0-100, "reasoning": "Be specific why now."}}
 """
 
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+                temperature=0.5, # Increased for more variety
                 max_tokens=300
             )
             content = response.choices[0].message.content
@@ -629,11 +629,11 @@ class TradingBot:
                             'asset': symbol,
                             'side': position['side'],
                             'entry_price': position['entry_price'],
-                            'stop_loss': position['stop_loss'],
-                            'take_profit': position['take_profit'],
-                            'risk_percent': MAX_POSITION_SIZE,
+                            'ml_regime': ml_pred['regime_name'],
                             'confidence': position['confidence'],
-                            'reasoning': decision.get('reasoning', '')
+                            'analysis': decision.get('analysis', ''),
+                            'recommendation': decision.get('recommendation', ''),
+                            'risk_note': decision.get('risk_note', '')
                         })
 
             # Log
@@ -672,6 +672,9 @@ class TradingBot:
         logger.info("Cycle completed. Next in 10 minutes.")
 
     async def run(self):
+        # Инициализируем Telegram перед циклом
+        await self.notifier.initialize()
+        
         while self.running:
             try:
                 await self.run_cycle()
