@@ -789,7 +789,7 @@ class TradingBot:
                     MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
                     
                     # Force immediate execution of the cycle
-                    asyncio.create_task(self.run_cycle())
+                    self.force_cycle = True
                 elif cmd == "start_single" or cmd == "trade_single":
                     symbol = cmd_data.get("symbol")
                     logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
@@ -826,6 +826,7 @@ class TradingBot:
         try:
             df = fetch_data(symbol)
             if df is None or len(df) < 50:
+                logger.warning(f"⚠️ {symbol}: Not enough data")
                 return
 
             current_price = df['close'].iloc[-1]
@@ -833,6 +834,7 @@ class TradingBot:
             # ML Prediction
             ml_pred = self.ml_loader.predict(df)
             if not ml_pred:
+                logger.warning(f"⚠️ {symbol}: ML prediction failed")
                 return
 
             # Check exits first
@@ -851,9 +853,11 @@ class TradingBot:
 
             # Only enter if no position
             if symbol not in self.engine.positions:
+                logger.info(f"🔍 {symbol}: Requesting DeepSeek decision...")
                 decision = self.deepseek.get_decision(symbol, df, ml_pred)
 
                 if decision.get('trade_decision') == 'YES':
+                    logger.info(f"✅ DeepSeek signal: BUY {symbol}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
                         await self.notifier.send_signal("ENTRY", {
@@ -863,9 +867,11 @@ class TradingBot:
                             'trade_decision': 'YES',
                             'analysis': decision.get('reasoning_short', '')
                         })
+                else:
+                    logger.info(f"⏳ {symbol}: DeepSeek said NO")
 
-            # Log
-            logger.info(f"{symbol}: {current_price:.5f} | ML: {ml_pred['regime_name']} ({ml_pred['confidence']:.1%}) | AI: {decision.get('action', 'hold')}")
+            # Log current status
+            logger.info(f"{symbol}: {current_price:.5f} | ML: {ml_pred['regime_name']} ({ml_pred['confidence']:.1%})")
 
         except Exception as e:
             logger.error(f"Error processing {symbol}: {e}")
@@ -894,23 +900,50 @@ class TradingBot:
         logger.info(f"Portfolio: Balance=${state['balance']:.2f}, Equity=${state['equity']:.2f}, PnL={state['pnl']:.2f}%")
         logger.info("Cycle completed. Next in 10 minutes.")
 
+    async def send_portfolio_summary(self):
+        """Calculate state and send summary via notifier"""
+        current_prices = {}
+        for s in ALL_SYMBOLS:
+            df = fetch_data(s)
+            if df is not None: current_prices[s] = df['close'].iloc[-1]
+        state = self.engine.get_state(current_prices)
+        await self.notifier.send_daily_summary(state)
+
     async def run(self):
-        # Initialize Telegram before the cycle
+        # Initialize Telegram
         await self.notifier.initialize()
-        # Now safely send the startup message
         await self._send_startup()
+        
+        last_summary_time = time.time()
+        self.force_cycle = False
+        
+        logger.info("🤖 Bot is now running and waiting for commands...")
         
         while self.running:
             try:
-                # Check commands every 10 seconds
-                # Run full cycle every 3 hours
-                for _ in range(18 * 60): # 1080 iterations of 10 sec = 3 hours
+                # Check for dashboard commands more frequently
+                for _ in range(60): # 10 minutes wait total (60 * 10s)
                     await self._check_dashboard_commands()
+                    
+                    if getattr(self, 'force_cycle', False):
+                        self.force_cycle = False
+                        logger.info("⚡ Forced cycle triggered by command")
+                        await self.run_cycle()
+                    
+                    # Auto Summary every 12 hours
+                    if time.time() - last_summary_time > 12 * 3600:
+                        logger.info("🕒 Sending scheduled 12-hour summary...")
+                        await self.send_portfolio_summary()
+                        last_summary_time = time.time()
+                        
                     await asyncio.sleep(10)
                 
+                # Standard scheduled cycle every 10 minutes (based on loop above)
                 await self.run_cycle()
+                
             except Exception as e:
-                logger.error(f"Cycle error: {e}")
+                logger.error(f"Main loop error: {e}")
+                await asyncio.sleep(10)
 
 
 # ============================================
