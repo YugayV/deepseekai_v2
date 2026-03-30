@@ -33,6 +33,7 @@ def start_health_server():
         except Exception as e:
             print(f"❌ Health server error: {e}")
 
+    # Keep this non-daemon so the Railway healthcheck server stays alive even if bot init crashes
     thread = threading.Thread(target=run_server, daemon=False)
     thread.start()
 
