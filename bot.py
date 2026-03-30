@@ -34,7 +34,7 @@ def start_health_server():
             print(f"❌ Health server error: {e}")
 
     # Keep this non-daemon so the Railway healthcheck server stays alive even if bot init crashes
-    thread = threading.Thread(target=run_server, daemon=False)
+    thread = threading.Thread(target=run_server, daemon=False, name="health_server")
     thread.start()
 
 # Start health server immediately
@@ -76,6 +76,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 
 class MultiChannelNotifier:
     def __init__(self, token=None, group_id=None, admin_chat_id=None):
+        # WhatsApp/Twilio intentionally not used (removed to prevent startup crashes)
         self.bot_token = token
         self.group_id = group_id
         self.admin_chat_id = admin_chat_id
