@@ -218,28 +218,32 @@ if chart_view == "TradingView (Interactive)":
             tv_symbol = f"BINANCE:{symbol.replace('-', '')}"
             
         tradingview_html = f"""
-        <div class="tradingview-widget-container" style="height:600px;width:100%;">
-          <div id="tradingview_{symbol}"></div>
-          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-          <script type="text/javascript">
+        <div class=\"tradingview-widget-container\" style=\"height:900px;width:100%;\">
+          <div id=\"tradingview_{symbol}\" style=\"height:900px;width:100%;\"></div>
+          <script type=\"text/javascript\" src=\"https://s3.tradingview.com/tv.js\"></script>
+          <script type=\"text/javascript\">
           new TradingView.widget({{
-            "autosize": true,
-            "symbol": "{tv_symbol}",
-            "interval": "60",
-            "timezone": "Etc/UTC",
-            "theme": "dark",
-            "style": "1",
-            "locale": "en",
-            "toolbar_bg": "#f1f3f6",
-            "enable_publishing": false,
-            "hide_top_toolbar": false,
-            "allow_symbol_change": true,
-            "container_id": "tradingview_{symbol}"
+            \"autosize\": true,
+            \"symbol\": \"{tv_symbol}\",
+            \"interval\": \"60\",
+            \"timezone\": \"Etc/UTC\",
+            \"theme\": \"dark\",
+            \"style\": \"1\",
+            \"locale\": \"en\",
+            \"toolbar_bg\": \"#0e1117\",
+            \"enable_publishing\": false,
+            \"withdateranges\": true,
+            \"hide_side_toolbar\": false,
+            \"allow_symbol_change\": true,
+            \"details\": true,
+            \"hotlist\": true,
+            \"calendar\": true,
+            \"container_id\": \"tradingview_{symbol}\"
           }});
           </script>
         </div>
         """
-        components.html(tradingview_html, height=610)
+        components.html(tradingview_html, height=920)
 else:
     for symbol in assets:
         df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
