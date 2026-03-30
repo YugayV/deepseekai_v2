@@ -6,40 +6,55 @@ Optimized models with Alligator + Fractals
 
 import os
 import logging
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import time
+import multiprocessing
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============================================
-# HEALTH CHECK SERVER (Start immediately for Railway)
+# HEALTH CHECK SERVER (separate process; avoids GIL blocking during heavy imports)
 # ============================================
-PORT = int(os.getenv("PORT", 8000))
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # Respond 200 OK to ANY request to ensure healthcheck passes
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
+        self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(b'OK')
-    def log_message(self, format, *args): return
 
-def start_health_server():
-    def run_server():
+    def log_message(self, format, *args):
+        return
+
+
+def _serve_health(port: int):
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    server.serve_forever()
+
+
+def start_health_servers():
+    ports = []
+    env_port = os.getenv('PORT')
+    if env_port:
         try:
-            server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
-            print(f"✅ Health check server listening on port {PORT}")
-            server.serve_forever()
+            ports.append(int(env_port))
+        except Exception:
+            pass
+
+    for p in (8080, 8000):
+        if p not in ports:
+            ports.append(p)
+
+    for p in ports:
+        try:
+            proc = multiprocessing.Process(target=_serve_health, args=(p,), daemon=False)
+            proc.start()
+            print(f"✅ Health server started on 0.0.0.0:{p} (pid={proc.pid})")
         except Exception as e:
-            print(f"❌ Health server error: {e}")
+            print(f"❌ Failed to start health server on port {p}: {e}")
 
-    # Keep this non-daemon so the Railway healthcheck server stays alive even if bot init crashes
-    thread = threading.Thread(target=run_server, daemon=False, name="health_server")
-    thread.start()
 
-# Start health server immediately
-if os.getenv("RAILWAY") or os.getenv("PORT"):
-    start_health_server()
+if os.getenv('RAILWAY') or os.getenv('PORT'):
+    start_health_servers()
 
 # Now import heavy libraries with safety
 try:
