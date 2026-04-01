@@ -30,6 +30,33 @@ DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
 CMD_PATH = os.path.join(DATA_DIR, "bot_command.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+BOT_API_URL = (os.getenv("BOT_API_URL") or "").rstrip("/")
+
+def _post_bot_command(payload: dict):
+    if BOT_API_URL:
+        import urllib.request
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            BOT_API_URL + "/command",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+
+    with open(CMD_PATH, "w") as f:
+        json.dump(payload, f)
+    return {"ok": True}
+
+
+def _get_bot_json(path: str):
+    if not BOT_API_URL:
+        return None
+    import urllib.request
+    with urllib.request.urlopen(BOT_API_URL + path, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
 # Assets
 st.sidebar.subheader("📊 Assets")
 assets = st.sidebar.multiselect(
@@ -48,20 +75,18 @@ if is_real:
     api_key_input = st.sidebar.text_input("API Key", type="password")
     api_secret_input = st.sidebar.text_input("API Secret", type="password")
     if st.sidebar.button("💾 Save API Config"):
-        with open(CMD_PATH, "w") as f:
-            json.dump({
-                "command": "update_api",
-                "mode": "real",
-                "exchange": exchange_id,
-                "key": api_key_input,
-                "secret": api_secret_input,
-                "time": str(datetime.now())
-            }, f)
+        _post_bot_command({
+            "command": "update_api",
+            "mode": "real",
+            "exchange": exchange_id,
+            "key": api_key_input,
+            "secret": api_secret_input,
+            "time": str(datetime.now())
+        })
         st.sidebar.success("API Config saved!")
 else:
     if st.sidebar.button("🔄 Reset to Demo"):
-        with open(CMD_PATH, "w") as f:
-            json.dump({"command": "update_api", "mode": "demo", "time": str(datetime.now())}, f)
+        _post_bot_command({"command": "update_api", "mode": "demo", "time": str(datetime.now())})
         st.sidebar.info("Switched to Demo")
 
 # Risk Settings
@@ -78,21 +103,19 @@ daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10
 col_btn1, col_btn2 = st.sidebar.columns(2)
 if col_btn1.button("🚀 Start All", width='stretch'):
     st.sidebar.success("All pairs started!")
-    with open(CMD_PATH, "w") as f:
-        json.dump({
-            "command": "start_all",
-            "tp": float(manual_tp),
-            "sl": float(manual_sl),
-            "leverage": int(leverage),
-            "max_trades_per_day": int(max_trades_per_day),
-            "daily_tp_target_percent": float(daily_tp_target_percent),
-            "time": str(datetime.now())
-        }, f)
+    _post_bot_command({
+        "command": "start_all",
+        "tp": float(manual_tp),
+        "sl": float(manual_sl),
+        "leverage": int(leverage),
+        "max_trades_per_day": int(max_trades_per_day),
+        "daily_tp_target_percent": float(daily_tp_target_percent),
+        "time": str(datetime.now())
+    })
 
 if col_btn2.button("🛑 Stop All", width='stretch'):
     st.sidebar.warning("All stopped!")
-    with open(CMD_PATH, "w") as f:
-        json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
+    _post_bot_command({"command": "stop_all", "time": str(datetime.now())})
 
 # ... existing code ...
 
@@ -130,11 +153,16 @@ def load_models():
         st.error(f"Model load error: {e}")
         return None, None, None
 
-@st.cache_data(ttl=5) # Reduced TTL for faster updates
+@st.cache_data(ttl=5)
 def load_portfolio():
     try:
-        if os.path.exists("data/portfolio_state.json"):
-            with open("data/portfolio_state.json", "r") as f:
+        api = _get_bot_json("/portfolio")
+        if api is not None:
+            return api
+        
+        p = os.path.join(DATA_DIR, "portfolio_state.json")
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as e:
         st.error(f"Error loading portfolio: {e}")
@@ -143,9 +171,14 @@ def load_portfolio():
 @st.cache_data(ttl=5)
 def load_trades():
     try:
-        if os.path.exists("data/trade_history.csv"):
-            df = pd.read_csv("data/trade_history.csv")
-            return df
+        api = _get_bot_json("/trades")
+        if api is not None:
+            rows = (api.get("rows") or [])
+            return pd.DataFrame(rows)
+
+        p = os.path.join(DATA_DIR, "trade_history.csv")
+        if os.path.exists(p):
+            return pd.read_csv(p)
     except Exception as e:
         st.error(f"Error loading trades: {e}")
     return pd.DataFrame()

@@ -14,8 +14,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # ============================================
-# HEALTH CHECK SERVER (Start immediately for Railway)
-# Respond on both $PORT and default 8080 using non-daemon threads.
+# BOT HTTP API (for 2-service Railway setup)
+# - GET  /health    -> OK
+# - POST /command   -> send command from dashboard
+# - GET  /portfolio -> portfolio_state.json
+# - GET  /trades    -> trade_history.csv as JSON
 # ============================================
 DEFAULT_PORT = 8080
 ENV_PORT_RAW = os.getenv('PORT')
@@ -24,41 +27,108 @@ try:
 except Exception:
     ENV_PORT = None
 
-HEALTH_PORTS = []
+API_PORTS = []
 if ENV_PORT:
-    HEALTH_PORTS.append(ENV_PORT)
-if DEFAULT_PORT not in HEALTH_PORTS:
-    HEALTH_PORTS.append(DEFAULT_PORT)
+    API_PORTS.append(ENV_PORT)
+if DEFAULT_PORT not in API_PORTS:
+    API_PORTS.append(DEFAULT_PORT)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
+DATA_DIR_EARLY = os.getenv("TRADEBOT_DATA_DIR", "data")
+os.makedirs(DATA_DIR_EARLY, exist_ok=True)
+PORTFOLIO_PATH_EARLY = os.path.join(DATA_DIR_EARLY, "portfolio_state.json")
+TRADES_PATH_EARLY = os.path.join(DATA_DIR_EARLY, "trade_history.csv")
+
+BOT_LOOP = None
+
+class BotApiHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status: int, payload):
+        import json as _json
+        body = _json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
         self.send_header('Connection', 'close')
         self.end_headers()
-        self.wfile.write(b'OK')
+        self.wfile.write(body)
+
+    def _send_text(self, status: int, text: str):
+        body = text.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path in ('/health', '/'): 
+            return self._send_text(200, 'OK')
+
+        if self.path == '/portfolio':
+            import json as _json
+            if os.path.exists(PORTFOLIO_PATH_EARLY):
+                try:
+                    with open(PORTFOLIO_PATH_EARLY, 'r', encoding='utf-8') as f:
+                        return self._send_json(200, _json.load(f))
+                except Exception as e:
+                    return self._send_json(500, {'error': str(e)})
+            return self._send_json(200, {})
+
+        if self.path == '/trades':
+            if os.path.exists(TRADES_PATH_EARLY):
+                try:
+                    import pandas as _pd
+                    df = _pd.read_csv(TRADES_PATH_EARLY)
+                    return self._send_json(200, {'rows': df.to_dict('records')})
+                except Exception as e:
+                    return self._send_json(500, {'error': str(e)})
+            return self._send_json(200, {'rows': []})
+
+        return self._send_text(404, 'Not Found')
+
+    def do_POST(self):
+        if self.path != '/command':
+            return self._send_text(404, 'Not Found')
+
+        try:
+            import json as _json
+            length = int(self.headers.get('Content-Length', '0') or '0')
+            raw = self.rfile.read(length) if length > 0 else b'{}'
+            cmd = _json.loads(raw.decode('utf-8') or '{}')
+        except Exception as e:
+            return self._send_json(400, {'ok': False, 'error': f'bad_json: {e}'})
+
+        try:
+            if 'bot_instance' in globals() and bot_instance and BOT_LOOP:
+                import asyncio as _asyncio
+                fut = _asyncio.run_coroutine_threadsafe(bot_instance.apply_command(cmd), BOT_LOOP)
+                fut.result(timeout=5)
+                return self._send_json(200, {'ok': True})
+            return self._send_json(503, {'ok': False, 'error': 'bot_not_ready'})
+        except Exception as e:
+            return self._send_json(500, {'ok': False, 'error': str(e)})
 
     def log_message(self, format, *args):
         return
 
 
-def _serve_health(port: int):
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+def _serve_api(port: int):
+    server = HTTPServer(('0.0.0.0', port), BotApiHandler)
     server.serve_forever()
 
 
-def start_health_servers():
-    for p in HEALTH_PORTS:
+def start_api_servers():
+    for p in API_PORTS:
         try:
-            t = threading.Thread(target=_serve_health, args=(p,), daemon=False, name=f"health_{p}")
+            t = threading.Thread(target=_serve_api, args=(p,), daemon=False, name=f"api_{p}")
             t.start()
-            print(f"✅ Health server listening on 0.0.0.0:{p}")
+            print(f"✅ Bot API listening on 0.0.0.0:{p}")
         except Exception as e:
-            print(f"❌ Failed to start health server on port {p}: {e}")
+            print(f"❌ Failed to start Bot API on port {p}: {e}")
 
 
 if os.getenv('RAILWAY') or os.getenv('PORT'):
-    start_health_servers()
+    start_api_servers()
 
 # Now import heavy libraries with safety
 try:
@@ -98,7 +168,10 @@ DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
 DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 60))
 REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
 
+RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
+
+DEEPSEEK_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
@@ -905,61 +978,71 @@ class TradingBot:
         )
         self.running = True
     
-    async def _check_dashboard_commands(self):
+    async def apply_command(self, cmd_data: dict):
         global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE, TRADING_MODE
 
-        cmd_path = os.path.join(DATA_DIR, "bot_command.json")
-        if os.path.exists(cmd_path):
-            try:
-                logger.info(f"📂 Found command file: {cmd_path}")
-                with open(cmd_path, "r") as f:
-                    cmd_data = json.load(f)
-                
-                # Delete command immediately to prevent double processing
-                os.remove(cmd_path)
-                logger.info(f"📥 Processing command: {cmd_data.get('command')}")
-                
-                cmd = cmd_data.get("command")
-                if cmd == "start_all":
-                    logger.info(f"🚀 Dashboard command: START ALL PAIRS (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
-                    TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
-                    STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
-                    MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
+        cmd = (cmd_data or {}).get("command")
+        if not cmd:
+            return
 
-                    if isinstance(self.engine, PaperTradingEngine):
-                        self.engine.max_trades_per_day = int(cmd_data.get("max_trades_per_day", self.engine.max_trades_per_day))
-                        self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
-                        self.engine._roll_day_if_needed()
-                        logger.info(f"✅ Demo limits: max_trades_per_day={self.engine.max_trades_per_day}, daily_tp_target_percent={self.engine.daily_tp_target_percent}")
-                    
-                    self.force_cycle = True
-                    logger.info("⚡ Cycle force-start flag set. Starting trading cycle immediately.")
-                elif cmd == "start_single" or cmd == "trade_single":
-                    symbol = cmd_data.get("symbol")
-                    logger.info(f"🚀 Dashboard command: START SINGLE PAIR {symbol}")
-                    if symbol:
-                        await self.process_symbol(symbol)
-                    else:
-                        logger.error("❌ Single trade command missing symbol!")
-                elif cmd == "stop_all":
-                    logger.info("🛑 Dashboard command: STOP ALL")
-                    self.engine.positions = {}
-                elif cmd == "update_api":
-                    mode = cmd_data.get("mode")
-                    logger.info(f"🔄 Dashboard command: SWITCH TO {mode.upper()}")
-                    TRADING_MODE = mode
-                    if mode == "real":
-                        self.engine = RealTradingEngine(
-                            cmd_data.get("exchange", "bybit"),
-                            cmd_data.get("key"),
-                            cmd_data.get("secret")
-                        )
-                    else:
-                        self.engine = PaperTradingEngine()
-                
-            except Exception as e:
-                logger.error(f"❌ Error processing dashboard command: {e}")
-                if os.path.exists(cmd_path): os.remove(cmd_path)
+        if cmd == "start_all":
+            logger.info(f"🚀 Command: START ALL (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
+            TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
+            STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
+            MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
+
+            if isinstance(self.engine, PaperTradingEngine):
+                self.engine.max_trades_per_day = int(cmd_data.get("max_trades_per_day", self.engine.max_trades_per_day))
+                self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
+                self.engine._roll_day_if_needed()
+                logger.info(f"✅ Demo limits: max_trades_per_day={self.engine.max_trades_per_day}, daily_tp_target_percent={self.engine.daily_tp_target_percent}")
+
+            self.force_cycle = True
+            logger.info("⚡ Force-cycle set")
+            return
+
+        if cmd in ("start_single", "trade_single"):
+            symbol = cmd_data.get("symbol")
+            logger.info(f"🚀 Command: START SINGLE {symbol}")
+            if symbol:
+                await self.process_symbol(symbol)
+            return
+
+        if cmd == "stop_all":
+            logger.info("🛑 Command: STOP ALL")
+            self.engine.positions = {}
+            return
+
+        if cmd == "update_api":
+            mode = (cmd_data.get("mode") or "demo").lower()
+            logger.info(f"🔄 Command: SWITCH MODE -> {mode}")
+            TRADING_MODE = mode
+            if mode == "real":
+                self.engine = RealTradingEngine(
+                    cmd_data.get("exchange", "bybit"),
+                    cmd_data.get("key"),
+                    cmd_data.get("secret")
+                )
+            else:
+                self.engine = PaperTradingEngine()
+            return
+
+    async def _check_dashboard_commands(self):
+        cmd_path = os.path.join(DATA_DIR, "bot_command.json")
+        if not os.path.exists(cmd_path):
+            return
+
+        try:
+            logger.info(f"📂 Found command file: {cmd_path}")
+            with open(cmd_path, "r") as f:
+                cmd_data = json.load(f)
+            os.remove(cmd_path)
+            logger.info(f"📥 Processing file command: {cmd_data.get('command')}")
+            await self.apply_command(cmd_data)
+        except Exception as e:
+            logger.error(f"❌ Error processing dashboard command: {e}")
+            if os.path.exists(cmd_path):
+                os.remove(cmd_path)
 
     async def _send_startup(self):
         await asyncio.sleep(2)
@@ -1058,6 +1141,9 @@ class TradingBot:
         await self.notifier.send_daily_summary(state)
 
     async def run(self):
+        global BOT_LOOP
+        BOT_LOOP = asyncio.get_running_loop()
+
         # Initialize Telegram
         await self.notifier.initialize()
         await self._send_startup()
