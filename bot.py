@@ -7,12 +7,25 @@ Optimized models with Alligator + Fractals
 import os
 import logging
 import time
-import multiprocessing
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============================================
-# HEALTH CHECK SERVER (separate process; avoids GIL blocking during heavy imports)
+# HEALTH CHECK SERVER (Start immediately for Railway)
+# Respond on both $PORT and default 8080 using non-daemon threads.
 # ============================================
+DEFAULT_PORT = 8080
+ENV_PORT_RAW = os.getenv('PORT')
+try:
+    ENV_PORT = int(ENV_PORT_RAW) if ENV_PORT_RAW else None
+except Exception:
+    ENV_PORT = None
+
+HEALTH_PORTS = []
+if ENV_PORT:
+    HEALTH_PORTS.append(ENV_PORT)
+if DEFAULT_PORT not in HEALTH_PORTS:
+    HEALTH_PORTS.append(DEFAULT_PORT)
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -32,23 +45,11 @@ def _serve_health(port: int):
 
 
 def start_health_servers():
-    ports = []
-    env_port = os.getenv('PORT')
-    if env_port:
+    for p in HEALTH_PORTS:
         try:
-            ports.append(int(env_port))
-        except Exception:
-            pass
-
-    for p in (8080, 8000):
-        if p not in ports:
-            ports.append(p)
-
-    for p in ports:
-        try:
-            proc = multiprocessing.Process(target=_serve_health, args=(p,), daemon=False)
-            proc.start()
-            print(f"✅ Health server started on 0.0.0.0:{p} (pid={proc.pid})")
+            t = threading.Thread(target=_serve_health, args=(p,), daemon=False, name=f"health_{p}")
+            t.start()
+            print(f"✅ Health server listening on 0.0.0.0:{p}")
         except Exception as e:
             print(f"❌ Failed to start health server on port {p}: {e}")
 
