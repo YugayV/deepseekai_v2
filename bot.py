@@ -20,19 +20,24 @@ logger = logging.getLogger(__name__)
 # - GET  /portfolio -> portfolio_state.json
 # - GET  /trades    -> trade_history.csv as JSON
 # ============================================
-DEFAULT_PORTS = (8080, 8000)
-ENV_PORT_RAW = os.getenv('PORT')
-try:
-    ENV_PORT = int(ENV_PORT_RAW) if ENV_PORT_RAW else None
-except Exception:
-    ENV_PORT = None
+DEFAULT_PORT = 8080
 
-API_PORTS = []
-if ENV_PORT:
-    API_PORTS.append(ENV_PORT)
-for p in DEFAULT_PORTS:
-    if p not in API_PORTS:
-        API_PORTS.append(p)
+def _resolve_listen_port() -> int:
+    raw = os.getenv("PORT")
+    if raw is None:
+        return DEFAULT_PORT
+    raw = str(raw).strip()
+    if not raw:
+        return DEFAULT_PORT
+    try:
+        port = int(raw)
+    except Exception:
+        return DEFAULT_PORT
+    if port <= 0 or port > 65535:
+        return DEFAULT_PORT
+    return port
+
+API_PORT = _resolve_listen_port()
 
 DATA_DIR_EARLY = os.getenv("TRADEBOT_DATA_DIR", "data")
 os.makedirs(DATA_DIR_EARLY, exist_ok=True)
@@ -118,21 +123,20 @@ def _serve_api(port: int):
     server.serve_forever()
 
 
-def start_api_servers():
-    print(f"ℹ️ Railway PORT env: {os.getenv('PORT')}")
-    print(f"ℹ️ Bot API ports: {API_PORTS}")
-
-    for p in API_PORTS:
-        try:
-            t = threading.Thread(target=_serve_api, args=(p,), daemon=False, name=f"api_{p}")
-            t.start()
-            print(f"✅ Bot API listening on 0.0.0.0:{p}")
-        except Exception as e:
-            print(f"❌ Failed to start Bot API on port {p}: {e}")
+def start_api_server():
+    port = API_PORT
+    print(f"ℹ️ Bot API port: {port}")
+    try:
+        t = threading.Thread(target=_serve_api, args=(port,), daemon=True, name=f"api_{port}")
+        t.start()
+        print(f"✅ Bot API listening on 0.0.0.0:{port}")
+    except Exception as e:
+        print(f"❌ Failed to start Bot API on port {port}: {e}")
+        raise
 
 
 if os.getenv('RAILWAY') or os.getenv('PORT'):
-    start_api_servers()
+    start_api_server()
 
 # Now import heavy libraries with safety
 try:
