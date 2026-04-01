@@ -118,21 +118,30 @@ class BotApiHandler(BaseHTTPRequestHandler):
         return
 
 
-def _serve_api(port: int):
-    server = HTTPServer(('0.0.0.0', port), BotApiHandler)
-    server.serve_forever()
+def _create_api_server(port: int) -> HTTPServer:
+    return HTTPServer(("0.0.0.0", port), BotApiHandler)
 
 
 def start_api_server():
     port = API_PORT
-    print(f"ℹ️ Bot API port: {port}")
+    server = None
+
     try:
-        t = threading.Thread(target=_serve_api, args=(port,), daemon=True, name=f"api_{port}")
-        t.start()
-        print(f"✅ Bot API listening on 0.0.0.0:{port}")
+        server = _create_api_server(port)
     except Exception as e:
-        print(f"❌ Failed to start Bot API on port {port}: {e}")
-        raise
+        if port != DEFAULT_PORT:
+            try:
+                server = _create_api_server(DEFAULT_PORT)
+                port = DEFAULT_PORT
+            except Exception:
+                raise e
+        else:
+            raise
+
+    print(f"✅ Bot API listening on 0.0.0.0:{port}")
+
+    t = threading.Thread(target=server.serve_forever, daemon=True, name=f"api_{port}")
+    t.start()
 
 
 if os.getenv('RAILWAY') or os.getenv('PORT'):
