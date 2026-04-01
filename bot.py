@@ -82,6 +82,21 @@ if not IMPORTS_OK:
 
 load_dotenv()
 
+# ============================================
+# CONFIG
+# ============================================
+# Trading
+PAPER_CAPITAL = float(os.getenv("PAPER_START_CAPITAL", 10000))
+MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 5.0))
+STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
+TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
+
+# Demo trading limits / pacing
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 5))
+DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
+DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 60))
+REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
+
 
 # ============================================
 # TELEGRAM NOTIFIER (Menu + Signals)
@@ -630,7 +645,14 @@ class PaperTradingEngine:
         self.positions = {}
         self.trades = []
         self.daily_trades = 0
+
+        self.max_trades_per_day = MAX_TRADES_PER_DAY
+        self.daily_tp_target_percent = DAILY_TP_TARGET_PERCENT
+        self.day_date = datetime.utcnow().date().isoformat()
+        self.day_start_balance = initial_capital
+
         self._load_state()
+        self._roll_day_if_needed()
 
     def _save_state(self):
         """Save portfolio state and trade history for the dashboard"""
@@ -638,9 +660,16 @@ class PaperTradingEngine:
             # Save portfolio state
             state = {
                 'balance': self.balance,
-                'equity': self.balance, # Initial equity equals balance
+                'equity': self.balance,
                 'positions': self.positions,
-                'last_update': str(datetime.now())
+                'last_update': str(datetime.now()),
+                'daily': {
+                    'date': self.day_date,
+                    'start_balance': self.day_start_balance,
+                    'trades': self.daily_trades,
+                    'max_trades_per_day': self.max_trades_per_day,
+                    'daily_tp_target_percent': self.daily_tp_target_percent
+                }
             }
             # Handle datetime objects for JSON
             serializable_positions = {}
@@ -670,6 +699,13 @@ class PaperTradingEngine:
                     state = json.load(f)
                 self.balance = state.get('balance', PAPER_CAPITAL)
                 self.positions = state.get('positions', {})
+
+                daily = state.get('daily') or {}
+                self.day_date = str(daily.get('date') or self.day_date)
+                self.day_start_balance = float(daily.get('start_balance') or self.balance)
+                self.daily_trades = int(daily.get('trades') or self.daily_trades)
+                self.max_trades_per_day = int(daily.get('max_trades_per_day') or self.max_trades_per_day)
+                self.daily_tp_target_percent = float(daily.get('daily_tp_target_percent') or self.daily_tp_target_percent)
                 # Restore datetime objects
                 for s, p in self.positions.items():
                     if 'entry_date' in p: p['entry_date'] = datetime.fromisoformat(p['entry_date'])
@@ -685,7 +721,32 @@ class PaperTradingEngine:
             except Exception as e:
                 logger.error(f"Error loading trade history: {e}")
 
+    def _roll_day_if_needed(self):
+        today = datetime.utcnow().date().isoformat()
+        if self.day_date != today:
+            self.day_date = today
+            self.day_start_balance = float(self.balance)
+            self.daily_trades = 0
+
+    def _daily_profit_pct(self):
+        if self.day_start_balance <= 0:
+            return 0.0
+        return (float(self.balance) - float(self.day_start_balance)) / float(self.day_start_balance) * 100.0
+
+    def can_open_new_trade(self):
+        self._roll_day_if_needed()
+        if self.daily_trades >= int(self.max_trades_per_day):
+            return False, "MAX_TRADES_PER_DAY"
+        if self._daily_profit_pct() >= float(self.daily_tp_target_percent):
+            return False, "DAILY_TP_TARGET_REACHED"
+        return True, "OK"
+
     def execute_entry(self, symbol, decision, price):
+        allowed, reason = self.can_open_new_trade()
+        if not allowed:
+            logger.info(f"⛔ {symbol}: Entry blocked ({reason}). TradesToday={self.daily_trades}/{self.max_trades_per_day}, DayPnL={self._daily_profit_pct():+.2f}%")
+            return None
+
         if decision.get('action') != 'entry':
             logger.info(f"⏳ {symbol}: Action is not 'entry' ({decision.get('action')})")
             return None
@@ -722,8 +783,8 @@ class PaperTradingEngine:
         margin = size * price
         self.balance -= margin
         self.daily_trades += 1
-        
-        logger.info(f"🚀 {symbol} ENTRY EXECUTED: {side.upper()} {size:.4f} @ {price:.5f}")
+
+        logger.info(f"🚀 {symbol} ENTRY EXECUTED: {side.upper()} {size:.4f} @ {price:.5f} | TradesToday={self.daily_trades}/{self.max_trades_per_day} | DayPnL={self._daily_profit_pct():+.2f}%")
         self._save_state() # Save after entry
         return self.positions[symbol]
 
@@ -790,6 +851,8 @@ class TradingBot:
     def __init__(self):
         self.ml_loader = MLModelLoader()
         self.deepseek = DeepSeekAdvisor()
+
+        self.cycle_seconds = DEMO_CYCLE_SECONDS if TRADING_MODE == "demo" else REAL_CYCLE_SECONDS
         
         # Select Engine based on mode
         if TRADING_MODE == "real" and EXCHANGE_API_KEY:
@@ -824,8 +887,13 @@ class TradingBot:
                     TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
                     STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
                     MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
+
+                    if isinstance(self.engine, PaperTradingEngine):
+                        self.engine.max_trades_per_day = int(cmd_data.get("max_trades_per_day", self.engine.max_trades_per_day))
+                        self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
+                        self.engine._roll_day_if_needed()
+                        logger.info(f"✅ Demo limits: max_trades_per_day={self.engine.max_trades_per_day}, daily_tp_target_percent={self.engine.daily_tp_target_percent}")
                     
-                    # Force immediate execution of the cycle
                     self.force_cycle = True
                     logger.info("⚡ Cycle force-start flag set. Starting trading cycle immediately.")
                 elif cmd == "start_single" or cmd == "trade_single":
@@ -940,7 +1008,8 @@ class TradingBot:
 
         state = self.engine.get_state(current_prices)
         logger.info(f"Portfolio: Balance=${state['balance']:.2f}, Equity=${state['equity']:.2f}, PnL={state['pnl']:.2f}%")
-        logger.info("Cycle completed. Next in 10 minutes.")
+        next_in = REAL_CYCLE_SECONDS if TRADING_MODE == "real" else DEMO_CYCLE_SECONDS
+        logger.info(f"Cycle completed. Next in {int(next_in)} seconds.")
 
     async def send_portfolio_summary(self):
         """Calculate state and send summary via notifier"""
@@ -969,8 +1038,9 @@ class TradingBot:
                 
                 current_time = time.time()
                 
-                # 2. Check if it's time for a scheduled trading cycle (every 10 mins) or forced
-                if (current_time - last_cycle_time > 600) or getattr(self, 'force_cycle', False):
+                # 2. Check if it's time for a scheduled trading cycle (demo faster) or forced
+                cycle_seconds = REAL_CYCLE_SECONDS if TRADING_MODE == "real" else DEMO_CYCLE_SECONDS
+                if (current_time - last_cycle_time > cycle_seconds) or getattr(self, 'force_cycle', False):
                     if getattr(self, 'force_cycle', False):
                         logger.info("⚡ Forced cycle triggered by command")
                         self.force_cycle = False

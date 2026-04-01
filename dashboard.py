@@ -74,12 +74,24 @@ manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 4.0, 0.5)
 manual_sl = st.sidebar.slider("Stop Loss (%)", 0.5, 5.0, 2.0, 0.5)
 leverage = st.sidebar.selectbox("Leverage", [1, 2, 5, 10, 20, 50, 100], index=2)
 
+st.sidebar.subheader("🕒 Demo Limits")
+max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 5, 1)
+daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10.0, 1.0)
+
 # Start Trading Button in Sidebar
 col_btn1, col_btn2 = st.sidebar.columns(2)
 if col_btn1.button("🚀 Start All", use_container_width=True):
     st.sidebar.success("All pairs started!")
     with open(CMD_PATH, "w") as f:
-        json.dump({"command": "start_all", "tp": float(manual_tp), "sl": float(manual_sl), "leverage": int(leverage), "time": str(datetime.now())}, f)
+        json.dump({
+            "command": "start_all",
+            "tp": float(manual_tp),
+            "sl": float(manual_sl),
+            "leverage": int(leverage),
+            "max_trades_per_day": int(max_trades_per_day),
+            "daily_tp_target_percent": float(daily_tp_target_percent),
+            "time": str(datetime.now())
+        }, f)
 
 if col_btn2.button("🛑 Stop All", use_container_width=True):
     st.sidebar.warning("All stopped!")
@@ -247,7 +259,61 @@ if chart_view == "TradingView (Interactive)":
 else:
     for symbol in assets:
         df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
-        # ... (rest of standard plotly chart logic)
+        if df is None:
+            st.warning(f"No data for {symbol}")
+            continue
+
+        df = df.copy()
+        df['sma_20'] = df['close'].rolling(20).mean()
+        df['sma_50'] = df['close'].rolling(50).mean()
+
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.7, 0.3],
+            subplot_titles=(f"{symbol} - Price", "RSI (14)")
+        )
+
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df['open'],
+                high=df['high'],
+                low=df['low'],
+                close=df['close'],
+                name=symbol
+            ),
+            row=1, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='blue', width=1)),
+            row=1, col=1
+        )
+
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='purple', width=1)),
+            row=2, col=1
+        )
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+        fig.update_layout(height=600, showlegend=True, xaxis_rangeslider_visible=False)
+        fig.update_xaxes(title_text="Date", row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
 
@@ -362,7 +428,15 @@ with col_ctrl1:
     if st.button("🚀 Start AI Trading (All)", use_container_width=True):
         st.success("Command sent!")
         with open(CMD_PATH, "w") as f:
-            json.dump({"command": "start_all", "tp": float(manual_tp), "sl": float(manual_sl), "leverage": int(leverage), "time": str(datetime.now())}, f)
+            json.dump({
+                "command": "start_all",
+                "tp": float(manual_tp),
+                "sl": float(manual_sl),
+                "leverage": int(leverage),
+                "max_trades_per_day": int(max_trades_per_day),
+                "daily_tp_target_percent": float(daily_tp_target_percent),
+                "time": str(datetime.now())
+            }, f)
 
 with col_ctrl2:
     if st.button("🛑 Stop All", use_container_width=True):
@@ -422,7 +496,16 @@ for symbol in assets:
     
     if st.button(f"🚀 Trade {symbol}", key=f"trade_single_{symbol}"):
         with open(CMD_PATH, "w") as f:
-            json.dump({"command": "start_single", "symbol": symbol, "tp": float(manual_tp), "sl": float(manual_sl), "leverage": int(leverage), "time": str(datetime.now())}, f)
+            json.dump({
+                "command": "start_single",
+                "symbol": symbol,
+                "tp": float(manual_tp),
+                "sl": float(manual_sl),
+                "leverage": int(leverage),
+                "max_trades_per_day": int(max_trades_per_day),
+                "daily_tp_target_percent": float(daily_tp_target_percent),
+                "time": str(datetime.now())
+            }, f)
         st.success(f"Trade command for {symbol} sent!")
     st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
