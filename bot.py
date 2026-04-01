@@ -327,7 +327,7 @@ class MultiChannelNotifier:
 
 *Assets:* {', '.join(ALL_SYMBOLS)}
 """
-            await self.send_message(text, self.group_id)
+            await self.send_message(text, target_chat)
 
 
 # ============================================
@@ -882,6 +882,8 @@ class TradingBot:
         self.running = True
     
     async def _check_dashboard_commands(self):
+        global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE, TRADING_MODE
+
         cmd_path = os.path.join(DATA_DIR, "bot_command.json")
         if os.path.exists(cmd_path):
             try:
@@ -896,7 +898,6 @@ class TradingBot:
                 cmd = cmd_data.get("command")
                 if cmd == "start_all":
                     logger.info(f"🚀 Dashboard command: START ALL PAIRS (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
-                    global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE
                     TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
                     STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
                     MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
@@ -922,7 +923,6 @@ class TradingBot:
                 elif cmd == "update_api":
                     mode = cmd_data.get("mode")
                     logger.info(f"🔄 Dashboard command: SWITCH TO {mode.upper()}")
-                    global TRADING_MODE
                     TRADING_MODE = mode
                     if mode == "real":
                         self.engine = RealTradingEngine(
