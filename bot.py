@@ -64,7 +64,6 @@ try:
     import pandas as pd
     import numpy as np
     import yfinance as yf
-    import talib
     import joblib
     from datetime import datetime
     from dotenv import load_dotenv
@@ -374,24 +373,44 @@ def calculate_indicators(df):
     df['volatility'] = df['returns'].rolling(20).std()
 
     # EMA
-    df['ema_8'] = talib.EMA(df['close'], timeperiod=8)
-    df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
-    df['ema_50'] = talib.EMA(df['close'], timeperiod=50)
+    df['ema_8'] = df['close'].ewm(span=8, adjust=False).mean()
+    df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
+    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
 
-    # MACD
-    df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(df['close'])
+    # MACD (12, 26, 9)
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
 
-    # RSI
-    df['rsi'] = talib.RSI(df['close'], timeperiod=14)
+    # RSI (Wilder)
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    df['rsi'] = 100 - (100 / (1 + rs))
 
-    # ATR
-    df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+    # ATR (Wilder)
+    prev_close = df['close'].shift(1)
+    tr = pd.concat([
+        (df['high'] - df['low']).abs(),
+        (df['high'] - prev_close).abs(),
+        (df['low'] - prev_close).abs()
+    ], axis=1).max(axis=1)
+    df['atr'] = tr.ewm(alpha=1/14, adjust=False).mean()
 
-    # Bollinger
-    df['bb_upper'], df['bb_middle'], df['bb_lower'] = talib.BBANDS(df['close'])
+    # Bollinger Bands (20, 2)
+    bb_mid = df['close'].rolling(20).mean()
+    bb_std = df['close'].rolling(20).std()
+    df['bb_middle'] = bb_mid
+    df['bb_upper'] = bb_mid + 2 * bb_std
+    df['bb_lower'] = bb_mid - 2 * bb_std
 
     # Volume
-    df['volume_sma'] = talib.SMA(df['volume'], timeperiod=20)
+    df['volume_sma'] = df['volume'].rolling(20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_sma']
 
     # EMA Cross
@@ -399,10 +418,10 @@ def calculate_indicators(df):
     df.loc[(df['ema_8'] > df['ema_21']) & (df['ema_8'].shift(1) <= df['ema_21'].shift(1)), 'ema_cross'] = 1
     df.loc[(df['ema_8'] < df['ema_21']) & (df['ema_8'].shift(1) >= df['ema_21'].shift(1)), 'ema_cross'] = -1
 
-    # ALLIGATOR
-    df['jaw'] = talib.SMA(df['close'], timeperiod=13).shift(8)
-    df['teeth'] = talib.SMA(df['close'], timeperiod=8).shift(5)
-    df['lips'] = talib.SMA(df['close'], timeperiod=5).shift(3)
+    # ALLIGATOR (SMAs with shifts)
+    df['jaw'] = df['close'].rolling(13).mean().shift(8)
+    df['teeth'] = df['close'].rolling(8).mean().shift(5)
+    df['lips'] = df['close'].rolling(5).mean().shift(3)
 
     jaw_lips_diff = (df['jaw'] - df['lips']).abs()
     df['alligator_asleep'] = (jaw_lips_diff < df['atr'] * 0.5).astype(int)
@@ -467,23 +486,39 @@ class DeepSeekAdvisor:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
-        prompt = f"""
-Act as a binary decision engine for trading {symbol}.
+        recent = df[['open', 'high', 'low', 'close']].tail(6).round(6).to_dict('records')
 
-DATA:
-- ML Prediction: {ml_prediction['regime_name'].upper()}
-- Alligator: {'Bullish' if latest['alligator_bullish'] else 'Bearish' if latest['alligator_bearish'] else 'Neutral'}
+        if int(latest.get('alligator_bullish', 0)) == 1:
+            alligator_state = "BULLISH"
+        elif int(latest.get('alligator_bearish', 0)) == 1:
+            alligator_state = "BEARISH"
+        else:
+            alligator_state = "NEUTRAL"
+
+        fractal_state = "BULLISH" if int(latest.get('fractal_bullish', 0)) == 1 else "BEARISH" if int(latest.get('fractal_bearish', 0)) == 1 else "NONE"
+
+        prompt = f"""
+You are a binary trading decision engine for {symbol}.
+
+INPUTS:
+- Timeframe: 1h (primary)
+- ML Regime: {ml_prediction['regime_name'].upper()}
+- ML Confidence: {ml_prediction['confidence']:.1%}
+- Alligator: {alligator_state} (jaw={float(latest.get('jaw', 0)):.6f}, teeth={float(latest.get('teeth', 0)):.6f}, lips={float(latest.get('lips', 0)):.6f})
+- Fractals: {fractal_state}
+- Last candles (JSON): {recent}
 
 TASK:
-Decide if we should trade NOW. ML accuracy is low, use Alligator as the main filter.
+Decide if we should open a position RIGHT NOW.
+Use Alligator + Fractals as primary filter; ML confidence is secondary.
 
-Respond ONLY with valid JSON:
+Respond ONLY with valid JSON (no extra text):
 {{
-  "trade_decision": "YES/NO",
-  "reasoning_short": "Max 1 sentence in Russian language",
+  "trade_decision": "YES" or "NO",
+  "reasoning_short": "Max 1 sentence in English",
   "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
-  "action": "entry/hold",
-  "side": "long/short"
+  "action": "entry" or "hold",
+  "side": "long" or "short"
 }}
 """
 

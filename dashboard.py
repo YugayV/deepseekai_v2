@@ -399,11 +399,11 @@ for symbol in assets:
                     Strategy: Alligator + Fractals.
                     TP: {manual_tp}%, SL: {manual_sl}%, Leverage: {leverage}x.
                     
-                    RESPOND ONLY IN RUSSIAN (max 30 words):
-                    1. ПРОГНОЗ: [ВВЕРХ/ВНИЗ/ФЛЕТ]
-                    2. ВЕРОЯТНОСТЬ: [0-100]%
-                    3. РЕКОМЕНДАЦИЯ: [ТОРГОВАТЬ/ЖДАТЬ]
-                    4. ПРИЧИНА: [Короткое пояснение по Alligator]
+                    RESPOND ONLY IN ENGLISH (max 40 words):
+                    1. FORECAST: [UP/DOWN/FLAT]
+                    2. PROBABILITY: [0-100]%
+                    3. RECOMMENDATION: [TRADE/WAIT]
+                    4. REASON: [1 short sentence referencing Alligator/Fractals]
                     """
                     
                     response = client.chat.completions.create(

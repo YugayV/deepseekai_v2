@@ -2,23 +2,11 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install build dependencies and TA-Lib
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget build-essential ca-certificates curl python3-dev libgomp1 && \
-    wget https://downloads.sourceforge.net/project/ta-lib/ta-lib/0.4.0/ta-lib-0.4.0-src.tar.gz && \
-    tar -xzf ta-lib-0.4.0-src.tar.gz && \
-    cd ta-lib && \
-    ./configure --prefix=/usr && \
-    make && \
-    make install && \
-    cd .. && \
-    rm -rf ta-lib-0.4.0-src.tar.gz ta-lib && \
+    ca-certificates curl build-essential libgomp1 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-
-# Set environment variables for TA-Lib
-ENV TA_INCLUDE_PATH=/usr/include
-ENV TA_LIBRARY_PATH=/usr/lib
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
