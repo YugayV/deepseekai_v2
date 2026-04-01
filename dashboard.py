@@ -5,10 +5,6 @@ Extended with Alligator/Fractals visualization and DeepSeek analytics
 
 import streamlit as st
 import streamlit.components.v1 as components
-import streamlit.components.v1 as components
-import streamlit.components.v1 as components
-import streamlit.components.v1 as components
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -80,7 +76,7 @@ daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10
 
 # Start Trading Button in Sidebar
 col_btn1, col_btn2 = st.sidebar.columns(2)
-if col_btn1.button("🚀 Start All", use_container_width=True):
+if col_btn1.button("🚀 Start All", width='stretch'):
     st.sidebar.success("All pairs started!")
     with open(CMD_PATH, "w") as f:
         json.dump({
@@ -93,12 +89,10 @@ if col_btn1.button("🚀 Start All", use_container_width=True):
             "time": str(datetime.now())
         }, f)
 
-if col_btn2.button("🛑 Stop All", use_container_width=True):
+if col_btn2.button("🛑 Stop All", width='stretch'):
     st.sidebar.warning("All stopped!")
     with open(CMD_PATH, "w") as f:
         json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
-
-import streamlit.components.v1 as components
 
 # ... existing code ...
 
@@ -313,7 +307,8 @@ else:
 
         fig.update_layout(height=600, showlegend=True, xaxis_rangeslider_visible=False)
         fig.update_xaxes(title_text="Date", row=2, col=1)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
+
 
 st.markdown("---")
 
@@ -375,7 +370,7 @@ for symbol in assets:
                               marker=dict(symbol='triangle-down', size=12, color='red'), name='Bearish Fractal'))
 
     fig.update_layout(title=f'{symbol} ({timeframe}) - Alligator + Fractals', height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 st.markdown("---")
 
@@ -385,7 +380,7 @@ st.markdown("---")
 st.subheader("📋 Trade History")
 
 if not trades.empty:
-    st.dataframe(trades.tail(20), use_container_width=True)
+    st.dataframe(trades.tail(20), width='stretch')
 
     col1, col2, col3, col4 = st.columns(4)
     if 'pnl' in trades.columns:
@@ -425,7 +420,7 @@ api_key = os.getenv("OPENROUTER_API_KEY")
 
 col_ctrl1, col_ctrl2 = st.columns(2)
 with col_ctrl1:
-    if st.button("🚀 Start AI Trading (All)", use_container_width=True):
+    if st.button("🚀 Start AI Trading (All)", width='stretch'):
         st.success("Command sent!")
         with open(CMD_PATH, "w") as f:
             json.dump({
@@ -439,7 +434,7 @@ with col_ctrl1:
             }, f)
 
 with col_ctrl2:
-    if st.button("🛑 Stop All", use_container_width=True):
+    if st.button("🛑 Stop All", width='stretch'):
         st.warning("Stopping...")
         with open(CMD_PATH, "w") as f:
             json.dump({"command": "stop_all", "time": str(datetime.now())}, f)

@@ -204,12 +204,16 @@ class MultiChannelNotifier:
         elif data == 'start_all':
             with open(cmd_path, "w") as f:
                 json.dump({"command": "start_all", "time": str(datetime.now())}, f)
+            if 'bot_instance' in globals() and bot_instance:
+                bot_instance.force_cycle = True
             await query.edit_message_text("🚀 Command sent: *START ALL*", 
                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='trade_menu')]]), parse_mode='Markdown')
 
         elif data == 'stop_all':
             with open(cmd_path, "w") as f:
                 json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
+            if 'bot_instance' in globals() and bot_instance:
+                bot_instance.engine.positions = {}
             await query.edit_message_text("🛑 Command sent: *STOP ALL*", 
                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='trade_menu')]]), parse_mode='Markdown')
 
@@ -218,22 +222,31 @@ class MultiChannelNotifier:
 
     async def send_message(self, text, chat_id=None):
         """Send message to Telegram"""
-        if self.bot:
-            target_chat = chat_id or self.group_id
-            if target_chat:
-                try:
-                    await self.bot.send_message(
-                        chat_id=target_chat,
-                        text=text,
-                        parse_mode='Markdown',
-                        disable_web_page_preview=True
-                    )
-                except Exception as e:
-                    logger.error(f"Telegram send error: {e}")
+        if not self.bot:
+            return
+
+        target_chat = chat_id or self.group_id or self.admin_chat_id
+        if not target_chat:
+            logger.warning("Telegram send skipped: TELEGRAM_GROUP_ID/TELEGRAM_CHAT_ID not set")
+            return
+
+        try:
+            await self.bot.send_message(
+                chat_id=target_chat,
+                text=text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.error(f"Telegram send error: {e}")
 
     async def send_signal(self, signal_type, data):
         """Send a simplified signal"""
-        if not self.bot or not self.group_id:
+        if not self.bot:
+            return
+
+        target_chat = self.group_id or self.admin_chat_id
+        if not target_chat:
             return
 
         if signal_type == "ENTRY":
@@ -246,7 +259,7 @@ class MultiChannelNotifier:
 
 *Reason:* {data.get('analysis', '')}
 """
-            await self.send_message(text, self.group_id)
+            await self.send_message(text, target_chat)
 
         elif signal_type == "CLOSE":
             emoji = "✅" if data.get('pnl', 0) > 0 else "❌"
@@ -262,7 +275,7 @@ class MultiChannelNotifier:
 
 *Exit Reason:* {data.get('reason', 'TP/SL hit')}
 """
-            await self.send_message(text, self.group_id)
+            await self.send_message(text, target_chat)
 
     async def send_error(self, error_msg):
         """Send errors to admin (private message)"""
@@ -863,8 +876,8 @@ class TradingBot:
         # Multi-channel: group chat for signals, private for errors
         self.notifier = MultiChannelNotifier(
             token=TELEGRAM_TOKEN,
-            group_id=os.getenv("TELEGRAM_GROUP_ID"),      # Group ID
-            admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")   # Your personal ID
+            group_id=os.getenv("TELEGRAM_GROUP_ID") or os.getenv("TELEGRAM_CHAT_ID"),
+            admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")
         )
         self.running = True
     
