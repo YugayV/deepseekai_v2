@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # - GET  /portfolio -> portfolio_state.json
 # - GET  /trades    -> trade_history.csv as JSON
 # ============================================
-DEFAULT_PORT = 8080
+DEFAULT_PORTS = (8080, 8000)
 ENV_PORT_RAW = os.getenv('PORT')
 try:
     ENV_PORT = int(ENV_PORT_RAW) if ENV_PORT_RAW else None
@@ -30,8 +30,9 @@ except Exception:
 API_PORTS = []
 if ENV_PORT:
     API_PORTS.append(ENV_PORT)
-if DEFAULT_PORT not in API_PORTS:
-    API_PORTS.append(DEFAULT_PORT)
+for p in DEFAULT_PORTS:
+    if p not in API_PORTS:
+        API_PORTS.append(p)
 
 DATA_DIR_EARLY = os.getenv("TRADEBOT_DATA_DIR", "data")
 os.makedirs(DATA_DIR_EARLY, exist_ok=True)
@@ -382,9 +383,13 @@ class MultiChannelNotifier:
 
     async def send_daily_summary(self, stats):
         """Send detailed report on portfolio and positions"""
-        if not self.bot or not self.group_id:
+        if not self.bot:
             return
-            
+
+        target_chat = self.group_id or self.admin_chat_id
+        if not target_chat:
+            return
+
         text = f"""
 📊 *TRADING PORTFOLIO SUMMARY*
 
@@ -408,12 +413,18 @@ class MultiChannelNotifier:
 • Current: {pos['current_price']:.5f}
 • P&L: {pos['pnl_percent']:+.2f}% (${pos['pnl_usd']:+.2f})
 """
-        await self.send_message(text, self.group_id)
+        await self.send_message(text, target_chat)
 
     async def send_startup_message(self):
         """Send bot startup message"""
-        if self.bot and self.group_id:
-            text = f"""
+        if not self.bot:
+            return
+
+        target_chat = self.group_id or self.admin_chat_id
+        if not target_chat:
+            return
+
+        text = f"""
 🚀 *TRADING BOT STARTED*
 
 *Time:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -424,7 +435,7 @@ class MultiChannelNotifier:
 
 *Assets:* {', '.join(ALL_SYMBOLS)}
 """
-            await self.send_message(text, target_chat)
+        await self.send_message(text, target_chat)
 
 
 # ============================================
