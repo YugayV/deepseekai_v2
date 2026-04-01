@@ -119,6 +119,9 @@ def _serve_api(port: int):
 
 
 def start_api_servers():
+    print(f"ℹ️ Railway PORT env: {os.getenv('PORT')}")
+    print(f"ℹ️ Bot API ports: {API_PORTS}")
+
     for p in API_PORTS:
         try:
             t = threading.Thread(target=_serve_api, args=(p,), daemon=False, name=f"api_{p}")
