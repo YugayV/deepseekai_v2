@@ -204,6 +204,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # ============================================
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.request import HTTPXRequest
+from telegram.request import HTTPXRequest
+from telegram.request import HTTPXRequest
+from telegram.request import HTTPXRequest
 
 class MultiChannelNotifier:
     def __init__(self, token=None, group_id=None, admin_chat_id=None):
@@ -217,14 +221,22 @@ class MultiChannelNotifier:
     async def initialize(self):
         if self.bot_token:
             try:
-                self.application = Application.builder().token(self.bot_token).build()
+                request = HTTPXRequest(
+                    connect_timeout=10,
+                    read_timeout=20,
+                    write_timeout=20,
+                    pool_timeout=10,
+                )
+
+                self.application = Application.builder().token(self.bot_token).request(request).build()
                 self.bot = self.application.bot
-                
+
                 # Handlers
                 self.application.add_handler(CommandHandler("start", self._cmd_start))
                 self.application.add_handler(CommandHandler("menu", self._cmd_start))
                 self.application.add_handler(CallbackQueryHandler(self._handle_callbacks))
-                
+                self.application.add_error_handler(self._on_error)
+
                 await self.application.initialize()
                 await self.application.start()
                 if self.application.updater:
@@ -232,6 +244,12 @@ class MultiChannelNotifier:
                 logger.info("✅ Telegram bot initialized with Main Menu")
             except Exception as e:
                 logger.error(f"Telegram init error: {e}")
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            logger.error(f"Telegram error: {context.error}")
+        except Exception:
+            logger.error("Telegram error occurred")
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
@@ -249,7 +267,11 @@ class MultiChannelNotifier:
 
     async def _handle_callbacks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"CallbackQuery answer failed: {e}")
+
         data = query.data
         cmd_path = os.path.join(DATA_DIR, "bot_command.json")
 
