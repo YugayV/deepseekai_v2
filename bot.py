@@ -10,6 +10,9 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # ============================================
 # HEALTH CHECK SERVER (Start immediately for Railway)
 # Respond on both $PORT and default 8080 using non-daemon threads.
@@ -85,18 +88,39 @@ load_dotenv()
 # ============================================
 # CONFIG
 # ============================================
-# Trading
 PAPER_CAPITAL = float(os.getenv("PAPER_START_CAPITAL", 10000))
 MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 5.0))
 STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
 TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
 
-# Demo trading limits / pacing
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 5))
 DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
 DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 60))
 REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
 
+TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
+
+FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
+CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
+ALL_SYMBOLS = FOREX_SYMBOLS + CRYPTO_SYMBOLS
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+EXCHANGE_ID = os.getenv("EXCHANGE_ID", "bybit")
+EXCHANGE_API_KEY = os.getenv("EXCHANGE_API_KEY")
+EXCHANGE_API_SECRET = os.getenv("EXCHANGE_API_SECRET")
+
+MODEL_PATH = os.path.join("models", "voting_ensemble.pkl")
+SCALER_PATH = os.path.join("models", "feature_scaler.pkl")
+METADATA_PATH = os.path.join("models", "model_metadata.json")
+
+DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
+PORTFOLIO_PATH = os.path.join(DATA_DIR, "portfolio_state.json")
+TRADES_PATH = os.path.join(DATA_DIR, "trade_history.csv")
+
+os.makedirs("models", exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # ============================================
 # TELEGRAM NOTIFIER (Menu + Signals)
