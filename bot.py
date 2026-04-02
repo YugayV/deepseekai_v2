@@ -144,7 +144,7 @@ def start_api_server():
     t.start()
 
 
-if os.getenv('RAILWAY') or os.getenv('PORT'):
+if __name__ == "__main__" and (os.getenv("RAILWAY") or os.getenv("PORT")):
     start_api_server()
 
 # Now import heavy libraries with safety
