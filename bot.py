@@ -746,7 +746,7 @@ Decide if we should open a position RIGHT NOW.
 Use Alligator + Fractals as primary filter; ML confidence is secondary.
 
 Respond ONLY with valid JSON (no extra text):
-{
+{{
   "trade_decision": "YES" or "NO",
   "signal_strength": "weak" or "medium" or "strong",
   "tp_pct": 0,
@@ -755,7 +755,7 @@ Respond ONLY with valid JSON (no extra text):
   "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
   "action": "entry" or "hold",
   "side": "long" or "short"
-}
+}}
 Rules:
 - tp_pct/sl_pct are percentages relative to entry price.
 - If signal_strength is weak, use more conservative risk: smaller tp_pct and tighter sl_pct.

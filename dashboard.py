@@ -4,6 +4,8 @@ Extended with Alligator/Fractals visualization and DeepSeek analytics
 """
 
 import os
+import threading
+import asyncio
 
 DEFAULT_STREAMLIT_PORT = 8501
 
@@ -46,6 +48,25 @@ load_dotenv()
 
 st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide", page_icon="🤖")
 
+RUN_BOT_IN_PROCESS = (os.getenv("RUN_BOT_IN_PROCESS") or "true").strip().lower() == "true"
+
+@st.cache_resource
+def _ensure_bot_running():
+    import bot as bot_module
+
+    def _runner():
+        try:
+            asyncio.run(bot_module.main())
+        except Exception as e:
+            print(f"BOT_BACKGROUND_ERROR: {e}", flush=True)
+
+    t = threading.Thread(target=_runner, daemon=True, name="bot_background")
+    t.start()
+    return True
+
+if RUN_BOT_IN_PROCESS:
+    _ensure_bot_running()
+
 # ============================================
 # SIDEBAR - Configuration
 # ============================================
@@ -58,6 +79,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 BOT_API_URL = (os.getenv("BOT_API_URL") or "").rstrip("/")
 
 def _post_bot_command(payload: dict):
+    if RUN_BOT_IN_PROCESS:
+        try:
+            import bot as bot_module
+            bot_instance = getattr(bot_module, "bot_instance", None)
+            bot_loop = getattr(bot_module, "BOT_LOOP", None)
+            if bot_instance and bot_loop:
+                fut = asyncio.run_coroutine_threadsafe(bot_instance.apply_command(payload), bot_loop)
+                fut.result(timeout=5)
+                return {"ok": True}
+        except Exception:
+            pass
+
     if BOT_API_URL:
         import urllib.request
         body = json.dumps(payload).encode("utf-8")
@@ -480,22 +513,20 @@ col_ctrl1, col_ctrl2 = st.columns(2)
 with col_ctrl1:
     if st.button("🚀 Start AI Trading (All)", width='stretch'):
         st.success("Command sent!")
-        with open(CMD_PATH, "w") as f:
-            json.dump({
-                "command": "start_all",
-                "tp": float(manual_tp),
-                "sl": float(manual_sl),
-                "leverage": int(leverage),
-                "max_trades_per_day": int(max_trades_per_day),
-                "daily_tp_target_percent": float(daily_tp_target_percent),
-                "time": str(datetime.now())
-            }, f)
+        _post_bot_command({
+            "command": "start_all",
+            "tp": float(manual_tp),
+            "sl": float(manual_sl),
+            "leverage": int(leverage),
+            "max_trades_per_day": int(max_trades_per_day),
+            "daily_tp_target_percent": float(daily_tp_target_percent),
+            "time": str(datetime.now())
+        })
 
 with col_ctrl2:
     if st.button("🛑 Stop All", width='stretch'):
         st.warning("Stopping...")
-        with open(CMD_PATH, "w") as f:
-            json.dump({"command": "stop_all", "time": str(datetime.now())}, f)
+        _post_bot_command({"command": "stop_all", "time": str(datetime.now())})
 
 st.markdown("---")
 
@@ -548,17 +579,16 @@ for symbol in assets:
                 st.error(f"AI Error: {e}")
     
     if st.button(f"🚀 Trade {symbol}", key=f"trade_single_{symbol}"):
-        with open(CMD_PATH, "w") as f:
-            json.dump({
-                "command": "start_single",
-                "symbol": symbol,
-                "tp": float(manual_tp),
-                "sl": float(manual_sl),
-                "leverage": int(leverage),
-                "max_trades_per_day": int(max_trades_per_day),
-                "daily_tp_target_percent": float(daily_tp_target_percent),
-                "time": str(datetime.now())
-            }, f)
+        _post_bot_command({
+            "command": "start_single",
+            "symbol": symbol,
+            "tp": float(manual_tp),
+            "sl": float(manual_sl),
+            "leverage": int(leverage),
+            "max_trades_per_day": int(max_trades_per_day),
+            "daily_tp_target_percent": float(daily_tp_target_percent),
+            "time": str(datetime.now())
+        })
         st.success(f"Trade command for {symbol} sent!")
     st.markdown("---")
 st.caption(f"© EURUSD AI Trading Bot | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

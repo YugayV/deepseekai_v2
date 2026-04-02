@@ -21,4 +21,4 @@ ENV RAILWAY=true
 
 EXPOSE 8080
 
-CMD ["python", "bot.py"]
+CMD ["sh", "-c", "streamlit run dashboard.py --server.address 0.0.0.0 --server.port ${PORT:-8501} --server.headless true"]
