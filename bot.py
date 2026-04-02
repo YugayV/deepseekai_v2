@@ -147,20 +147,28 @@ def start_api_server():
 if __name__ == "__main__" and (os.getenv("RAILWAY") or os.getenv("PORT")):
     start_api_server()
 
-# Now import heavy libraries
-import json
-import asyncio
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import joblib
-from datetime import datetime
-from dotenv import load_dotenv
-import openai
+# Now import heavy libraries with safety
+try:
+    import json
+    import asyncio
+    import pandas as pd
+    import numpy as np
+    import yfinance as yf
+    import joblib
+    from datetime import datetime
+    from dotenv import load_dotenv
+    import openai
 
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.request import HTTPXRequest
+    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+    from telegram.request import HTTPXRequest
+
+    IMPORTS_OK = True
+except Exception as e:
+    print(f"❌ CRITICAL IMPORT ERROR: {e}")
+    IMPORTS_OK = False
+    # Fail fast to avoid Streamlit hanging on import
+    raise
 
 load_dotenv()
 
@@ -1418,11 +1426,9 @@ async def main():
                 await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    if not IMPORTS_OK:
-        print("🚨 BOT CANNOT START DUE TO IMPORT ERRORS. Keeping process alive for health check...")
-        while True:
-            time.sleep(60)
-            
+    if not globals().get("IMPORTS_OK", True):
+        raise SystemExit("🚨 BOT CANNOT START DUE TO IMPORT ERRORS.")
+
     try:
         asyncio.run(main())
     except Exception as e:
