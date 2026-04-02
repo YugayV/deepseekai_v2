@@ -140,7 +140,7 @@ def start_api_server():
 
     print(f"✅ Bot API listening on 0.0.0.0:{port}")
 
-    t = threading.Thread(target=server.serve_forever, daemon=True, name=f"api_{port}")
+    t = threading.Thread(target=server.serve_forever, daemon=False, name=f"api_{port}")
     t.start()
 
 
@@ -158,8 +158,11 @@ try:
     from datetime import datetime
     from dotenv import load_dotenv
     import openai
-    
-    # Flag to indicate imports were successful
+
+    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+    from telegram.request import HTTPXRequest
+
     IMPORTS_OK = True
 except Exception as e:
     print(f"❌ CRITICAL IMPORT ERROR: {e}")
@@ -215,12 +218,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # ============================================
 # TELEGRAM NOTIFIER (Menu + Signals)
 # ============================================
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-from telegram.request import HTTPXRequest
-from telegram.request import HTTPXRequest
-from telegram.request import HTTPXRequest
-from telegram.request import HTTPXRequest
 
 class MultiChannelNotifier:
     def __init__(self, token=None, group_id=None, admin_chat_id=None):
