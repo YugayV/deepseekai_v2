@@ -3,6 +3,32 @@ Streamlit Dashboard for EURUSD AI Trading Bot
 Extended with Alligator/Fractals visualization and DeepSeek analytics
 """
 
+import os
+
+DEFAULT_STREAMLIT_PORT = 8501
+
+def _resolve_streamlit_port() -> int:
+    raw = os.getenv("PORT")
+    if raw is None:
+        return DEFAULT_STREAMLIT_PORT
+    raw = str(raw).strip()
+    if not raw:
+        return DEFAULT_STREAMLIT_PORT
+    try:
+        port = int(raw)
+    except Exception:
+        return DEFAULT_STREAMLIT_PORT
+    if port <= 0 or port > 65535:
+        return DEFAULT_STREAMLIT_PORT
+    return port
+
+STREAMLIT_PORT = _resolve_streamlit_port()
+
+os.environ.setdefault("STREAMLIT_SERVER_ADDRESS", "0.0.0.0")
+os.environ.setdefault("STREAMLIT_SERVER_PORT", str(STREAMLIT_PORT))
+os.environ.setdefault("STREAMLIT_SERVER_HEADLESS", "true")
+os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
+
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -13,7 +39,6 @@ import yfinance as yf
 import joblib
 import json
 from datetime import datetime, timedelta
-import os
 from dotenv import load_dotenv
 
 # Load environment variables
