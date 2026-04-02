@@ -266,7 +266,8 @@ class MultiChannelNotifier:
             [InlineKeyboardButton("📊 Portfolio Status", callback_data='status')],
             [InlineKeyboardButton("💰 Current Prices", callback_data='prices')],
             [InlineKeyboardButton("🔮 AI Forecast", callback_data='select_forecast')],
-            [InlineKeyboardButton("🚀 Auto-Trade Controls", callback_data='trade_menu')]
+            [InlineKeyboardButton("🚀 Auto-Trade Controls", callback_data='trade_menu')],
+            [InlineKeyboardButton("⚙️ Risk Settings", callback_data='risk_menu')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = "🤖 *AI Trading Bot Control Panel*\nSelect an option below:"
@@ -329,6 +330,7 @@ class MultiChannelNotifier:
             keyboard = [
                 [InlineKeyboardButton("🚀 START ALL PAIRS", callback_data='start_all')],
                 [InlineKeyboardButton("🛑 STOP ALL PAIRS", callback_data='stop_all')],
+                [InlineKeyboardButton("⚙️ Risk Settings", callback_data='risk_menu')],
                 [InlineKeyboardButton("⬅️ Back", callback_data='main_menu')]
             ]
             await query.edit_message_text("⚙️ *Auto-Trade Controls*", 
@@ -349,6 +351,57 @@ class MultiChannelNotifier:
                 bot_instance.engine.positions = {}
             await query.edit_message_text("🛑 Command sent: *STOP ALL*", 
                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='trade_menu')]]), parse_mode='Markdown')
+
+        elif data == 'risk_menu':
+            keyboard = [[InlineKeyboardButton("🌐 All Pairs", callback_data="risk_sel_ALL")]]
+            keyboard += [[InlineKeyboardButton(f"{s}", callback_data=f"risk_sel_{s}")] for s in ALL_SYMBOLS]
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data='main_menu')])
+            await query.edit_message_text("⚙️ *Select asset to change TP/SL:*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+        elif data.startswith('risk_sel_'):
+            symbol = data.replace('risk_sel_', '', 1)
+            keyboard = [
+                [InlineKeyboardButton("🛡️ Safe (TP 2 / SL 1)", callback_data=f"risk_set_{symbol}_safe")],
+                [InlineKeyboardButton("⚖️ Normal (TP 4 / SL 2)", callback_data=f"risk_set_{symbol}_normal")],
+                [InlineKeyboardButton("🔥 Strong (TP 6 / SL 2.5)", callback_data=f"risk_set_{symbol}_strong")],
+                [InlineKeyboardButton("⬅️ Back", callback_data='risk_menu')],
+            ]
+            await query.edit_message_text(f"⚙️ *Risk presets for:* `{symbol}`", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+        elif data.startswith('risk_set_'):
+            parts = data.split('_', 3)
+            symbol = parts[2] if len(parts) > 2 else 'ALL'
+            preset = parts[3] if len(parts) > 3 else 'normal'
+
+            if preset == 'safe':
+                tp, sl = 2.0, 1.0
+            elif preset == 'strong':
+                tp, sl = 6.0, 2.5
+            else:
+                tp, sl = 4.0, 2.0
+
+            payload = {
+                "command": "set_risk",
+                "scope": "all" if symbol == "ALL" else "symbol",
+                "symbol": None if symbol == "ALL" else symbol,
+                "tp": tp,
+                "sl": sl,
+                "time": str(datetime.now()),
+            }
+
+            try:
+                if 'bot_instance' in globals() and bot_instance and BOT_LOOP:
+                    import asyncio as _asyncio
+                    fut = _asyncio.run_coroutine_threadsafe(bot_instance.apply_command(payload), BOT_LOOP)
+                    fut.result(timeout=5)
+                else:
+                    with open(cmd_path, "w") as f:
+                        json.dump(payload, f)
+            except Exception as e:
+                logger.error(f"Risk preset apply error: {e}")
+
+            scope_txt = "ALL" if symbol == "ALL" else symbol
+            await query.edit_message_text(f"✅ Risk updated for *{scope_txt}*: TP={tp}% SL={sl}%", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='risk_menu')]]), parse_mode='Markdown')
 
         elif data == 'main_menu':
             await self._cmd_start(update, context)
@@ -384,12 +437,21 @@ class MultiChannelNotifier:
 
         if signal_type == "ENTRY":
             emoji = "🟢" if data.get('side') == 'long' else "🔴"
+            tp_pct = data.get('tp_pct')
+            sl_pct = data.get('sl_pct')
+            strength = data.get('signal_strength')
+            risk_line = ""
+            if tp_pct is not None and sl_pct is not None:
+                risk_line = f"*TP/SL:* {float(tp_pct):.2f}% / {float(sl_pct):.2f}%\n"
+            if strength:
+                risk_line += f"*Signal Strength:* {strength}\n"
+
             text = f"""
 {emoji} *TRADE SIGNAL: {data['asset']}*
 
 *ML Prediction:* {data.get('ml_forecast_pct', '0%')}
 *Decision:* {data.get('trade_decision', 'NO')}
-
+{risk_line}
 *Reason:* {data.get('analysis', '')}
 """
             await self.send_message(text, target_chat)
@@ -684,13 +746,20 @@ Decide if we should open a position RIGHT NOW.
 Use Alligator + Fractals as primary filter; ML confidence is secondary.
 
 Respond ONLY with valid JSON (no extra text):
-{{
+{
   "trade_decision": "YES" or "NO",
+  "signal_strength": "weak" or "medium" or "strong",
+  "tp_pct": 0,
+  "sl_pct": 0,
   "reasoning_short": "Max 1 sentence in English",
   "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
   "action": "entry" or "hold",
   "side": "long" or "short"
-}}
+}
+Rules:
+- tp_pct/sl_pct are percentages relative to entry price.
+- If signal_strength is weak, use more conservative risk: smaller tp_pct and tighter sl_pct.
+- If signal_strength is strong, tp_pct can be larger; keep sl_pct reasonable.
 """
 
         try:
@@ -1016,6 +1085,12 @@ class TradingBot:
         else:
             self.engine = PaperTradingEngine()
         
+        self.global_risk = {
+            "tp_pct": float(TAKE_PROFIT_PERCENT),
+            "sl_pct": float(STOP_LOSS_PERCENT),
+        }
+        self.symbol_risk = {s: {"tp_pct": float(self.global_risk["tp_pct"]), "sl_pct": float(self.global_risk["sl_pct"])} for s in ALL_SYMBOLS}
+
         # Multi-channel: group chat for signals, private for errors
         self.notifier = MultiChannelNotifier(
             token=TELEGRAM_TOKEN,
@@ -1045,6 +1120,45 @@ class TradingBot:
 
             self.force_cycle = True
             logger.info("⚡ Force-cycle set")
+            return
+
+        if cmd == "set_risk":
+            scope = (cmd_data.get("scope") or "all").lower()
+            symbol = (cmd_data.get("symbol") or "").strip()
+
+            tp = cmd_data.get("tp")
+            sl = cmd_data.get("sl")
+
+            def _as_float(v, fallback):
+                try:
+                    if v is None:
+                        return float(fallback)
+                    return float(v)
+                except Exception:
+                    return float(fallback)
+
+            if scope == "all" or not symbol:
+                self.global_risk["tp_pct"] = _as_float(tp, self.global_risk["tp_pct"])
+                self.global_risk["sl_pct"] = _as_float(sl, self.global_risk["sl_pct"])
+                for s in ALL_SYMBOLS:
+                    self.symbol_risk.setdefault(s, {})
+                    self.symbol_risk[s]["tp_pct"] = float(self.global_risk["tp_pct"])
+                    self.symbol_risk[s]["sl_pct"] = float(self.global_risk["sl_pct"])
+                logger.info(f"✅ Risk updated for ALL: TP={self.global_risk['tp_pct']}% SL={self.global_risk['sl_pct']}%")
+            else:
+                self.symbol_risk.setdefault(symbol, {"tp_pct": float(self.global_risk["tp_pct"]), "sl_pct": float(self.global_risk["sl_pct"])})
+                self.symbol_risk[symbol]["tp_pct"] = _as_float(tp, self.symbol_risk[symbol]["tp_pct"])
+                self.symbol_risk[symbol]["sl_pct"] = _as_float(sl, self.symbol_risk[symbol]["sl_pct"])
+                logger.info(f"✅ Risk updated for {symbol}: TP={self.symbol_risk[symbol]['tp_pct']}% SL={self.symbol_risk[symbol]['sl_pct']}%")
+
+            if isinstance(self.engine, PaperTradingEngine):
+                if "max_trades_per_day" in (cmd_data or {}):
+                    self.engine.max_trades_per_day = int(cmd_data.get("max_trades_per_day", self.engine.max_trades_per_day))
+                if "daily_tp_target_percent" in (cmd_data or {}):
+                    self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
+                self.engine._roll_day_if_needed()
+
+            self.force_cycle = True
             return
 
         if cmd in ("start_single", "trade_single"):
@@ -1094,6 +1208,68 @@ class TradingBot:
         await asyncio.sleep(2)
         await self.notifier.send_startup_message()
 
+    def _decorate_decision_with_risk(self, symbol: str, price: float, ml_pred: dict, decision: dict) -> dict:
+        d = dict(decision or {})
+        base = (self.symbol_risk.get(symbol) or self.global_risk)
+        base_tp = float(base.get("tp_pct", TAKE_PROFIT_PERCENT))
+        base_sl = float(base.get("sl_pct", STOP_LOSS_PERCENT))
+
+        strength = (str(d.get("signal_strength") or "").strip().lower())
+        if strength not in ("weak", "medium", "strong"):
+            conf = float((ml_pred or {}).get("confidence") or 0.0)
+            if conf >= 0.72:
+                strength = "strong"
+            elif conf >= 0.58:
+                strength = "medium"
+            else:
+                strength = "weak"
+        d["signal_strength"] = strength
+
+        def _as_float(v, fallback):
+            try:
+                if v is None:
+                    return float(fallback)
+                return float(v)
+            except Exception:
+                return float(fallback)
+
+        tp_pct = _as_float(d.get("tp_pct"), base_tp)
+        sl_pct = _as_float(d.get("sl_pct"), base_sl)
+
+        if strength == "weak":
+            tp_pct = min(tp_pct, base_tp * 0.7)
+            sl_pct = min(sl_pct, base_sl * 0.9)
+        elif strength == "strong":
+            tp_pct = max(tp_pct, base_tp * 1.4)
+            sl_pct = max(sl_pct, base_sl)
+
+        tp_pct = max(0.5, min(15.0, float(tp_pct)))
+        sl_pct = max(0.3, min(10.0, float(sl_pct)))
+
+        side = (d.get("side") or "long").lower()
+        if side not in ("long", "short"):
+            side = "long"
+        d["side"] = side
+
+        if side == "long":
+            d["take_profit"] = price * (1.0 + tp_pct / 100.0)
+            d["stop_loss"] = price * (1.0 - sl_pct / 100.0)
+        else:
+            d["take_profit"] = price * (1.0 - tp_pct / 100.0)
+            d["stop_loss"] = price * (1.0 + sl_pct / 100.0)
+
+        d["tp_pct"] = tp_pct
+        d["sl_pct"] = sl_pct
+
+        try:
+            d["confidence"] = int(round(float((ml_pred or {}).get("confidence") or 0.0) * 100))
+        except Exception:
+            d["confidence"] = 50
+
+        d["ml_regime"] = (ml_pred or {}).get("regime_name")
+        d["ml_confidence"] = (ml_pred or {}).get("confidence")
+        return d
+
     async def process_symbol(self, symbol):
         try:
             df = fetch_data(symbol)
@@ -1127,17 +1303,21 @@ class TradingBot:
             if symbol not in self.engine.positions:
                 logger.info(f"🔍 {symbol}: Requesting DeepSeek decision...")
                 decision = self.deepseek.get_decision(symbol, df, ml_pred)
+                decision = self._decorate_decision_with_risk(symbol, float(current_price), ml_pred, decision)
 
                 if decision.get('trade_decision') == 'YES':
-                    logger.info(f"✅ DeepSeek signal: BUY {symbol}")
+                    logger.info(f"✅ DeepSeek signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
                         await self.notifier.send_signal("ENTRY", {
                             'asset': symbol,
-                            'side': position.get('side', 'long'),
+                            'side': position.get('side', decision.get('side', 'long')),
                             'ml_forecast_pct': decision.get('ml_forecast_pct', '0%'),
                             'trade_decision': 'YES',
-                            'analysis': decision.get('reasoning_short', '')
+                            'analysis': decision.get('reasoning_short', ''),
+                            'tp_pct': decision.get('tp_pct'),
+                            'sl_pct': decision.get('sl_pct'),
+                            'signal_strength': decision.get('signal_strength')
                         })
                     else:
                         logger.warning(f"❌ {symbol}: Entry execution failed (insufficient balance or engine error)")
