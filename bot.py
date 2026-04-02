@@ -144,7 +144,7 @@ def start_api_server():
     t.start()
 
 
-if __name__ == "__main__" and (os.getenv("RAILWAY") or os.getenv("PORT")):
+if __name__ == "__main__" and os.getenv("BOT_API_ENABLED", "").lower() in ("1", "true", "yes"):
     start_api_server()
 
 # Now import heavy libraries with safety
@@ -162,11 +162,8 @@ try:
     from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
     from telegram.request import HTTPXRequest
-
-    IMPORTS_OK = True
 except Exception as e:
     print(f"❌ CRITICAL IMPORT ERROR: {e}")
-    IMPORTS_OK = False
     # Fail fast to avoid Streamlit hanging on import
     raise
 
@@ -1426,9 +1423,6 @@ async def main():
                 await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    if not globals().get("IMPORTS_OK", True):
-        raise SystemExit("🚨 BOT CANNOT START DUE TO IMPORT ERRORS.")
-
     try:
         asyncio.run(main())
     except Exception as e:
