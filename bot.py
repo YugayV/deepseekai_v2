@@ -147,31 +147,20 @@ def start_api_server():
 if __name__ == "__main__" and (os.getenv("RAILWAY") or os.getenv("PORT")):
     start_api_server()
 
-# Now import heavy libraries with safety
-try:
-    import json
-    import asyncio
-    import pandas as pd
-    import numpy as np
-    import yfinance as yf
-    import joblib
-    from datetime import datetime
-    from dotenv import load_dotenv
-    import openai
+# Now import heavy libraries
+import json
+import asyncio
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import joblib
+from datetime import datetime
+from dotenv import load_dotenv
+import openai
 
-    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-    from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
-    from telegram.request import HTTPXRequest
-
-    IMPORTS_OK = True
-except Exception as e:
-    print(f"❌ CRITICAL IMPORT ERROR: {e}")
-    IMPORTS_OK = False
-
-if not IMPORTS_OK:
-    print("Keeping process alive for health check...")
-    while True:
-        time.sleep(10)
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.request import HTTPXRequest
 
 load_dotenv()
 
