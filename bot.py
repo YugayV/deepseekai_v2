@@ -1,5 +1,5 @@
 """
-EURUSD AI Trading Bot with DeepSeek
+EURUSD AI Trading Bot with AI
 Inspired by: https://github.com/tot-gromov/llm-deepseek-trading
 Optimized models with Alligator + Fractals
 """
@@ -179,10 +179,9 @@ TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
 
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 5))
 DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
-DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 60))
+DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 300))
 REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
 
-MIN_ML_CONFIDENCE = float(os.getenv("MIN_ML_CONFIDENCE", 0.70))
 BLOCK_WEAK_SIGNALS = (os.getenv("BLOCK_WEAK_SIGNALS", "true").strip().lower() in ("1", "true", "yes"))
 COOLDOWN_BARS = int(os.getenv("COOLDOWN_BARS", 3))
 USE_ATR_RISK = (os.getenv("USE_ATR_RISK", "true").strip().lower() in ("1", "true", "yes"))
@@ -193,7 +192,7 @@ RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
 
-DEEPSEEK_API_KEY = os.getenv("OPENROUTER_API_KEY")
+AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
@@ -321,7 +320,7 @@ class MultiChannelNotifier:
 
         elif data.startswith('get_fc_'):
             symbol = data.replace('get_fc_', '')
-            await query.edit_message_text(f"⌛ Requesting DeepSeek analysis for {symbol}...", parse_mode='Markdown')
+            await query.edit_message_text(f"⌛ Requesting AI analysis for {symbol}...", parse_mode='Markdown')
             # Trigger analysis logic
             if 'bot_instance' in globals() and bot_instance:
                 await bot_instance.process_symbol(symbol)
@@ -706,12 +705,12 @@ def calculate_indicators(df):
 # ============================================
 # DEEPSEEK ADVISOR (following project contract)
 # ============================================
-class DeepSeekAdvisor:
+class AIAdvisor:
     def __init__(self, api_key=None):
         self.client = openai.OpenAI(
-            api_key=api_key or DEEPSEEK_API_KEY,
+            api_key=api_key or AI_API_KEY,
             base_url="https://openrouter.ai/api/v1"
-        ) if api_key or DEEPSEEK_API_KEY else None
+        ) if api_key or AI_API_KEY else None
         self.model = "deepseek/deepseek-chat"
 
     def get_decision(self, symbol, df, ml_prediction):
@@ -782,10 +781,10 @@ Rules:
             if "401" in error_msg:
                 logger.error(f"❌ API Key Error: Please check your OPENROUTER_API_KEY in .env")
             else:
-                logger.error(f"DeepSeek error: {e}")
+                logger.error(f"AI error: {e}")
             return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {error_msg}"}
 
-    def get_pro_decision(self, symbol, df, ml_prediction):
+    def get_reinforse_decision(self, symbol, df, ml_prediction):
         if not self.client:
             return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
 
@@ -1173,7 +1172,7 @@ class PaperTradingEngine:
 class TradingBot:
     def __init__(self):
         self.ml_loader = MLModelLoader()
-        self.deepseek = DeepSeekAdvisor()
+        self.ai = AIAdvisor()
 
         self.cycle_seconds = DEMO_CYCLE_SECONDS if TRADING_MODE == "demo" else REAL_CYCLE_SECONDS
         
@@ -1191,7 +1190,6 @@ class TradingBot:
 
         self.strategy_mode = STRATEGY_MODE
         self.strategy = {
-            "min_ml_confidence": float(MIN_ML_CONFIDENCE),
             "block_weak_signals": bool(BLOCK_WEAK_SIGNALS),
             "cooldown_bars": int(COOLDOWN_BARS),
             "use_atr_risk": bool(USE_ATR_RISK),
@@ -1199,7 +1197,7 @@ class TradingBot:
             "atr_tp_mult": float(ATR_TP_MULT),
         }
         self.last_action_ts = {}
-        self.blocked = {"total": 0, "low_conf": 0, "cooldown": 0, "weak": 0}
+        self.blocked = {"total": 0, "cooldown": 0, "weak": 0}
         self.blocked_by_symbol = {}
 
         # Multi-channel: group chat for signals, private for errors
@@ -1296,7 +1294,6 @@ class TradingBot:
                     return v
                 return str(v).strip().lower() in ("1", "true", "yes")
 
-            self.strategy["min_ml_confidence"] = max(0.0, min(1.0, _as_float(cmd_data.get("min_ml_confidence"), self.strategy.get("min_ml_confidence", 0.70))))
             self.strategy["block_weak_signals"] = _as_bool(cmd_data.get("block_weak_signals"), self.strategy.get("block_weak_signals", True))
             self.strategy["cooldown_bars"] = max(0, _as_int(cmd_data.get("cooldown_bars"), self.strategy.get("cooldown_bars", 3)))
             self.strategy["use_atr_risk"] = _as_bool(cmd_data.get("use_atr_risk"), self.strategy.get("use_atr_risk", True))
@@ -1304,12 +1301,11 @@ class TradingBot:
             self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
-            if mode in ("classic", "pro"):
-                self.strategy_mode = mode
+            if mode in ("classic", "reinforse", "pro"):
+                self.strategy_mode = "reinforse" if mode == "pro" else mode
 
             logger.info(
                 "✅ Filters updated: "
-                f"min_ml_confidence={self.strategy['min_ml_confidence']}, "
                 f"block_weak_signals={self.strategy['block_weak_signals']}, "
                 f"cooldown_bars={self.strategy['cooldown_bars']}, "
                 f"use_atr_risk={self.strategy['use_atr_risk']}, "
@@ -1430,7 +1426,6 @@ class TradingBot:
             meta["blocked"] = {
                 "total": int((self.blocked or {}).get("total", 0)),
                 "reasons": {
-                    "low_conf": int((self.blocked or {}).get("low_conf", 0)),
                     "cooldown": int((self.blocked or {}).get("cooldown", 0)),
                     "weak": int((self.blocked or {}).get("weak", 0)),
                 },
@@ -1448,7 +1443,7 @@ class TradingBot:
     def _record_block(self, symbol: str, reason: str):
         try:
             self.blocked["total"] = int(self.blocked.get("total", 0)) + 1
-            if reason in ("low_conf", "cooldown", "weak"):
+            if reason in ("cooldown", "weak"):
                 self.blocked[reason] = int(self.blocked.get(reason, 0)) + 1
 
             sym = str(symbol)
@@ -1592,24 +1587,19 @@ class TradingBot:
 
             # Only enter if no position
             if symbol not in self.engine.positions:
-                min_conf = float(self.strategy.get("min_ml_confidence", 0.70))
-                ml_conf = float((ml_pred or {}).get("confidence") or 0.0)
-                if ml_conf < min_conf:
-                    logger.info(f"⛔ {symbol}: ML confidence too low ({ml_conf:.1%} < {min_conf:.1%})")
-                    self._record_block(symbol, "low_conf")
-                    return
-
                 if self._in_cooldown(symbol, df):
                     logger.info(f"⏳ {symbol}: Cooldown active")
                     self._record_block(symbol, "cooldown")
                     return
 
-                logger.info(f"🔍 {symbol}: Requesting DeepSeek decision...")
+                logger.info(f"🔍 {symbol}: Requesting AI decision...")
                 mode = (getattr(self, "strategy_mode", None) or STRATEGY_MODE or "classic").strip().lower()
-                if mode == "pro":
-                    decision = self.deepseek.get_pro_decision(symbol, df, ml_pred)
+                if mode in ("reinforse", "pro"):
+                    decision = self.ai.get_reinforse_decision(symbol, df, ml_pred)
+                    mode = "reinforse"
                 else:
-                    decision = self.deepseek.get_decision(symbol, df, ml_pred)
+                    decision = self.ai.get_decision(symbol, df, ml_pred)
+                    mode = "classic"
 
                 decision["strategy_mode"] = mode
 
@@ -1626,7 +1616,7 @@ class TradingBot:
                     return
 
                 if decision.get('trade_decision') == 'YES':
-                    logger.info(f"✅ DeepSeek signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')}")
+                    logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
                         try:
@@ -1648,7 +1638,7 @@ class TradingBot:
                     else:
                         logger.warning(f"❌ {symbol}: Entry execution failed (insufficient balance or engine error)")
                 else:
-                    logger.info(f"⏳ {symbol}: DeepSeek said NO. Reason: {decision.get('reasoning_short', 'No reason provided')}")
+                    logger.info(f"⏳ {symbol}: AI said NO. Reason: {decision.get('reasoning_short', 'No reason provided')}")
             else:
                 logger.info(f"ℹ️ {symbol}: Already in position, skipping entry check.")
 

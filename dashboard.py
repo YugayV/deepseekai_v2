@@ -1,6 +1,6 @@
 """
 Streamlit Dashboard for EURUSD AI Trading Bot
-Extended with Alligator/Fractals visualization and DeepSeek analytics
+Extended with Alligator/Fractals visualization and AI analytics
 """
 
 import os
@@ -158,9 +158,8 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 5, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "DeepSeek Pro"], index=0)
-strategy_mode = "pro" if strategy_label == "DeepSeek Pro" else "classic"
-min_ml_confidence = st.sidebar.slider("Min ML confidence", 0.50, 0.90, 0.70, 0.01)
+strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro"], index=0)
+strategy_mode = "Pro" if strategy_label == "Pro" else "classic"
 block_weak_signals = st.sidebar.checkbox("Block weak signals", value=True)
 cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 3, 1)
 use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
@@ -170,7 +169,6 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
     _post_bot_command({
         "command": "set_filters",
         "strategy_mode": str(strategy_mode),
-        "min_ml_confidence": float(min_ml_confidence),
         "block_weak_signals": bool(block_weak_signals),
         "cooldown_bars": int(cooldown_bars),
         "use_atr_risk": bool(use_atr_risk),
@@ -232,7 +230,7 @@ if st.sidebar.button("🔄 Refresh Data"):
 # ============================================
 # MAIN TITLE
 # ============================================
-st.title("🤖 Multi-Asset AI Trading Bot with DeepSeek")
+st.title("🤖 Multi-Asset AI Trading Bot with AI")
 st.markdown("**Alligator + Fractals | Ensemble ML | Real-time Signals**")
 st.markdown("---")
 
@@ -563,16 +561,14 @@ else:
     if isinstance(blocked, dict):
         reasons = blocked.get("reasons") if isinstance(blocked.get("reasons"), dict) else {}
         total_blk = int(blocked.get("total") or 0)
-        low_conf_blk = int(reasons.get("low_conf") or 0)
         cooldown_blk = int(reasons.get("cooldown") or 0)
         weak_blk = int(reasons.get("weak") or 0)
 
         st.markdown("### Blocks (filtered entries)")
-        b1, b2, b3, b4 = st.columns(4)
+        b1, b2, b3 = st.columns(3)
         b1.metric("Total blocks", total_blk)
-        b2.metric("Low confidence", low_conf_blk)
-        b3.metric("Cooldown", cooldown_blk)
-        b4.metric("Weak blocked", weak_blk)
+        b2.metric("Cooldown", cooldown_blk)
+        b3.metric("Weak blocked", weak_blk)
 
         by_symbol = blocked.get("by_symbol")
         if isinstance(by_symbol, dict) and by_symbol:
@@ -583,7 +579,6 @@ else:
                 rows.append({
                     "symbol": sym,
                     "total": int(v.get("total") or 0),
-                    "low_conf": int(v.get("low_conf") or 0),
                     "cooldown": int(v.get("cooldown") or 0),
                     "weak": int(v.get("weak") or 0),
                 })
@@ -614,7 +609,7 @@ else:
             })
 
         if 'strategy_mode' in view.columns:
-            st.markdown("### Classic vs DeepSeek Pro")
+            st.markdown("### Classic vs Reinforse")
             by_mode = view.groupby('strategy_mode', dropna=False).apply(_group_stats).reset_index()
             st.dataframe(by_mode.sort_values('strategy_mode'), width='stretch')
 
@@ -661,7 +656,7 @@ else:
 # ============================================
 # DEEPSEEK ANALYTICS & CONTROL
 # ============================================
-st.subheader("🧠 DeepSeek AI Control & Analysis")
+st.subheader("🧠 AI Control & Analysis")
 
 # Get API Key
 api_key = os.getenv("OPENROUTER_API_KEY")
@@ -695,12 +690,12 @@ for symbol in assets:
         pos = portfolio['positions'][symbol]
         st.info(f"📍 Active Position: {pos['side'].upper()} | Entry: {pos['entry_price']:.5f}")
 
-    if st.button(f"New Analysis for {symbol}", key=f"deepseek_{symbol}"):
+    if st.button(f"New Analysis for {symbol}", key=f"ai_{symbol}"):
         if not api_key:
             st.error("API Key not found!")
             continue
             
-        with st.spinner(f"DeepSeek analyzing {symbol}..."):
+        with st.spinner(f"AI analyzing {symbol}..."):
             try:
                 import openai
                 client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
