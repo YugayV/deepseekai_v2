@@ -860,6 +860,7 @@ class RealTradingEngine:
 # ============================================
 class PaperTradingEngine:
     def __init__(self, initial_capital=PAPER_CAPITAL):
+        self.initial_capital = initial_capital
         self.balance = initial_capital
         self.positions = {}
         self.trades = []
@@ -946,6 +947,36 @@ class PaperTradingEngine:
             self.day_date = today
             self.day_start_balance = float(self.balance)
             self.daily_trades = 0
+
+    def reset_stats(self, reset_balance: bool = True, symbol: str | None = None):
+        if symbol:
+            if symbol in self.positions:
+                del self.positions[symbol]
+            if self.trades:
+                self.trades = [t for t in self.trades if str(t.get('asset') or t.get('symbol') or '') != symbol]
+        else:
+            self.positions = {}
+            self.trades = []
+            self.daily_trades = 0
+            self.day_date = datetime.utcnow().date().isoformat()
+            if reset_balance:
+                self.balance = float(self.initial_capital)
+            self.day_start_balance = float(self.balance)
+
+        try:
+            if os.path.exists(TRADES_PATH):
+                os.remove(TRADES_PATH)
+        except Exception:
+            pass
+
+        self._save_state()
+
+        try:
+            if self.trades:
+                df = pd.DataFrame(self.trades)
+                df.to_csv(TRADES_PATH, index=False)
+        except Exception as e:
+            logger.error(f"Error saving trade history after reset: {e}")
 
     def _daily_profit_pct(self):
         if self.day_start_balance <= 0:
@@ -1165,6 +1196,27 @@ class TradingBot:
         if cmd == "stop_all":
             logger.info("🛑 Command: STOP ALL")
             self.engine.positions = {}
+            return
+
+        if cmd == "reset_stats":
+            scope = (cmd_data.get("scope") or "all").lower()
+            symbol = (cmd_data.get("symbol") or "").strip()
+            reset_balance = bool(cmd_data.get("reset_balance", True))
+
+            if isinstance(self.engine, PaperTradingEngine):
+                if scope == "symbol" and symbol:
+                    self.engine.reset_stats(reset_balance=False, symbol=symbol)
+                    logger.info(f"🧹 Stats reset for {symbol}")
+                else:
+                    self.engine.reset_stats(reset_balance=reset_balance, symbol=None)
+                    logger.info("🧹 Stats reset for ALL")
+            else:
+                try:
+                    self.engine.positions = {}
+                except Exception:
+                    pass
+
+            self.force_cycle = False
             return
 
         if cmd == "update_api":

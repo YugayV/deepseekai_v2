@@ -175,6 +175,23 @@ if col_btn2.button("🛑 Stop All", width='stretch'):
     st.sidebar.warning("All stopped!")
     _post_bot_command({"command": "stop_all", "time": str(datetime.now())})
 
+st.sidebar.subheader("🧹 Maintenance")
+reset_confirm = st.sidebar.checkbox("Confirm reset", value=False)
+reset_balance = st.sidebar.checkbox("Reset balance to start", value=True)
+if st.sidebar.button("🧹 Reset statistics", width='stretch'):
+    if not reset_confirm:
+        st.sidebar.error("Enable Confirm reset first")
+    else:
+        _post_bot_command({
+            "command": "reset_stats",
+            "scope": "all",
+            "reset_balance": bool(reset_balance),
+            "time": str(datetime.now()),
+        })
+        st.cache_data.clear()
+        st.sidebar.success("Stats reset requested")
+        st.rerun()
+
 # ... existing code ...
 
 # Timeframe
