@@ -191,6 +191,7 @@ ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
 
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
+STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
 
 DEEPSEEK_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
@@ -784,6 +785,63 @@ Rules:
                 logger.error(f"DeepSeek error: {e}")
             return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {error_msg}"}
 
+    def get_pro_decision(self, symbol, df, ml_prediction):
+        if not self.client:
+            return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
+
+        latest = df.iloc[-1]
+        recent = df[['open', 'high', 'low', 'close']].tail(12).round(6).to_dict('records')
+
+        try:
+            bb_pos = float((latest.get('close', 0) - latest.get('bb_lower', 0)) / (latest.get('bb_upper', 1) - latest.get('bb_lower', 0)))
+        except Exception:
+            bb_pos = 0.0
+
+        prompt = f"""
+You are a trading strategy engine for {symbol}.
+
+INPUTS (latest bar):
+- ML Regime: {ml_prediction['regime_name'].upper()} | Confidence: {ml_prediction['confidence']:.1%}
+- RSI(14): {float(latest.get('rsi', 0)):.2f}
+- MACD hist: {float(latest.get('macd_hist', 0)):.6f}
+- Bollinger position (0=lower..1=upper): {bb_pos:.3f}
+- ATR(14): {float(latest.get('atr', 0)):.6f}
+- Alligator bullish: {int(latest.get('alligator_bullish', 0))} | bearish: {int(latest.get('alligator_bearish', 0))} | asleep: {int(latest.get('alligator_asleep', 0))}
+- Fractal bullish: {int(latest.get('fractal_bullish', 0))} | bearish: {int(latest.get('fractal_bearish', 0))}
+- Last candles (JSON): {recent}
+
+TASK:
+Decide whether to TRADE now and propose conservative/normal/aggressive risk based on signal strength.
+
+Respond ONLY with valid JSON (no extra text):
+{{
+  "trade_decision": "YES" or "NO",
+  "signal_strength": "weak" or "medium" or "strong",
+  "tp_pct": 0,
+  "sl_pct": 0,
+  "reasoning_short": "Max 1 sentence in English",
+  "ml_forecast_pct": "{ml_prediction['confidence']:.1%}",
+  "action": "entry" or "hold",
+  "side": "long" or "short"
+}}
+"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=300,
+            )
+            content = response.choices[0].message.content
+            import re
+            match = re.search(r'\{[^{}]*\}', content)
+            if match:
+                return json.loads(match.group())
+            return {'action': 'hold', 'confidence': 0, 'reasoning': 'Parse error'}
+        except Exception as e:
+            return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {e}"}
+
 
 # ============================================
 # DATA FETCHER (multi-timeframe)
@@ -1028,13 +1086,21 @@ class PaperTradingEngine:
             return None
 
         self.positions[symbol] = {
+            'asset': symbol,
             'side': side,
             'entry_price': price,
             'stop_loss': stop,
             'take_profit': target,
             'size': size,
             'confidence': confidence,
-            'entry_date': datetime.now()
+            'entry_date': datetime.now(),
+            'analysis': str(decision.get('reasoning_short', '') or ''),
+            'signal_strength': str(decision.get('signal_strength', '') or ''),
+            'tp_pct': float(decision.get('tp_pct', 0) or 0),
+            'sl_pct': float(decision.get('sl_pct', 0) or 0),
+            'ml_regime': str(decision.get('ml_regime', '') or ''),
+            'ml_confidence': float(decision.get('ml_confidence', 0) or 0),
+            'strategy_mode': str(decision.get('strategy_mode', '') or ''),
         }
 
         margin = size * price
@@ -1123,6 +1189,7 @@ class TradingBot:
         }
         self.symbol_risk = {s: {"tp_pct": float(self.global_risk["tp_pct"]), "sl_pct": float(self.global_risk["sl_pct"])} for s in ALL_SYMBOLS}
 
+        self.strategy_mode = STRATEGY_MODE
         self.strategy = {
             "min_ml_confidence": float(MIN_ML_CONFIDENCE),
             "block_weak_signals": bool(BLOCK_WEAK_SIGNALS),
@@ -1233,6 +1300,10 @@ class TradingBot:
             self.strategy["use_atr_risk"] = _as_bool(cmd_data.get("use_atr_risk"), self.strategy.get("use_atr_risk", True))
             self.strategy["atr_sl_mult"] = max(0.1, _as_float(cmd_data.get("atr_sl_mult"), self.strategy.get("atr_sl_mult", 1.5)))
             self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
+
+            mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
+            if mode in ("classic", "pro"):
+                self.strategy_mode = mode
 
             logger.info(
                 "✅ Filters updated: "
@@ -1454,6 +1525,11 @@ class TradingBot:
             # Check exits first
             closed = self.engine.check_exits(symbol, current_price)
             if closed:
+                try:
+                    self.last_action_ts[symbol] = df.index[-1]
+                except Exception:
+                    pass
+
                 await self.notifier.send_signal("CLOSE", {
                     'asset': symbol,
                     'side': closed['side'],
@@ -1478,7 +1554,14 @@ class TradingBot:
                     return
 
                 logger.info(f"🔍 {symbol}: Requesting DeepSeek decision...")
-                decision = self.deepseek.get_decision(symbol, df, ml_pred)
+                mode = (getattr(self, "strategy_mode", None) or STRATEGY_MODE or "classic").strip().lower()
+                if mode == "pro":
+                    decision = self.deepseek.get_pro_decision(symbol, df, ml_pred)
+                else:
+                    decision = self.deepseek.get_decision(symbol, df, ml_pred)
+
+                decision["strategy_mode"] = mode
+
                 atr = None
                 try:
                     atr = float(df.iloc[-1].get("atr", 0.0))
@@ -1494,6 +1577,11 @@ class TradingBot:
                     logger.info(f"✅ DeepSeek signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
+                        try:
+                            self.last_action_ts[symbol] = df.index[-1]
+                        except Exception:
+                            pass
+
                         await self.notifier.send_signal("ENTRY", {
                             'asset': symbol,
                             'side': position.get('side', decision.get('side', 'long')),
@@ -1502,7 +1590,8 @@ class TradingBot:
                             'analysis': decision.get('reasoning_short', ''),
                             'tp_pct': decision.get('tp_pct'),
                             'sl_pct': decision.get('sl_pct'),
-                            'signal_strength': decision.get('signal_strength')
+                            'signal_strength': decision.get('signal_strength'),
+                            'strategy_mode': decision.get('strategy_mode')
                         })
                     else:
                         logger.warning(f"❌ {symbol}: Entry execution failed (insufficient balance or engine error)")

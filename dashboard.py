@@ -158,6 +158,8 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 5, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
+strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "DeepSeek Pro"], index=0)
+strategy_mode = "pro" if strategy_label == "DeepSeek Pro" else "classic"
 min_ml_confidence = st.sidebar.slider("Min ML confidence", 0.50, 0.90, 0.70, 0.01)
 block_weak_signals = st.sidebar.checkbox("Block weak signals", value=True)
 cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 3, 1)
@@ -167,6 +169,7 @@ atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
 if st.sidebar.button("✅ Apply Filters", width='stretch'):
     _post_bot_command({
         "command": "set_filters",
+        "strategy_mode": str(strategy_mode),
         "min_ml_confidence": float(min_ml_confidence),
         "block_weak_signals": bool(block_weak_signals),
         "cooldown_bars": int(cooldown_bars),
