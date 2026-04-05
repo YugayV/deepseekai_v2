@@ -558,6 +558,39 @@ else:
     fig_eq.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Time", yaxis_title="Equity")
     st.plotly_chart(fig_eq, width='stretch')
 
+    meta = (portfolio or {}).get("meta") if isinstance(portfolio, dict) else None
+    blocked = (meta or {}).get("blocked") if isinstance(meta, dict) else None
+    if isinstance(blocked, dict):
+        reasons = blocked.get("reasons") if isinstance(blocked.get("reasons"), dict) else {}
+        total_blk = int(blocked.get("total") or 0)
+        low_conf_blk = int(reasons.get("low_conf") or 0)
+        cooldown_blk = int(reasons.get("cooldown") or 0)
+        weak_blk = int(reasons.get("weak") or 0)
+
+        st.markdown("### Blocks (filtered entries)")
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Total blocks", total_blk)
+        b2.metric("Low confidence", low_conf_blk)
+        b3.metric("Cooldown", cooldown_blk)
+        b4.metric("Weak blocked", weak_blk)
+
+        by_symbol = blocked.get("by_symbol")
+        if isinstance(by_symbol, dict) and by_symbol:
+            rows = []
+            for sym, v in by_symbol.items():
+                if not isinstance(v, dict):
+                    continue
+                rows.append({
+                    "symbol": sym,
+                    "total": int(v.get("total") or 0),
+                    "low_conf": int(v.get("low_conf") or 0),
+                    "cooldown": int(v.get("cooldown") or 0),
+                    "weak": int(v.get("weak") or 0),
+                })
+            if rows:
+                dfb = pd.DataFrame(rows).sort_values(by=["total"], ascending=False)
+                st.dataframe(dfb, width='stretch')
+
     if 'strategy_mode' in t.columns or 'signal_strength' in t.columns:
         t['strategy_mode'] = (t.get('strategy_mode') if 'strategy_mode' in t.columns else None)
         if 'strategy_mode' in t.columns:

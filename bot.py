@@ -1199,6 +1199,8 @@ class TradingBot:
             "atr_tp_mult": float(ATR_TP_MULT),
         }
         self.last_action_ts = {}
+        self.blocked = {"total": 0, "low_conf": 0, "cooldown": 0, "weak": 0}
+        self.blocked_by_symbol = {}
 
         # Multi-channel: group chat for signals, private for errors
         self.notifier = MultiChannelNotifier(
@@ -1412,6 +1414,53 @@ class TradingBot:
         except Exception:
             return False
 
+    def _persist_bot_meta(self):
+        if not isinstance(self.engine, PaperTradingEngine):
+            return
+
+        try:
+            data = {}
+            if os.path.exists(PORTFOLIO_PATH):
+                with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+
+            meta = dict((data.get("meta") or {}))
+            meta["strategy_mode"] = str(getattr(self, "strategy_mode", "classic"))
+            meta["filters"] = dict(self.strategy or {})
+            meta["blocked"] = {
+                "total": int((self.blocked or {}).get("total", 0)),
+                "reasons": {
+                    "low_conf": int((self.blocked or {}).get("low_conf", 0)),
+                    "cooldown": int((self.blocked or {}).get("cooldown", 0)),
+                    "weak": int((self.blocked or {}).get("weak", 0)),
+                },
+                "by_symbol": dict(self.blocked_by_symbol or {}),
+            }
+
+            data["meta"] = meta
+            data["last_update"] = str(datetime.now())
+
+            with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error saving bot meta: {e}")
+
+    def _record_block(self, symbol: str, reason: str):
+        try:
+            self.blocked["total"] = int(self.blocked.get("total", 0)) + 1
+            if reason in ("low_conf", "cooldown", "weak"):
+                self.blocked[reason] = int(self.blocked.get(reason, 0)) + 1
+
+            sym = str(symbol)
+            s = dict(self.blocked_by_symbol.get(sym) or {})
+            s["total"] = int(s.get("total", 0)) + 1
+            s[reason] = int(s.get(reason, 0)) + 1
+            self.blocked_by_symbol[sym] = s
+        except Exception:
+            return
+
+        self._persist_bot_meta()
+
     def _decorate_decision_with_risk(self, symbol: str, price: float, ml_pred: dict, decision: dict, atr: float | None = None) -> dict:
         d = dict(decision or {})
         base = (self.symbol_risk.get(symbol) or self.global_risk)
@@ -1547,10 +1596,12 @@ class TradingBot:
                 ml_conf = float((ml_pred or {}).get("confidence") or 0.0)
                 if ml_conf < min_conf:
                     logger.info(f"⛔ {symbol}: ML confidence too low ({ml_conf:.1%} < {min_conf:.1%})")
+                    self._record_block(symbol, "low_conf")
                     return
 
                 if self._in_cooldown(symbol, df):
                     logger.info(f"⏳ {symbol}: Cooldown active")
+                    self._record_block(symbol, "cooldown")
                     return
 
                 logger.info(f"🔍 {symbol}: Requesting DeepSeek decision...")
@@ -1571,6 +1622,7 @@ class TradingBot:
 
                 if bool(self.strategy.get("block_weak_signals", True)) and str(decision.get("signal_strength") or "").lower() == "weak":
                     logger.info(f"⛔ {symbol}: Weak signal blocked")
+                    self._record_block(symbol, "weak")
                     return
 
                 if decision.get('trade_decision') == 'YES':
