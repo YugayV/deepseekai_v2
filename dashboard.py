@@ -157,6 +157,26 @@ st.sidebar.subheader("🕒 Demo Limits")
 max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 5, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10.0, 1.0)
 
+st.sidebar.subheader("🧠 Strategy Filters")
+min_ml_confidence = st.sidebar.slider("Min ML confidence", 0.50, 0.90, 0.70, 0.01)
+block_weak_signals = st.sidebar.checkbox("Block weak signals", value=True)
+cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 3, 1)
+use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
+atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
+atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
+if st.sidebar.button("✅ Apply Filters", width='stretch'):
+    _post_bot_command({
+        "command": "set_filters",
+        "min_ml_confidence": float(min_ml_confidence),
+        "block_weak_signals": bool(block_weak_signals),
+        "cooldown_bars": int(cooldown_bars),
+        "use_atr_risk": bool(use_atr_risk),
+        "atr_sl_mult": float(atr_sl_mult),
+        "atr_tp_mult": float(atr_tp_mult),
+        "time": str(datetime.now()),
+    })
+    st.sidebar.success("Filters applied")
+
 # Start Trading Button in Sidebar
 col_btn1, col_btn2 = st.sidebar.columns(2)
 if col_btn1.button("🚀 Start All", width='stretch'):

@@ -182,6 +182,13 @@ DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
 DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 60))
 REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
 
+MIN_ML_CONFIDENCE = float(os.getenv("MIN_ML_CONFIDENCE", 0.70))
+BLOCK_WEAK_SIGNALS = (os.getenv("BLOCK_WEAK_SIGNALS", "true").strip().lower() in ("1", "true", "yes"))
+COOLDOWN_BARS = int(os.getenv("COOLDOWN_BARS", 3))
+USE_ATR_RISK = (os.getenv("USE_ATR_RISK", "true").strip().lower() in ("1", "true", "yes"))
+ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", 1.5))
+ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
+
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 
@@ -1116,6 +1123,16 @@ class TradingBot:
         }
         self.symbol_risk = {s: {"tp_pct": float(self.global_risk["tp_pct"]), "sl_pct": float(self.global_risk["sl_pct"])} for s in ALL_SYMBOLS}
 
+        self.strategy = {
+            "min_ml_confidence": float(MIN_ML_CONFIDENCE),
+            "block_weak_signals": bool(BLOCK_WEAK_SIGNALS),
+            "cooldown_bars": int(COOLDOWN_BARS),
+            "use_atr_risk": bool(USE_ATR_RISK),
+            "atr_sl_mult": float(ATR_SL_MULT),
+            "atr_tp_mult": float(ATR_TP_MULT),
+        }
+        self.last_action_ts = {}
+
         # Multi-channel: group chat for signals, private for errors
         self.notifier = MultiChannelNotifier(
             token=TELEGRAM_TOKEN,
@@ -1182,6 +1199,50 @@ class TradingBot:
                 if "daily_tp_target_percent" in (cmd_data or {}):
                     self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
                 self.engine._roll_day_if_needed()
+
+            self.force_cycle = True
+            return
+
+        if cmd == "set_filters":
+            def _as_float(v, fallback):
+                try:
+                    if v is None:
+                        return float(fallback)
+                    return float(v)
+                except Exception:
+                    return float(fallback)
+
+            def _as_int(v, fallback):
+                try:
+                    if v is None:
+                        return int(fallback)
+                    return int(v)
+                except Exception:
+                    return int(fallback)
+
+            def _as_bool(v, fallback):
+                if v is None:
+                    return bool(fallback)
+                if isinstance(v, bool):
+                    return v
+                return str(v).strip().lower() in ("1", "true", "yes")
+
+            self.strategy["min_ml_confidence"] = max(0.0, min(1.0, _as_float(cmd_data.get("min_ml_confidence"), self.strategy.get("min_ml_confidence", 0.70))))
+            self.strategy["block_weak_signals"] = _as_bool(cmd_data.get("block_weak_signals"), self.strategy.get("block_weak_signals", True))
+            self.strategy["cooldown_bars"] = max(0, _as_int(cmd_data.get("cooldown_bars"), self.strategy.get("cooldown_bars", 3)))
+            self.strategy["use_atr_risk"] = _as_bool(cmd_data.get("use_atr_risk"), self.strategy.get("use_atr_risk", True))
+            self.strategy["atr_sl_mult"] = max(0.1, _as_float(cmd_data.get("atr_sl_mult"), self.strategy.get("atr_sl_mult", 1.5)))
+            self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
+
+            logger.info(
+                "✅ Filters updated: "
+                f"min_ml_confidence={self.strategy['min_ml_confidence']}, "
+                f"block_weak_signals={self.strategy['block_weak_signals']}, "
+                f"cooldown_bars={self.strategy['cooldown_bars']}, "
+                f"use_atr_risk={self.strategy['use_atr_risk']}, "
+                f"atr_sl_mult={self.strategy['atr_sl_mult']}, "
+                f"atr_tp_mult={self.strategy['atr_tp_mult']}"
+            )
 
             self.force_cycle = True
             return
@@ -1254,7 +1315,33 @@ class TradingBot:
         await asyncio.sleep(2)
         await self.notifier.send_startup_message()
 
-    def _decorate_decision_with_risk(self, symbol: str, price: float, ml_pred: dict, decision: dict) -> dict:
+    def _bar_seconds(self, df) -> float:
+        try:
+            diffs = df.index.to_series().diff().dropna().tail(10)
+            if diffs.empty:
+                return 3600.0
+            sec = float(diffs.median().total_seconds())
+            if sec <= 0:
+                return 3600.0
+            return max(60.0, sec)
+        except Exception:
+            return 3600.0
+
+    def _in_cooldown(self, symbol: str, df) -> bool:
+        cooldown_bars = int(self.strategy.get("cooldown_bars", 0) or 0)
+        if cooldown_bars <= 0:
+            return False
+        last_ts = self.last_action_ts.get(symbol)
+        if last_ts is None:
+            return False
+        try:
+            now_ts = pd.Timestamp(df.index[-1])
+            bar_sec = self._bar_seconds(df)
+            return (now_ts - pd.Timestamp(last_ts)).total_seconds() < (bar_sec * cooldown_bars)
+        except Exception:
+            return False
+
+    def _decorate_decision_with_risk(self, symbol: str, price: float, ml_pred: dict, decision: dict, atr: float | None = None) -> dict:
         d = dict(decision or {})
         base = (self.symbol_risk.get(symbol) or self.global_risk)
         base_tp = float(base.get("tp_pct", TAKE_PROFIT_PERCENT))
@@ -1279,30 +1366,63 @@ class TradingBot:
             except Exception:
                 return float(fallback)
 
-        tp_pct = _as_float(d.get("tp_pct"), base_tp)
-        sl_pct = _as_float(d.get("sl_pct"), base_sl)
-
-        if strength == "weak":
-            tp_pct = min(tp_pct, base_tp * 0.7)
-            sl_pct = min(sl_pct, base_sl * 0.9)
-        elif strength == "strong":
-            tp_pct = max(tp_pct, base_tp * 1.4)
-            sl_pct = max(sl_pct, base_sl)
-
-        tp_pct = max(0.5, min(15.0, float(tp_pct)))
-        sl_pct = max(0.3, min(10.0, float(sl_pct)))
-
         side = (d.get("side") or "long").lower()
         if side not in ("long", "short"):
             side = "long"
         d["side"] = side
 
-        if side == "long":
-            d["take_profit"] = price * (1.0 + tp_pct / 100.0)
-            d["stop_loss"] = price * (1.0 - sl_pct / 100.0)
+        use_atr = bool(self.strategy.get("use_atr_risk", False))
+        atr_sl_mult = float(self.strategy.get("atr_sl_mult", 1.5))
+        atr_tp_mult = float(self.strategy.get("atr_tp_mult", 2.5))
+
+        if strength == "weak":
+            atr_tp_mult = min(atr_tp_mult, float(self.strategy.get("atr_tp_mult", 2.5)) * 0.8)
+            atr_sl_mult = max(atr_sl_mult, float(self.strategy.get("atr_sl_mult", 1.5)))
+        elif strength == "strong":
+            atr_tp_mult = max(atr_tp_mult, float(self.strategy.get("atr_tp_mult", 2.5)) * 1.3)
+            atr_sl_mult = max(atr_sl_mult, float(self.strategy.get("atr_sl_mult", 1.5)))
+
+        if use_atr and atr is not None:
+            try:
+                atr_val = float(atr)
+            except Exception:
+                atr_val = 0.0
         else:
-            d["take_profit"] = price * (1.0 - tp_pct / 100.0)
-            d["stop_loss"] = price * (1.0 + sl_pct / 100.0)
+            atr_val = 0.0
+
+        if atr_val > 0:
+            if side == "long":
+                sl_price = price - (atr_val * atr_sl_mult)
+                tp_price = price + (atr_val * atr_tp_mult)
+            else:
+                sl_price = price + (atr_val * atr_sl_mult)
+                tp_price = price - (atr_val * atr_tp_mult)
+
+            sl_pct = abs((price - sl_price) / price) * 100.0
+            tp_pct = abs((tp_price - price) / price) * 100.0
+
+            d["stop_loss"] = float(sl_price)
+            d["take_profit"] = float(tp_price)
+        else:
+            tp_pct = _as_float(d.get("tp_pct"), base_tp)
+            sl_pct = _as_float(d.get("sl_pct"), base_sl)
+
+            if strength == "weak":
+                tp_pct = min(tp_pct, base_tp * 0.7)
+                sl_pct = min(sl_pct, base_sl * 0.9)
+            elif strength == "strong":
+                tp_pct = max(tp_pct, base_tp * 1.4)
+                sl_pct = max(sl_pct, base_sl)
+
+            if side == "long":
+                d["take_profit"] = price * (1.0 + tp_pct / 100.0)
+                d["stop_loss"] = price * (1.0 - sl_pct / 100.0)
+            else:
+                d["take_profit"] = price * (1.0 - tp_pct / 100.0)
+                d["stop_loss"] = price * (1.0 + sl_pct / 100.0)
+
+        tp_pct = max(0.5, min(15.0, float(tp_pct)))
+        sl_pct = max(0.3, min(10.0, float(sl_pct)))
 
         d["tp_pct"] = tp_pct
         d["sl_pct"] = sl_pct
@@ -1347,9 +1467,28 @@ class TradingBot:
 
             # Only enter if no position
             if symbol not in self.engine.positions:
+                min_conf = float(self.strategy.get("min_ml_confidence", 0.70))
+                ml_conf = float((ml_pred or {}).get("confidence") or 0.0)
+                if ml_conf < min_conf:
+                    logger.info(f"⛔ {symbol}: ML confidence too low ({ml_conf:.1%} < {min_conf:.1%})")
+                    return
+
+                if self._in_cooldown(symbol, df):
+                    logger.info(f"⏳ {symbol}: Cooldown active")
+                    return
+
                 logger.info(f"🔍 {symbol}: Requesting DeepSeek decision...")
                 decision = self.deepseek.get_decision(symbol, df, ml_pred)
-                decision = self._decorate_decision_with_risk(symbol, float(current_price), ml_pred, decision)
+                atr = None
+                try:
+                    atr = float(df.iloc[-1].get("atr", 0.0))
+                except Exception:
+                    atr = None
+                decision = self._decorate_decision_with_risk(symbol, float(current_price), ml_pred, decision, atr=atr)
+
+                if bool(self.strategy.get("block_weak_signals", True)) and str(decision.get("signal_strength") or "").lower() == "weak":
+                    logger.info(f"⛔ {symbol}: Weak signal blocked")
+                    return
 
                 if decision.get('trade_decision') == 'YES':
                     logger.info(f"✅ DeepSeek signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')}")
