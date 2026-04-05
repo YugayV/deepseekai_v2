@@ -506,20 +506,104 @@ for symbol in assets:
 st.markdown("---")
 
 # ============================================
+# STRATEGY DIAGNOSTICS
+# ============================================
+st.subheader("📊 Strategy Diagnostics")
+
+if trades is None or trades.empty or 'pnl' not in trades.columns:
+    st.info("No trade statistics yet. Run the bot first.")
+else:
+    start_capital = float(os.getenv("PAPER_START_CAPITAL", 10000))
+
+    t = trades.copy()
+    if 'exit_date' in t.columns:
+        t['exit_dt'] = pd.to_datetime(t['exit_date'], errors='coerce')
+    elif 'entry_date' in t.columns:
+        t['exit_dt'] = pd.to_datetime(t['entry_date'], errors='coerce')
+    else:
+        t['exit_dt'] = pd.NaT
+
+    t = t.sort_values(by=['exit_dt'], na_position='last')
+
+    def _profit_factor(pnl_series: pd.Series) -> float:
+        wins = pnl_series[pnl_series > 0].sum()
+        losses = pnl_series[pnl_series < 0].sum()
+        if losses == 0:
+            return float('inf') if wins > 0 else 0.0
+        return float(wins / abs(losses))
+
+    def _max_drawdown(equity: pd.Series) -> float:
+        if equity.empty:
+            return 0.0
+        peak = equity.cummax()
+        dd = (equity / peak) - 1.0
+        return float(dd.min())
+
+    pnl = pd.to_numeric(t['pnl'], errors='coerce').fillna(0.0)
+    wins = pnl[pnl > 0]
+    losses = pnl[pnl < 0]
+
+    equity = start_capital + pnl.cumsum()
+    max_dd = _max_drawdown(equity)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Trades", int(len(pnl)))
+    c2.metric("Win Rate", f"{(len(wins)/len(pnl)*100):.1f}%" if len(pnl) else "0%")
+    c3.metric("Expectancy", f"${pnl.mean():.2f}")
+    c4.metric("Profit Factor", f"{_profit_factor(pnl):.2f}" if len(pnl) else "0")
+    c5.metric("Max Drawdown", f"{max_dd*100:.2f}%")
+
+    fig_eq = go.Figure()
+    fig_eq.add_trace(go.Scatter(x=t['exit_dt'].fillna(method='ffill'), y=equity, mode='lines', name='Equity'))
+    fig_eq.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Time", yaxis_title="Equity")
+    st.plotly_chart(fig_eq, width='stretch')
+
+    if 'strategy_mode' in t.columns or 'signal_strength' in t.columns:
+        t['strategy_mode'] = (t.get('strategy_mode') if 'strategy_mode' in t.columns else None)
+        if 'strategy_mode' in t.columns:
+            t['strategy_mode'] = t['strategy_mode'].fillna('unknown').astype(str)
+        t['signal_strength'] = (t.get('signal_strength') if 'signal_strength' in t.columns else None)
+        if 'signal_strength' in t.columns:
+            t['signal_strength'] = t['signal_strength'].fillna('unknown').astype(str)
+
+        view = t.copy()
+        view['pnl_num'] = pd.to_numeric(view['pnl'], errors='coerce').fillna(0.0)
+
+        def _group_stats(g: pd.DataFrame):
+            p = g['pnl_num']
+            w = p[p > 0]
+            return pd.Series({
+                'trades': int(len(p)),
+                'win_rate_pct': float((len(w)/len(p)*100) if len(p) else 0.0),
+                'expectancy': float(p.mean() if len(p) else 0.0),
+                'profit_factor': _profit_factor(p),
+                'total_pnl': float(p.sum()),
+            })
+
+        if 'strategy_mode' in view.columns:
+            st.markdown("### Classic vs DeepSeek Pro")
+            by_mode = view.groupby('strategy_mode', dropna=False).apply(_group_stats).reset_index()
+            st.dataframe(by_mode.sort_values('strategy_mode'), width='stretch')
+
+        if 'signal_strength' in view.columns:
+            st.markdown("### By Signal Strength")
+            by_strength = view.groupby('signal_strength', dropna=False).apply(_group_stats).reset_index()
+            st.dataframe(by_strength.sort_values('signal_strength'), width='stretch')
+
+        if 'strategy_mode' in view.columns and 'signal_strength' in view.columns:
+            st.markdown("### Mode × Strength")
+            by_both = view.groupby(['strategy_mode', 'signal_strength'], dropna=False).apply(_group_stats).reset_index()
+            st.dataframe(by_both.sort_values(['strategy_mode', 'signal_strength']), width='stretch')
+
+st.markdown("---")
+
+# ============================================
 # TRADE HISTORY
 # ============================================
 st.subheader("📋 Trade History")
 
-if not trades.empty:
-    st.dataframe(trades.tail(20), width='stretch')
-
-    col1, col2, col3, col4 = st.columns(4)
-    if 'pnl' in trades.columns:
-        winning = trades[trades['pnl'] > 0]
-        col1.metric("Total Trades", len(trades))
-        col2.metric("Winning Trades", len(winning))
-        col3.metric("Win Rate", f"{len(winning)/len(trades)*100:.1f}" if len(trades) > 0 else "0%")
-        col4.metric("Total P&L", f"${trades['pnl'].sum():.2f}")
+if trades is not None and not trades.empty:
+    st.dataframe(trades.tail(50), width='stretch')
 else:
     st.info("No trades recorded yet. Run the bot first.")
 
