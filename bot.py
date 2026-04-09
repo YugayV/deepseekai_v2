@@ -441,18 +441,67 @@ class MultiChannelNotifier:
             tp_pct = data.get('tp_pct')
             sl_pct = data.get('sl_pct')
             strength = data.get('signal_strength')
-            risk_line = ""
+
+            notional = data.get('notional')
+            margin = data.get('margin')
+            balance_before = data.get('balance_before')
+            balance_after = data.get('balance_after')
+            entry_price = data.get('entry_price')
+            size = data.get('size')
+            tp_price = data.get('take_profit')
+            sl_price = data.get('stop_loss')
+
+            lines = []
+            if entry_price is not None and size is not None:
+                try:
+                    lines.append(f"*Entry:* {float(entry_price):.6f} | *Size:* {float(size):.6f}")
+                except Exception:
+                    pass
+
+            if tp_price is not None and sl_price is not None:
+                try:
+                    lines.append(f"*TP/SL (price):* {float(tp_price):.6f} / {float(sl_price):.6f}")
+                except Exception:
+                    pass
+
             if tp_pct is not None and sl_pct is not None:
-                risk_line = f"*TP/SL:* {float(tp_pct):.2f}% / {float(sl_pct):.2f}%\n"
+                try:
+                    lines.append(f"*TP/SL (%):* {float(tp_pct):.2f}% / {float(sl_pct):.2f}%")
+                except Exception:
+                    pass
+
+            if notional is not None or margin is not None:
+                try:
+                    n = float(notional) if notional is not None else None
+                    m = float(margin) if margin is not None else None
+                    if n is not None and m is not None:
+                        lines.append(f"*Notional/Margin:* ${n:.2f} / ${m:.2f}")
+                    elif n is not None:
+                        lines.append(f"*Notional:* ${n:.2f}")
+                    elif m is not None:
+                        lines.append(f"*Margin:* ${m:.2f}")
+                except Exception:
+                    pass
+
+            if balance_before is not None and balance_after is not None:
+                try:
+                    b0 = float(balance_before)
+                    b1 = float(balance_after)
+                    lines.append(f"*Balance:* ${b0:.2f} -> ${b1:.2f} (margin locked)")
+                except Exception:
+                    pass
+
             if strength:
-                risk_line += f"*Signal Strength:* {strength}\n"
+                lines.append(f"*Signal Strength:* {strength}")
+
+            details = "\n".join(lines)
 
             text = f"""
-{emoji} *TRADE SIGNAL: {data['asset']}*
+{emoji} *TRADE OPENED: {data['asset']}*
 
-*ML Prediction:* {data.get('ml_forecast_pct', '0%')}
 *Decision:* {data.get('trade_decision', 'NO')}
-{risk_line}
+{details}
+
 *Reason:* {data.get('analysis', '')}
 """
             await self.send_message(text, target_chat)
@@ -941,29 +990,65 @@ class PaperTradingEngine:
     def _save_state(self):
         """Save portfolio state and trade history for the dashboard"""
         try:
-            # Save portfolio state
+            existing_meta = None
+            if os.path.exists(PORTFOLIO_PATH):
+                try:
+                    with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+                        prev = json.load(f) or {}
+                    if isinstance(prev, dict) and isinstance(prev.get("meta"), dict):
+                        existing_meta = prev.get("meta")
+                except Exception:
+                    existing_meta = None
+
+            serializable_positions = {}
+            used_margin = 0.0
+            unrealized_pnl = 0.0
+
+            for s, p in self.positions.items():
+                p_copy = dict(p or {})
+                if 'entry_date' in p_copy:
+                    p_copy['entry_date'] = str(p_copy['entry_date'])
+
+                entry = float(p_copy.get('entry_price') or 0.0)
+                size = float(p_copy.get('size') or 0.0)
+                side = str(p_copy.get('side') or 'long')
+                last_price = float(p_copy.get('last_price') or entry)
+
+                margin = float(p_copy.get('margin') or (size * entry))
+                used_margin += margin
+
+                if side == 'short':
+                    unrealized_pnl += (entry - last_price) * size
+                else:
+                    unrealized_pnl += (last_price - entry) * size
+
+                p_copy['margin'] = margin
+                p_copy['last_price'] = last_price
+                p_copy['unrealized_pnl'] = (entry - last_price) * size if side == 'short' else (last_price - entry) * size
+
+                serializable_positions[s] = p_copy
+
+            equity = float(self.balance) + float(used_margin) + float(unrealized_pnl)
+
             state = {
-                'balance': self.balance,
-                'equity': self.balance,
-                'positions': self.positions,
+                'balance': float(self.balance),
+                'equity': float(equity),
+                'used_margin': float(used_margin),
+                'unrealized_pnl': float(unrealized_pnl),
+                'positions': serializable_positions,
                 'last_update': str(datetime.now()),
                 'daily': {
                     'date': self.day_date,
-                    'start_balance': self.day_start_balance,
-                    'trades': self.daily_trades,
-                    'max_trades_per_day': self.max_trades_per_day,
-                    'daily_tp_target_percent': self.daily_tp_target_percent
+                    'start_balance': float(self.day_start_balance),
+                    'trades': int(self.daily_trades),
+                    'max_trades_per_day': int(self.max_trades_per_day),
+                    'daily_tp_target_percent': float(self.daily_tp_target_percent)
                 }
             }
-            # Handle datetime objects for JSON
-            serializable_positions = {}
-            for s, p in self.positions.items():
-                p_copy = p.copy()
-                if 'entry_date' in p_copy: p_copy['entry_date'] = str(p_copy['entry_date'])
-                serializable_positions[s] = p_copy
-            state['positions'] = serializable_positions
-            
-            with open(PORTFOLIO_PATH, "w") as f:
+            if existing_meta is not None:
+                state['meta'] = existing_meta
+
+            with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=4)
             
             # Save trade history to CSV
@@ -1084,14 +1169,17 @@ class PaperTradingEngine:
             logger.warning(f"❌ {symbol}: Calculated size is 0 (Risk={risk_amount}, UnitRisk={risk_per_unit})")
             return None
 
+        balance_before = float(self.balance)
+        margin = float(size * price)
+
         self.positions[symbol] = {
             'asset': symbol,
             'side': side,
-            'entry_price': price,
-            'stop_loss': stop,
-            'take_profit': target,
-            'size': size,
-            'confidence': confidence,
+            'entry_price': float(price),
+            'stop_loss': float(stop),
+            'take_profit': float(target),
+            'size': float(size),
+            'confidence': float(confidence),
             'entry_date': datetime.now(),
             'analysis': str(decision.get('reasoning_short', '') or ''),
             'signal_strength': str(decision.get('signal_strength', '') or ''),
@@ -1100,10 +1188,14 @@ class PaperTradingEngine:
             'ml_regime': str(decision.get('ml_regime', '') or ''),
             'ml_confidence': float(decision.get('ml_confidence', 0) or 0),
             'strategy_mode': str(decision.get('strategy_mode', '') or ''),
+            'margin': float(margin),
+            'notional': float(size * price),
+            'last_price': float(price),
+            'balance_before': float(balance_before),
         }
 
-        margin = size * price
         self.balance -= margin
+        self.positions[symbol]['balance_after'] = float(self.balance)
         self.daily_trades += 1
 
         logger.info(f"🚀 {symbol} ENTRY EXECUTED: {side.upper()} {size:.4f} @ {price:.5f} | TradesToday={self.daily_trades}/{self.max_trades_per_day} | DayPnL={self._daily_profit_pct():+.2f}%")
@@ -1134,10 +1226,11 @@ class PaperTradingEngine:
                 pnl = (pos['entry_price'] - price) * pos['size']
 
         if close_reason:
-            self.balance += pos['size'] * price + pnl
+            margin = float(pos.get('margin') or (pos['size'] * pos['entry_price']))
+            self.balance += margin + pnl
             pos['exit_price'] = price
             pos['pnl'] = pnl
-            pos['pnl_percent'] = (pnl / (pos['size'] * pos['entry_price'])) * 100
+            pos['pnl_percent'] = (pnl / margin) * 100 if margin > 0 else 0
             pos['exit_reason'] = close_reason
             pos['exit_date'] = str(datetime.now())
 
@@ -1301,7 +1394,7 @@ class TradingBot:
             self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
-            if mode in ("classic", "reinforse", "pro"):
+            if mode in ("classic", "reinforse", "pro", "mix"):
                 self.strategy_mode = "reinforse" if mode == "pro" else mode
 
             logger.info(
@@ -1560,6 +1653,12 @@ class TradingBot:
 
             current_price = df['close'].iloc[-1]
 
+            try:
+                if symbol in self.engine.positions and isinstance(self.engine.positions.get(symbol), dict):
+                    self.engine.positions[symbol]['last_price'] = float(current_price)
+            except Exception:
+                pass
+
             # ML Prediction
             ml_pred = self.ml_loader.predict(df)
             if not ml_pred:
@@ -1594,12 +1693,60 @@ class TradingBot:
 
                 logger.info(f"🔍 {symbol}: Requesting AI decision...")
                 mode = (getattr(self, "strategy_mode", None) or STRATEGY_MODE or "classic").strip().lower()
-                if mode in ("reinforse", "pro"):
-                    decision = self.ai.get_reinforse_decision(symbol, df, ml_pred)
+
+                # Backward-compat: "pro" == "reinforse"
+                if mode == "pro":
                     mode = "reinforse"
+
+                if mode == "mix":
+                    d_classic = self.ai.get_decision(symbol, df, ml_pred) or {}
+                    d_pro = self.ai.get_reinforse_decision(symbol, df, ml_pred) or {}
+
+                    def _rank(v: str) -> int:
+                        v = str(v or "").lower()
+                        return 3 if v == "strong" else 2 if v == "medium" else 1 if v == "weak" else 0
+
+                    def _is_yes(d: dict) -> bool:
+                        return str(d.get('trade_decision') or '').upper() == 'YES' and str(d.get('action') or '').lower() == 'entry'
+
+                    yes_c = _is_yes(d_classic)
+                    yes_p = _is_yes(d_pro)
+                    side_c = str(d_classic.get('side') or 'long').lower()
+                    side_p = str(d_pro.get('side') or 'long').lower()
+
+                    if yes_c and yes_p and side_c == side_p:
+                        decision = dict(d_pro)
+                        decision['side'] = side_p
+                        decision['signal_strength'] = d_pro.get('signal_strength') if _rank(d_pro.get('signal_strength')) >= _rank(d_classic.get('signal_strength')) else d_classic.get('signal_strength')
+                        try:
+                            decision['tp_pct'] = min(float(d_classic.get('tp_pct') or 0), float(d_pro.get('tp_pct') or 0))
+                        except Exception:
+                            pass
+                        try:
+                            decision['sl_pct'] = max(float(d_classic.get('sl_pct') or 0), float(d_pro.get('sl_pct') or 0))
+                        except Exception:
+                            pass
+                        decision['reasoning_short'] = f"MIX agree: classic={d_classic.get('reasoning_short','')}; pro={d_pro.get('reasoning_short','')}"[:250]
+                        decision['trade_decision'] = 'YES'
+                        decision['action'] = 'entry'
+                    elif yes_c ^ yes_p:
+                        winner = d_pro if yes_p else d_classic
+                        loser = d_classic if yes_p else d_pro
+                        if _rank(winner.get('signal_strength')) >= 3:
+                            decision = dict(winner)
+                            decision['reasoning_short'] = f"MIX strong override: yes={winner.get('reasoning_short','')}; no={loser.get('reasoning_short','')}"[:250]
+                        else:
+                            decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'MIX disagree'}
+                    else:
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'MIX no signals'}
+                elif mode == "reinforse":
+                    decision = self.ai.get_reinforse_decision(symbol, df, ml_pred)
                 else:
-                    decision = self.ai.get_decision(symbol, df, ml_pred)
                     mode = "classic"
+                    decision = self.ai.get_decision(symbol, df, ml_pred)
+
+                if not isinstance(decision, dict):
+                    decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'invalid_decision'}
 
                 decision["strategy_mode"] = mode
 
@@ -1616,7 +1763,7 @@ class TradingBot:
                     return
 
                 if decision.get('trade_decision') == 'YES':
-                    logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')}")
+                    logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
                         try:
@@ -1627,13 +1774,20 @@ class TradingBot:
                         await self.notifier.send_signal("ENTRY", {
                             'asset': symbol,
                             'side': position.get('side', decision.get('side', 'long')),
-                            'ml_forecast_pct': decision.get('ml_forecast_pct', '0%'),
                             'trade_decision': 'YES',
                             'analysis': decision.get('reasoning_short', ''),
                             'tp_pct': decision.get('tp_pct'),
                             'sl_pct': decision.get('sl_pct'),
                             'signal_strength': decision.get('signal_strength'),
-                            'strategy_mode': decision.get('strategy_mode')
+                            'strategy_mode': decision.get('strategy_mode'),
+                            'entry_price': position.get('entry_price'),
+                            'size': position.get('size'),
+                            'take_profit': position.get('take_profit'),
+                            'stop_loss': position.get('stop_loss'),
+                            'notional': position.get('notional'),
+                            'margin': position.get('margin'),
+                            'balance_before': position.get('balance_before'),
+                            'balance_after': position.get('balance_after'),
                         })
                     else:
                         logger.warning(f"❌ {symbol}: Entry execution failed (insufficient balance or engine error)")
@@ -1669,6 +1823,16 @@ class TradingBot:
                 current_prices[symbol] = df['close'].iloc[-1]
 
         state = self.engine.get_state(current_prices)
+
+        if isinstance(self.engine, PaperTradingEngine):
+            try:
+                for s, px in (current_prices or {}).items():
+                    if s in self.engine.positions and isinstance(self.engine.positions.get(s), dict):
+                        self.engine.positions[s]['last_price'] = float(px)
+                self.engine._save_state()
+            except Exception as e:
+                logger.error(f"Error saving cycle state: {e}")
+
         logger.info(f"Portfolio: Balance=${state['balance']:.2f}, Equity=${state['equity']:.2f}, PnL={state['pnl']:.2f}%")
         next_in = REAL_CYCLE_SECONDS if TRADING_MODE == "real" else DEMO_CYCLE_SECONDS
         logger.info(f"Cycle completed. Next in {int(next_in)} seconds.")

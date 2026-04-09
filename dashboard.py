@@ -158,8 +158,8 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 5, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro"], index=0)
-strategy_mode = "Pro" if strategy_label == "Pro" else "classic"
+strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro", "Mix"], index=0)
+strategy_mode = "classic" if strategy_label == "Classic" else "pro" if strategy_label == "Pro" else "mix"
 block_weak_signals = st.sidebar.checkbox("Block weak signals", value=True)
 cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 3, 1)
 use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
@@ -301,9 +301,10 @@ st.subheader("📊 Portfolio Overview")
 col1, col2, col3, col4, col5 = st.columns(5)
 
 if portfolio:
-    balance = portfolio.get('balance', 10000.0)
-    equity = portfolio.get('equity', balance)
-    pnl_pct = ((equity - 10000.0) / 10000.0) * 100
+    start_capital = float(os.getenv("PAPER_START_CAPITAL", 10000))
+    balance = float(portfolio.get('balance', start_capital))
+    equity = float(portfolio.get('equity', balance))
+    pnl_pct = ((equity - start_capital) / start_capital) * 100 if start_capital > 0 else 0.0
     positions = portfolio.get('positions', {})
 
     col1.metric("💰 Balance", f"${balance:.2f}")
@@ -311,6 +312,16 @@ if portfolio:
     col3.metric("📊 Total PnL", f"{pnl_pct:+.2f}%")
     col4.metric("🎯 Active Positions", len(positions))
     col5.metric("💹 Total Trades", len(trades) if not trades.empty else 0)
+
+    used_margin = portfolio.get('used_margin')
+    unrealized_pnl = portfolio.get('unrealized_pnl')
+    with st.expander("ℹ️ Balance vs Equity", expanded=False):
+        st.write("Balance = free cash after margin is locked for open positions.")
+        st.write("Equity = Balance + used margin + unrealized PnL (open positions at last price).")
+        if used_margin is not None:
+            st.write(f"Used margin: ${float(used_margin):.2f}")
+        if unrealized_pnl is not None:
+            st.write(f"Unrealized PnL: ${float(unrealized_pnl):+.2f}")
 
     # Detailed Portfolio View
     st.markdown("### 🎯 Active Positions")
