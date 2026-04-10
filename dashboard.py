@@ -160,11 +160,48 @@ daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10
 st.sidebar.subheader("🧠 Strategy Filters")
 strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro", "Mix"], index=0)
 strategy_mode = "classic" if strategy_label == "Classic" else "pro" if strategy_label == "Pro" else "mix"
+
 block_weak_signals = st.sidebar.checkbox("Block weak signals", value=True)
 cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 3, 1)
 use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
 atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
 atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
+
+st.sidebar.subheader("🔎 Auto-tune ATR")
+_tune_assets = assets if assets else ["EURUSD=X"]
+tune_symbol = st.sidebar.selectbox("Tune symbol", _tune_assets, index=0)
+tune_period = st.sidebar.selectbox("Tune period", ["30d", "60d", "180d"], index=1)
+tune_interval = "1h"
+fee_bps = st.sidebar.slider("Fee (bps)", 0.0, 20.0, 2.0, 0.5)
+spread_bps = st.sidebar.slider("Spread (bps)", 0.0, 20.0, 1.0, 0.5)
+risk_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 1.0, 0.1) / 100.0
+
+if st.sidebar.button("🔎 Run auto-tune", width='stretch'):
+    res = autotune_atr(tune_symbol, tune_period, tune_interval, float(fee_bps), float(spread_bps), float(risk_pct))
+    st.session_state['atr_tune_res'] = res
+
+res = st.session_state.get('atr_tune_res')
+if isinstance(res, dict) and isinstance(res.get('best'), dict):
+    best = res['best']
+    st.sidebar.info(f"Best ATR SL={best.get('atr_sl')} TP={best.get('atr_tp')} | PF={best.get('profit_factor')}")
+    if st.sidebar.button("✅ Apply best ATR", width='stretch'):
+        _post_bot_command({
+            "command": "set_filters",
+            "strategy_mode": str(strategy_mode),
+            "block_weak_signals": bool(block_weak_signals),
+            "cooldown_bars": int(cooldown_bars),
+            "use_atr_risk": True,
+            "atr_sl_mult": float(best.get('atr_sl')),
+            "atr_tp_mult": float(best.get('atr_tp')),
+            "time": str(datetime.now()),
+        })
+        st.sidebar.success("Best ATR applied")
+
+    with st.expander("Auto-tune table", expanded=False):
+        tbl = res.get('table')
+        if tbl is not None:
+            st.dataframe(tbl, width='stretch')
+
 if st.sidebar.button("✅ Apply Filters", width='stretch'):
     _post_bot_command({
         "command": "set_filters",
@@ -288,6 +325,105 @@ def fetch_asset_data(symbol, period="3mo", interval="1d"):
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
     df.columns = ['open', 'high', 'low', 'close', 'volume']
     return df
+
+
+@st.cache_data(ttl=300)
+def autotune_atr(symbol: str, period: str, interval: str, fee_bps: float, spread_bps: float, risk_pct: float):
+    import bot as bot_module
+
+    raw = yf.Ticker(symbol).history(period=period, interval=interval)
+    if raw is None or raw.empty:
+        return None
+
+    raw = raw[['Open', 'High', 'Low', 'Close', 'Volume']]
+    raw.columns = ['open', 'high', 'low', 'close', 'volume']
+
+    df = bot_module.calculate_indicators(raw).dropna()
+    if df is None or df.empty or 'atr' not in df.columns:
+        return None
+
+    loader = bot_module.MLModelLoader()
+
+    def _cost(notional: float) -> float:
+        return float(notional) * (float(fee_bps) + float(spread_bps)) / 10_000.0
+
+    atr_sl_grid = [1.2, 1.5, 1.8]
+    atr_tp_grid = [2.0, 2.5, 3.0]
+
+    rows = []
+
+    for atr_sl in atr_sl_grid:
+        for atr_tp in atr_tp_grid:
+            bal = 10000.0
+            pos = None
+            pnls = []
+
+            for i in range(60, len(df)):
+                w = df.iloc[: i + 1]
+                px = float(w['close'].iloc[-1])
+                atr = float(w['atr'].iloc[-1])
+
+                if pos is not None:
+                    side = pos['side']
+                    hit = (side == 'long' and (px <= pos['sl'] or px >= pos['tp'])) or (side == 'short' and (px >= pos['sl'] or px <= pos['tp']))
+                    if hit:
+                        pnl = (px - pos['entry']) * pos['size'] if side == 'long' else (pos['entry'] - px) * pos['size']
+                        bal += pnl
+                        bal -= _cost(abs(pos['entry'] * pos['size']))
+                        bal -= _cost(abs(px * pos['size']))
+                        pnls.append(float(pnl))
+                        pos = None
+                    continue
+
+                ml = loader.predict(w)
+                if not ml:
+                    continue
+
+                reg = str(ml.get('regime_name') or '')
+                bull = int(w.get('strong_bullish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bullish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
+                bear = int(w.get('strong_bearish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bearish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
+
+                side = None
+                if bull and reg == 'bullish':
+                    side = 'long'
+                elif bear and reg == 'bearish':
+                    side = 'short'
+
+                if side is None or atr <= 0:
+                    continue
+
+                sl = px - atr * atr_sl if side == 'long' else px + atr * atr_sl
+                tp = px + atr * atr_tp if side == 'long' else px - atr * atr_tp
+
+                risk_amt = float(bal) * float(risk_pct)
+                unit_risk = abs(px - sl)
+                if unit_risk <= 0:
+                    continue
+                size = risk_amt / unit_risk
+                pos = {'side': side, 'entry': px, 'sl': sl, 'tp': tp, 'size': size}
+
+            if not pnls:
+                rows.append({'atr_sl': atr_sl, 'atr_tp': atr_tp, 'trades': 0, 'win_rate_pct': 0.0, 'expectancy': 0.0, 'profit_factor': 0.0, 'total_pnl': 0.0})
+                continue
+
+            pnl = pd.Series(pnls)
+            wins = pnl[pnl > 0]
+            losses = pnl[pnl < 0]
+            pf = float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else (float('inf') if wins.sum() > 0 else 0.0)
+            rows.append({
+                'atr_sl': atr_sl,
+                'atr_tp': atr_tp,
+                'trades': int(len(pnl)),
+                'win_rate_pct': float(len(wins) / len(pnl) * 100.0),
+                'expectancy': float(pnl.mean()),
+                'profit_factor': float(pf),
+                'total_pnl': float(pnl.sum()),
+            })
+
+    out = pd.DataFrame(rows).sort_values(by=['profit_factor', 'expectancy'], ascending=False)
+    best = out.iloc[0].to_dict() if not out.empty else None
+    return {'best': best, 'table': out}
+
 
 model, scaler, metadata = load_models()
 portfolio = load_portfolio()

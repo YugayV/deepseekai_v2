@@ -1700,45 +1700,27 @@ class TradingBot:
 
                 if mode == "mix":
                     d_classic = self.ai.get_decision(symbol, df, ml_pred) or {}
-                    d_pro = self.ai.get_reinforse_decision(symbol, df, ml_pred) or {}
-
-                    def _rank(v: str) -> int:
-                        v = str(v or "").lower()
-                        return 3 if v == "strong" else 2 if v == "medium" else 1 if v == "weak" else 0
+                    d_reinf = self.ai.get_reinforse_decision(symbol, df, ml_pred) or {}
 
                     def _is_yes(d: dict) -> bool:
                         return str(d.get('trade_decision') or '').upper() == 'YES' and str(d.get('action') or '').lower() == 'entry'
 
                     yes_c = _is_yes(d_classic)
-                    yes_p = _is_yes(d_pro)
+                    yes_r = _is_yes(d_reinf)
                     side_c = str(d_classic.get('side') or 'long').lower()
-                    side_p = str(d_pro.get('side') or 'long').lower()
+                    side_r = str(d_reinf.get('side') or 'long').lower()
 
-                    if yes_c and yes_p and side_c == side_p:
-                        decision = dict(d_pro)
-                        decision['side'] = side_p
-                        decision['signal_strength'] = d_pro.get('signal_strength') if _rank(d_pro.get('signal_strength')) >= _rank(d_classic.get('signal_strength')) else d_classic.get('signal_strength')
-                        try:
-                            decision['tp_pct'] = min(float(d_classic.get('tp_pct') or 0), float(d_pro.get('tp_pct') or 0))
-                        except Exception:
-                            pass
-                        try:
-                            decision['sl_pct'] = max(float(d_classic.get('sl_pct') or 0), float(d_pro.get('sl_pct') or 0))
-                        except Exception:
-                            pass
-                        decision['reasoning_short'] = f"MIX agree: classic={d_classic.get('reasoning_short','')}; pro={d_pro.get('reasoning_short','')}"[:250]
+                    # STRICT MIX: open only if BOTH strategies agree (and same side)
+                    if yes_c and yes_r and side_c == side_r:
+                        decision = dict(d_reinf)  # prefer pro/reinforse payload when aligned
+                        decision['side'] = side_r
                         decision['trade_decision'] = 'YES'
                         decision['action'] = 'entry'
-                    elif yes_c ^ yes_p:
-                        winner = d_pro if yes_p else d_classic
-                        loser = d_classic if yes_p else d_pro
-                        if _rank(winner.get('signal_strength')) >= 3:
-                            decision = dict(winner)
-                            decision['reasoning_short'] = f"MIX strong override: yes={winner.get('reasoning_short','')}; no={loser.get('reasoning_short','')}"[:250]
-                        else:
-                            decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'MIX disagree'}
+                        decision['reasoning_short'] = f"MIX agree: classic={d_classic.get('reasoning_short','')}; reinforse={d_reinf.get('reasoning_short','')}"[:250]
                     else:
-                        decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'MIX no signals'}
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'MIX disagree'}
+
+                    mode = "mix"
                 elif mode == "reinforse":
                     decision = self.ai.get_reinforse_decision(symbol, df, ml_pred)
                 else:
