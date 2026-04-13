@@ -188,6 +188,12 @@ USE_ATR_RISK = (os.getenv("USE_ATR_RISK", "true").strip().lower() in ("1", "true
 ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", 1.5))
 ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
 
+ADAPTIVE_ML_ENABLED = (os.getenv("ADAPTIVE_ML_ENABLED", "false").strip().lower() in ("1", "true", "yes"))
+ADAPTIVE_FILTER_ENABLED = (os.getenv("ADAPTIVE_FILTER_ENABLED", "false").strip().lower() in ("1", "true", "yes"))
+ADAPTIVE_LOOKAHEAD_BARS = int(os.getenv("ADAPTIVE_LOOKAHEAD_BARS", 6))
+ADAPTIVE_PROB_THRESHOLD = float(os.getenv("ADAPTIVE_PROB_THRESHOLD", 0.55))
+ADAPTIVE_TRAIN_MAX_ROWS = int(os.getenv("ADAPTIVE_TRAIN_MAX_ROWS", 1500))
+
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
@@ -641,6 +647,128 @@ class MLModelLoader:
                 'bullish': float(proba[-1][2])
             }
         }
+
+
+class AdaptiveDirectionModel:
+    def __init__(
+        self,
+        enabled: bool,
+        filter_enabled: bool,
+        lookahead_bars: int,
+        prob_threshold: float,
+        max_train_rows: int,
+        data_dir: str,
+    ):
+        self.enabled = bool(enabled)
+        self.filter_enabled = bool(filter_enabled)
+        self.lookahead_bars = int(max(1, lookahead_bars))
+        self.prob_threshold = float(max(0.5, min(0.99, prob_threshold)))
+        self.max_train_rows = int(max(200, max_train_rows))
+        self.model_path = os.path.join(data_dir, "adaptive_dir_model.pkl")
+        self.scaler_path = os.path.join(data_dir, "adaptive_dir_scaler.pkl")
+        self.meta_path = os.path.join(data_dir, "adaptive_dir_meta.json")
+
+        self._fitted = False
+        self._last_fit_ts = None
+
+        self._model = None
+        self._scaler = None
+
+        if self.enabled:
+            self._load_or_init()
+
+    def _load_or_init(self):
+        from sklearn.linear_model import SGDClassifier
+        from sklearn.preprocessing import StandardScaler
+
+        if os.path.exists(self.model_path) and os.path.exists(self.scaler_path):
+            try:
+                self._model = joblib.load(self.model_path)
+                self._scaler = joblib.load(self.scaler_path)
+                self._fitted = True
+            except Exception:
+                self._model = None
+                self._scaler = None
+                self._fitted = False
+
+        if self._model is None:
+            self._model = SGDClassifier(loss="log_loss", alpha=0.0005, max_iter=1, tol=None)
+        if self._scaler is None:
+            self._scaler = StandardScaler(with_mean=True, with_std=True)
+
+        if os.path.exists(self.meta_path):
+            try:
+                with open(self.meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                self._last_fit_ts = meta.get("last_fit_ts")
+            except Exception:
+                self._last_fit_ts = None
+
+    def _features(self, df: pd.DataFrame) -> pd.DataFrame:
+        x = pd.DataFrame(index=df.index)
+        x["ret1"] = pd.to_numeric(df.get("returns"), errors="coerce").fillna(0.0)
+        x["rsi"] = pd.to_numeric(df.get("rsi"), errors="coerce").fillna(0.0)
+        x["macd_h"] = pd.to_numeric(df.get("macd_hist"), errors="coerce").fillna(0.0)
+        x["atr"] = pd.to_numeric(df.get("atr"), errors="coerce").fillna(0.0)
+        x["bb_pos"] = ((pd.to_numeric(df.get("close"), errors="coerce") - pd.to_numeric(df.get("bb_lower"), errors="coerce")) / (pd.to_numeric(df.get("bb_upper"), errors="coerce") - pd.to_numeric(df.get("bb_lower"), errors="coerce"))).replace([np.inf, -np.inf], 0.0).fillna(0.0)
+        x["a_bull"] = pd.to_numeric(df.get("alligator_bullish"), errors="coerce").fillna(0.0)
+        x["a_bear"] = pd.to_numeric(df.get("alligator_bearish"), errors="coerce").fillna(0.0)
+        x["f_bull"] = pd.to_numeric(df.get("fractal_bullish"), errors="coerce").fillna(0.0)
+        x["f_bear"] = pd.to_numeric(df.get("fractal_bearish"), errors="coerce").fillna(0.0)
+        return x.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+    def update(self, df: pd.DataFrame):
+        if not self.enabled:
+            return
+        if df is None or len(df) < (60 + self.lookahead_bars):
+            return
+
+        df2 = df.tail(self.max_train_rows + self.lookahead_bars + 5).copy()
+        y = (pd.to_numeric(df2["close"], errors="coerce").shift(-self.lookahead_bars) > pd.to_numeric(df2["close"], errors="coerce")).astype(int)
+        y = y.dropna()
+
+        x = self._features(df2).loc[y.index]
+
+        if self._last_fit_ts is not None:
+            try:
+                x = x.loc[x.index > pd.Timestamp(self._last_fit_ts)]
+                y = y.loc[x.index]
+            except Exception:
+                pass
+
+        if x.empty:
+            return
+
+        self._scaler.partial_fit(x)
+        xs = self._scaler.transform(x)
+
+        if not self._fitted:
+            self._model.partial_fit(xs, y.values, classes=np.array([0, 1]))
+            self._fitted = True
+        else:
+            self._model.partial_fit(xs, y.values)
+
+        self._last_fit_ts = str(x.index[-1])
+
+        try:
+            joblib.dump(self._model, self.model_path)
+            joblib.dump(self._scaler, self.scaler_path)
+            with open(self.meta_path, "w", encoding="utf-8") as f:
+                json.dump({"last_fit_ts": self._last_fit_ts, "lookahead_bars": self.lookahead_bars}, f)
+        except Exception:
+            pass
+
+    def predict(self, df: pd.DataFrame):
+        if not self.enabled or not self._fitted or df is None or df.empty:
+            return None
+        x = self._features(df).tail(1)
+        xs = self._scaler.transform(x)
+        try:
+            p_up = float(self._model.predict_proba(xs)[0][1])
+        except Exception:
+            p_up = float(self._model.decision_function(xs)[0])
+            p_up = 1.0 / (1.0 + np.exp(-p_up))
+        return {"prob_up": float(p_up), "lookahead_bars": int(self.lookahead_bars), "threshold": float(self.prob_threshold), "filter_enabled": bool(self.filter_enabled)}
 
 
 # ============================================
@@ -1288,9 +1416,22 @@ class TradingBot:
             "use_atr_risk": bool(USE_ATR_RISK),
             "atr_sl_mult": float(ATR_SL_MULT),
             "atr_tp_mult": float(ATR_TP_MULT),
+            "adaptive_ml_enabled": bool(ADAPTIVE_ML_ENABLED),
+            "adaptive_filter_enabled": bool(ADAPTIVE_FILTER_ENABLED),
+            "adaptive_lookahead_bars": int(ADAPTIVE_LOOKAHEAD_BARS),
+            "adaptive_prob_threshold": float(ADAPTIVE_PROB_THRESHOLD),
         }
+
+        self.adaptive = AdaptiveDirectionModel(
+            enabled=bool(self.strategy["adaptive_ml_enabled"]),
+            filter_enabled=bool(self.strategy["adaptive_filter_enabled"]),
+            lookahead_bars=int(self.strategy["adaptive_lookahead_bars"]),
+            prob_threshold=float(self.strategy["adaptive_prob_threshold"]),
+            max_train_rows=int(ADAPTIVE_TRAIN_MAX_ROWS),
+            data_dir=DATA_DIR,
+        )
         self.last_action_ts = {}
-        self.blocked = {"total": 0, "cooldown": 0, "weak": 0}
+        self.blocked = {"total": 0, "cooldown": 0, "weak": 0, "adaptive": 0}
         self.blocked_by_symbol = {}
 
         # Multi-channel: group chat for signals, private for errors
@@ -1392,6 +1533,11 @@ class TradingBot:
             self.strategy["use_atr_risk"] = _as_bool(cmd_data.get("use_atr_risk"), self.strategy.get("use_atr_risk", True))
             self.strategy["atr_sl_mult"] = max(0.1, _as_float(cmd_data.get("atr_sl_mult"), self.strategy.get("atr_sl_mult", 1.5)))
             self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
+
+            self.strategy["adaptive_ml_enabled"] = _as_bool(cmd_data.get("adaptive_ml_enabled"), self.strategy.get("adaptive_ml_enabled", False))
+            self.strategy["adaptive_filter_enabled"] = _as_bool(cmd_data.get("adaptive_filter_enabled"), self.strategy.get("adaptive_filter_enabled", False))
+            self.strategy["adaptive_lookahead_bars"] = max(1, _as_int(cmd_data.get("adaptive_lookahead_bars"), self.strategy.get("adaptive_lookahead_bars", ADAPTIVE_LOOKAHEAD_BARS)))
+            self.strategy["adaptive_prob_threshold"] = max(0.5, min(0.99, _as_float(cmd_data.get("adaptive_prob_threshold"), self.strategy.get("adaptive_prob_threshold", ADAPTIVE_PROB_THRESHOLD))))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("classic", "reinforse", "pro", "mix"):
@@ -1521,6 +1667,7 @@ class TradingBot:
                 "reasons": {
                     "cooldown": int((self.blocked or {}).get("cooldown", 0)),
                     "weak": int((self.blocked or {}).get("weak", 0)),
+                    "adaptive": int((self.blocked or {}).get("adaptive", 0)),
                 },
                 "by_symbol": dict(self.blocked_by_symbol or {}),
             }
@@ -1536,7 +1683,7 @@ class TradingBot:
     def _record_block(self, symbol: str, reason: str):
         try:
             self.blocked["total"] = int(self.blocked.get("total", 0)) + 1
-            if reason in ("cooldown", "weak"):
+            if reason in ("cooldown", "weak", "adaptive"):
                 self.blocked[reason] = int(self.blocked.get(reason, 0)) + 1
 
             sym = str(symbol)
@@ -1659,6 +1806,19 @@ class TradingBot:
             except Exception:
                 pass
 
+            adaptive_pred = None
+            try:
+                if getattr(self, "adaptive", None):
+                    self.adaptive.enabled = bool(self.strategy.get("adaptive_ml_enabled", False))
+                    self.adaptive.filter_enabled = bool(self.strategy.get("adaptive_filter_enabled", False))
+                    self.adaptive.lookahead_bars = int(self.strategy.get("adaptive_lookahead_bars", ADAPTIVE_LOOKAHEAD_BARS) or ADAPTIVE_LOOKAHEAD_BARS)
+                    self.adaptive.prob_threshold = float(self.strategy.get("adaptive_prob_threshold", ADAPTIVE_PROB_THRESHOLD) or ADAPTIVE_PROB_THRESHOLD)
+                    if self.adaptive.enabled:
+                        self.adaptive.update(df)
+                        adaptive_pred = self.adaptive.predict(df)
+            except Exception as e:
+                logger.error(f"Adaptive ML error: {e}")
+
             # ML Prediction
             ml_pred = self.ml_loader.predict(df)
             if not ml_pred:
@@ -1745,6 +1905,18 @@ class TradingBot:
                     return
 
                 if decision.get('trade_decision') == 'YES':
+                    if adaptive_pred and bool(adaptive_pred.get('filter_enabled')):
+                        p_up = float(adaptive_pred.get('prob_up') or 0.5)
+                        thr = float(adaptive_pred.get('threshold') or 0.55)
+                        side = str(decision.get('side') or 'long').lower()
+                        if side == 'long' and p_up < thr:
+                            logger.info(f"⛔ {symbol}: Adaptive filter blocked LONG (p_up={p_up:.3f} < {thr:.3f})")
+                            self._record_block(symbol, "cooldown")
+                            return
+                        if side == 'short' and (1.0 - p_up) < thr:
+                            logger.info(f"⛔ {symbol}: Adaptive filter blocked SHORT (p_down={(1.0-p_up):.3f} < {thr:.3f})")
+                            self._record_block(symbol, "cooldown")
+                            return
                     logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
