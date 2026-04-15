@@ -218,6 +218,7 @@ METADATA_PATH = os.path.join("models", "model_metadata.json")
 DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
 PORTFOLIO_PATH = os.path.join(DATA_DIR, "portfolio_state.json")
 TRADES_PATH = os.path.join(DATA_DIR, "trade_history.csv")
+CMD_ACK_PATH = os.path.join(DATA_DIR, "last_command_ack.json")
 
 os.makedirs("models", exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1434,6 +1435,10 @@ class TradingBot:
         self.blocked = {"total": 0, "cooldown": 0, "weak": 0, "adaptive": 0}
         self.blocked_by_symbol = {}
 
+        self.last_command = None
+        self.last_command_at = None
+        self._last_meta_save = 0.0
+
         # Multi-channel: group chat for signals, private for errors
         self.notifier = MultiChannelNotifier(
             token=TELEGRAM_TOKEN,
@@ -1442,12 +1447,29 @@ class TradingBot:
         )
         self.running = True
     
+    def _write_cmd_ack(self, cmd: str, cmd_data: dict, status: str, error: str | None = None):
+        try:
+            payload = {
+                "time": str(datetime.now()),
+                "command": str(cmd),
+                "status": str(status),
+                "error": str(error) if error else None,
+            }
+            with open(CMD_ACK_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            return
+
     async def apply_command(self, cmd_data: dict):
         global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE, TRADING_MODE
 
         cmd = (cmd_data or {}).get("command")
         if not cmd:
             return
+
+        self.last_command = str(cmd)
+        self.last_command_at = time.time()
+        self._write_cmd_ack(cmd, cmd_data or {}, status="received")
 
         if cmd == "start_all":
             logger.info(f"🚀 Command: START ALL (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
@@ -1463,6 +1485,8 @@ class TradingBot:
 
             self.force_cycle = True
             logger.info("⚡ Force-cycle set")
+            self._persist_bot_meta()
+            self._write_cmd_ack(cmd, cmd_data or {}, status="ok")
             return
 
         if cmd == "set_risk":
@@ -1502,6 +1526,8 @@ class TradingBot:
                 self.engine._roll_day_if_needed()
 
             self.force_cycle = True
+            self._persist_bot_meta()
+            self._write_cmd_ack(cmd, cmd_data or {}, status="ok")
             return
 
         if cmd == "set_filters":
@@ -1553,6 +1579,8 @@ class TradingBot:
             )
 
             self.force_cycle = True
+            self._persist_bot_meta()
+            self._write_cmd_ack(cmd, cmd_data or {}, status="ok")
             return
 
         if cmd in ("start_single", "trade_single"):
@@ -1586,6 +1614,8 @@ class TradingBot:
                     pass
 
             self.force_cycle = False
+            self._persist_bot_meta()
+            self._write_cmd_ack(cmd, cmd_data or {}, status="ok")
             return
 
         if cmd == "update_api":
@@ -1600,6 +1630,9 @@ class TradingBot:
                 )
             else:
                 self.engine = PaperTradingEngine()
+
+            self._persist_bot_meta()
+            self._write_cmd_ack(cmd, cmd_data or {}, status="ok")
             return
 
     async def _check_dashboard_commands(self):
@@ -2037,6 +2070,12 @@ class TradingBot:
                     await self.send_portfolio_summary()
                     last_summary_time = current_time
                 
+                if isinstance(self.engine, PaperTradingEngine):
+                    now = time.time()
+                    if (now - float(self._last_meta_save or 0.0)) > 15.0:
+                        self._persist_bot_meta()
+                        self._last_meta_save = now
+
                 # Frequent polling for commands (every 2 seconds)
                 await asyncio.sleep(2)
                 

@@ -74,6 +74,7 @@ st.sidebar.title("⚙️ Configuration")
 
 DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
 CMD_PATH = os.path.join(DATA_DIR, "bot_command.json")
+CMD_ACK_PATH = os.path.join(DATA_DIR, "last_command_ack.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 BOT_API_URL = (os.getenv("BOT_API_URL") or "").rstrip("/")
@@ -116,6 +117,25 @@ def _get_bot_json(path: str):
         return json.loads(resp.read().decode("utf-8") or "{}")
 
 # Assets
+st.sidebar.subheader("🤖 Bot Status")
+ack = None
+try:
+    if os.path.exists(CMD_ACK_PATH):
+        with open(CMD_ACK_PATH, "r", encoding="utf-8") as f:
+            ack = json.load(f) or {}
+except Exception:
+    ack = None
+
+if isinstance(ack, dict) and ack:
+    st.sidebar.write(f"Last command: {ack.get('command')}")
+    st.sidebar.write(f"Status: {ack.get('status')}")
+    if ack.get('time'):
+        st.sidebar.write(f"Time: {ack.get('time')}")
+    if ack.get('error'):
+        st.sidebar.write(f"Error: {ack.get('error')}")
+else:
+    st.sidebar.write("No command acknowledgements yet")
+
 st.sidebar.subheader("📊 Assets")
 assets = st.sidebar.multiselect(
     "Select assets to display",
