@@ -188,6 +188,10 @@ USE_ATR_RISK = (os.getenv("USE_ATR_RISK", "true").strip().lower() in ("1", "true
 ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", 1.5))
 ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
 
+WAVE_WINDOW = int(os.getenv("WAVE_WINDOW", 64))
+WAVE_LEVELS = int(os.getenv("WAVE_LEVELS", 4))
+WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.10))
+
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
@@ -646,6 +650,55 @@ class MLModelLoader:
 # ============================================
 # INDICATORS CALCULATION (Alligator + Fractals)
 # ============================================
+def _haar_trend_pct(arr: np.ndarray, levels: int) -> float:
+    x = np.asarray(arr, dtype=float)
+    if x.size == 0 or np.any(~np.isfinite(x)):
+        return float("nan")
+
+    L = int(levels)
+    if L < 1:
+        return 0.0
+
+    min_n = 2 ** L
+    n = (x.size // min_n) * min_n
+    if n < min_n:
+        return float("nan")
+
+    a = x[-n:]
+    for _ in range(L):
+        a = (a[0::2] + a[1::2]) / np.sqrt(2.0)
+
+    base = float(a[0])
+    if not np.isfinite(base):
+        return float("nan")
+
+    return float((float(a[-1]) - base) / (abs(base) + 1e-12) * 100.0)
+
+
+def _haar_energy(arr: np.ndarray, levels: int) -> float:
+    x = np.asarray(arr, dtype=float)
+    if x.size == 0 or np.any(~np.isfinite(x)):
+        return float("nan")
+
+    L = int(levels)
+    if L < 1:
+        return 0.0
+
+    min_n = 2 ** L
+    n = (x.size // min_n) * min_n
+    if n < min_n:
+        return float("nan")
+
+    a = x[-n:]
+    total = 0.0
+    for _ in range(L):
+        d = (a[0::2] - a[1::2]) / np.sqrt(2.0)
+        a = (a[0::2] + a[1::2]) / np.sqrt(2.0)
+        total += float(np.mean(d * d))
+
+    return float(total)
+
+
 def calculate_indicators(df):
     """Calculate all technical indicators (Alligator + Fractals)"""
     df = df.copy()
@@ -743,6 +796,11 @@ def calculate_indicators(df):
                             (df['alligator_bearish'] == 1) &
                             (df['alligator_expanding'] == 1)).astype(int)
 
+    # Wave (Haar) features
+    if int(WAVE_WINDOW) >= 8:
+        df['wave_trend'] = df['close'].rolling(int(WAVE_WINDOW)).apply(lambda a: _haar_trend_pct(a, int(WAVE_LEVELS)), raw=True)
+        df['wave_energy'] = df['close'].rolling(int(WAVE_WINDOW)).apply(lambda a: _haar_energy(a, int(WAVE_LEVELS)), raw=True)
+
     # Lags
     for lag in [1, 2, 3, 5]:
         df[f'returns_lag_{lag}'] = df['returns'].shift(lag)
@@ -789,6 +847,8 @@ INPUTS:
 - ML Confidence: {ml_prediction['confidence']:.1%}
 - Alligator: {alligator_state} (jaw={float(latest.get('jaw', 0)):.6f}, teeth={float(latest.get('teeth', 0)):.6f}, lips={float(latest.get('lips', 0)):.6f})
 - Fractals: {fractal_state}
+- Wave trend (Haar, %): {float(latest.get('wave_trend', 0.0)):.3f}
+- Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
 - Last candles (JSON): {recent}
 
 TASK:
@@ -854,6 +914,8 @@ INPUTS (latest bar):
 - MACD hist: {float(latest.get('macd_hist', 0)):.6f}
 - Bollinger position (0=lower..1=upper): {bb_pos:.3f}
 - ATR(14): {float(latest.get('atr', 0)):.6f}
+- Wave trend (Haar, %): {float(latest.get('wave_trend', 0.0)):.3f}
+- Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
 - Alligator bullish: {int(latest.get('alligator_bullish', 0))} | bearish: {int(latest.get('alligator_bearish', 0))} | asleep: {int(latest.get('alligator_asleep', 0))}
 - Fractal bullish: {int(latest.get('fractal_bullish', 0))} | bearish: {int(latest.get('fractal_bearish', 0))}
 - Last candles (JSON): {recent}
@@ -1743,6 +1805,19 @@ class TradingBot:
                     logger.info(f"⛔ {symbol}: Weak signal blocked")
                     self._record_block(symbol, "weak")
                     return
+
+                try:
+                    wave_trend = float(df.iloc[-1].get('wave_trend', 0.0))
+                except Exception:
+                    wave_trend = 0.0
+
+                side = str(decision.get('side') or 'long').lower()
+                if abs(wave_trend) >= float(WAVE_TREND_BLOCK_PCT):
+                    if (wave_trend > 0 and side == 'short') or (wave_trend < 0 and side == 'long'):
+                        decision['trade_decision'] = 'NO'
+                        decision['action'] = 'hold'
+                        decision['reasoning_short'] = f"Wave trend conflict ({wave_trend:.2f}%)"
+                        logger.info(f"⛔ {symbol}: Wave trend conflicts with side ({wave_trend:.2f}% vs {side})")
 
                 if decision.get('trade_decision') == 'YES':
                     logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
