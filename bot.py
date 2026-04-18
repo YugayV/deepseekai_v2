@@ -192,6 +192,12 @@ WAVE_WINDOW = int(os.getenv("WAVE_WINDOW", 64))
 WAVE_LEVELS = int(os.getenv("WAVE_LEVELS", 4))
 WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.10))
 
+MACRO_SYMBOLS = [s.strip() for s in os.getenv("MACRO_SYMBOLS", "DX-Y.NYB,GC=F,CL=F,^TNX,^VIX").split(",") if s.strip()]
+USE_MACRO_DEFAULT = (os.getenv("USE_MACRO_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+USE_POLYMARKET_DEFAULT = (os.getenv("USE_POLYMARKET_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+POLYMARKET_FEED_URL = (os.getenv("POLYMARKET_FEED_URL") or "").strip()
+DXY_TREND_BLOCK_PCT = float(os.getenv("DXY_TREND_BLOCK_PCT", 0.08))
+
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
@@ -820,7 +826,7 @@ class AIAdvisor:
         ) if api_key or AI_API_KEY else None
         self.model = "deepseek/deepseek-chat"
 
-    def get_decision(self, symbol, df, ml_prediction):
+    def get_decision(self, symbol, df, ml_prediction, context: dict | None = None):
         if not self.client:
             return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
 
@@ -838,6 +844,39 @@ class AIAdvisor:
 
         fractal_state = "BULLISH" if int(latest.get('fractal_bullish', 0)) == 1 else "BEARISH" if int(latest.get('fractal_bearish', 0)) == 1 else "NONE"
 
+        ctx = context or {}
+        macro = ctx.get("macro") if isinstance(ctx, dict) else None
+        poly = ctx.get("polymarket") if isinstance(ctx, dict) else None
+
+        macro_lines = []
+        if isinstance(macro, dict) and macro:
+            for k, v in list(macro.items())[:8]:
+                if not isinstance(v, dict):
+                    continue
+                try:
+                    wt = float(v.get("wave_trend_pct") or 0.0)
+                except Exception:
+                    wt = 0.0
+                try:
+                    r1 = float(v.get("ret_1") or 0.0)
+                except Exception:
+                    r1 = 0.0
+                macro_lines.append(f"{k}: ret1={r1:+.2f}%, wave={wt:+.2f}%")
+
+        poly_lines = []
+        if isinstance(poly, list) and poly:
+            for m in poly[:5]:
+                if not isinstance(m, dict):
+                    continue
+                q = str(m.get("question") or m.get("title") or "").strip()
+                p = m.get("prob")
+                try:
+                    p = float(p)
+                except Exception:
+                    p = None
+                if q and p is not None:
+                    poly_lines.append(f"{q} => {p:.1%}")
+
         prompt = f"""
 You are a binary trading decision engine for {symbol}.
 
@@ -849,6 +888,8 @@ INPUTS:
 - Fractals: {fractal_state}
 - Wave trend (Haar, %): {float(latest.get('wave_trend', 0.0)):.3f}
 - Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
+- Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
+- Polymarket snapshot: {"; ".join(poly_lines) if poly_lines else "N/A"}
 - Last candles (JSON): {recent}
 
 TASK:
@@ -893,7 +934,7 @@ Rules:
                 logger.error(f"AI error: {e}")
             return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {error_msg}"}
 
-    def get_reinforse_decision(self, symbol, df, ml_prediction):
+    def get_reinforse_decision(self, symbol, df, ml_prediction, context: dict | None = None):
         if not self.client:
             return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
 
@@ -904,6 +945,39 @@ Rules:
             bb_pos = float((latest.get('close', 0) - latest.get('bb_lower', 0)) / (latest.get('bb_upper', 1) - latest.get('bb_lower', 0)))
         except Exception:
             bb_pos = 0.0
+
+        ctx = context or {}
+        macro = ctx.get("macro") if isinstance(ctx, dict) else None
+        poly = ctx.get("polymarket") if isinstance(ctx, dict) else None
+
+        macro_lines = []
+        if isinstance(macro, dict) and macro:
+            for k, v in list(macro.items())[:8]:
+                if not isinstance(v, dict):
+                    continue
+                try:
+                    wt = float(v.get("wave_trend_pct") or 0.0)
+                except Exception:
+                    wt = 0.0
+                try:
+                    r1 = float(v.get("ret_1") or 0.0)
+                except Exception:
+                    r1 = 0.0
+                macro_lines.append(f"{k}: ret1={r1:+.2f}%, wave={wt:+.2f}%")
+
+        poly_lines = []
+        if isinstance(poly, list) and poly:
+            for m in poly[:5]:
+                if not isinstance(m, dict):
+                    continue
+                q = str(m.get("question") or m.get("title") or "").strip()
+                p = m.get("prob")
+                try:
+                    p = float(p)
+                except Exception:
+                    p = None
+                if q and p is not None:
+                    poly_lines.append(f"{q} => {p:.1%}")
 
         prompt = f"""
 You are a trading strategy engine for {symbol}.
@@ -916,6 +990,8 @@ INPUTS (latest bar):
 - ATR(14): {float(latest.get('atr', 0)):.6f}
 - Wave trend (Haar, %): {float(latest.get('wave_trend', 0.0)):.3f}
 - Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
+- Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
+- Polymarket snapshot: {"; ".join(poly_lines) if poly_lines else "N/A"}
 - Alligator bullish: {int(latest.get('alligator_bullish', 0))} | bearish: {int(latest.get('alligator_bearish', 0))} | asleep: {int(latest.get('alligator_asleep', 0))}
 - Fractal bullish: {int(latest.get('fractal_bullish', 0))} | bearish: {int(latest.get('fractal_bearish', 0))}
 - Last candles (JSON): {recent}
@@ -979,6 +1055,111 @@ def fetch_data(symbol):
     df.columns = ['open', 'high', 'low', 'close', 'volume']
 
     return calculate_indicators(df)
+
+
+def _safe_fetch_json(url: str, allowed_hosts: set[str]):
+    try:
+        from urllib.parse import urlparse
+        from urllib.request import Request, urlopen
+
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        if not host or host not in {h.lower() for h in allowed_hosts}:
+            return None
+
+        req = Request(url, headers={"User-Agent": "ai-trader/1.0"})
+        with urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def fetch_macro_snapshot():
+    out = {}
+    for sym in MACRO_SYMBOLS:
+        try:
+            t = yf.Ticker(sym)
+            df = t.history(period="14d", interval="1h")
+            if df is None or df.empty:
+                df = t.history(period="180d", interval="1d")
+            if df is None or df.empty:
+                continue
+
+            close = df["Close"].astype(float).dropna()
+            if close.empty:
+                continue
+
+            ret_1 = float(close.pct_change().iloc[-1] * 100.0) if len(close) >= 2 else 0.0
+            ret_24 = float(close.pct_change(24).iloc[-1] * 100.0) if len(close) >= 25 else 0.0
+            wave_trend_pct = _haar_trend_pct(close.tail(int(WAVE_WINDOW)).to_numpy(), int(WAVE_LEVELS))
+            wave_energy = _haar_energy(close.tail(int(WAVE_WINDOW)).to_numpy(), int(WAVE_LEVELS))
+
+            out[sym] = {
+                "last": float(close.iloc[-1]),
+                "ret_1": float(ret_1) if np.isfinite(ret_1) else 0.0,
+                "ret_24": float(ret_24) if np.isfinite(ret_24) else 0.0,
+                "wave_trend_pct": float(wave_trend_pct) if np.isfinite(wave_trend_pct) else 0.0,
+                "wave_energy": float(wave_energy) if np.isfinite(wave_energy) else 0.0,
+            }
+        except Exception:
+            continue
+
+    return out
+
+
+def fetch_polymarket_snapshot():
+    url = POLYMARKET_FEED_URL
+    if not url:
+        return []
+
+    data = _safe_fetch_json(url, allowed_hosts={"gamma-api.polymarket.com", "polymarket.com"})
+    if data is None:
+        return []
+
+    markets = None
+    if isinstance(data, list):
+        markets = data
+    elif isinstance(data, dict):
+        if isinstance(data.get("markets"), list):
+            markets = data.get("markets")
+        elif isinstance(data.get("data"), list):
+            markets = data.get("data")
+
+    if not isinstance(markets, list):
+        return []
+
+    out = []
+    for m in markets[:200]:
+        if not isinstance(m, dict):
+            continue
+        q = str(m.get("question") or m.get("title") or m.get("name") or "").strip()
+        if not q:
+            continue
+
+        prob = None
+        for k in ("probability", "prob", "lastTradePrice", "last_trade_price"):
+            if k in m:
+                prob = m.get(k)
+                break
+
+        if prob is None and isinstance(m.get("outcomePrices"), list) and m.get("outcomePrices"):
+            prob = m.get("outcomePrices")[0]
+
+        try:
+            prob = float(prob)
+        except Exception:
+            continue
+
+        if prob > 1.0:
+            prob = prob / 100.0
+
+        if prob < 0.0 or prob > 1.0:
+            continue
+
+        out.append({"question": q, "prob": prob})
+
+    return out[:10]
 
 
 # ============================================
@@ -1350,7 +1531,10 @@ class TradingBot:
             "use_atr_risk": bool(USE_ATR_RISK),
             "atr_sl_mult": float(ATR_SL_MULT),
             "atr_tp_mult": float(ATR_TP_MULT),
+            "use_macro": bool(USE_MACRO_DEFAULT),
+            "use_polymarket": bool(USE_POLYMARKET_DEFAULT),
         }
+        self.context = {}
         self.last_action_ts = {}
         self.blocked = {"total": 0, "cooldown": 0, "weak": 0}
         self.blocked_by_symbol = {}
@@ -1454,6 +1638,8 @@ class TradingBot:
             self.strategy["use_atr_risk"] = _as_bool(cmd_data.get("use_atr_risk"), self.strategy.get("use_atr_risk", True))
             self.strategy["atr_sl_mult"] = max(0.1, _as_float(cmd_data.get("atr_sl_mult"), self.strategy.get("atr_sl_mult", 1.5)))
             self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
+            self.strategy["use_macro"] = _as_bool(cmd_data.get("use_macro"), self.strategy.get("use_macro", USE_MACRO_DEFAULT))
+            self.strategy["use_polymarket"] = _as_bool(cmd_data.get("use_polymarket"), self.strategy.get("use_polymarket", USE_POLYMARKET_DEFAULT))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("classic", "reinforse", "pro", "mix"):
@@ -1754,6 +1940,7 @@ class TradingBot:
                     return
 
                 logger.info(f"🔍 {symbol}: Requesting AI decision...")
+                ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}
                 mode = (getattr(self, "strategy_mode", None) or STRATEGY_MODE or "classic").strip().lower()
 
                 # Backward-compat: "pro" == "reinforse"
@@ -1761,8 +1948,8 @@ class TradingBot:
                     mode = "reinforse"
 
                 if mode == "mix":
-                    d_classic = self.ai.get_decision(symbol, df, ml_pred) or {}
-                    d_reinf = self.ai.get_reinforse_decision(symbol, df, ml_pred) or {}
+                    d_classic = self.ai.get_decision(symbol, df, ml_pred, context=ctx) or {}
+                    d_reinf = self.ai.get_reinforse_decision(symbol, df, ml_pred, context=ctx) or {}
 
                     def _is_yes(d: dict) -> bool:
                         return str(d.get('trade_decision') or '').upper() == 'YES' and str(d.get('action') or '').lower() == 'entry'
@@ -1784,10 +1971,10 @@ class TradingBot:
 
                     mode = "mix"
                 elif mode == "reinforse":
-                    decision = self.ai.get_reinforse_decision(symbol, df, ml_pred)
+                    decision = self.ai.get_reinforse_decision(symbol, df, ml_pred, context=ctx)
                 else:
                     mode = "classic"
-                    decision = self.ai.get_decision(symbol, df, ml_pred)
+                    decision = self.ai.get_decision(symbol, df, ml_pred, context=ctx)
 
                 if not isinstance(decision, dict):
                     decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'invalid_decision'}
@@ -1818,6 +2005,23 @@ class TradingBot:
                         decision['action'] = 'hold'
                         decision['reasoning_short'] = f"Wave trend conflict ({wave_trend:.2f}%)"
                         logger.info(f"⛔ {symbol}: Wave trend conflicts with side ({wave_trend:.2f}% vs {side})")
+
+                macro = ctx.get('macro') if isinstance(ctx, dict) else None
+                if isinstance(macro, dict) and abs(float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)) >= float(DXY_TREND_BLOCK_PCT):
+                    dxy_tr = float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)
+                    sym = str(symbol)
+                    if sym.endswith('=X') and len(sym) >= 6 and sym[3:6] == 'USD':
+                        if (dxy_tr > 0 and side == 'long') or (dxy_tr < 0 and side == 'short'):
+                            decision['trade_decision'] = 'NO'
+                            decision['action'] = 'hold'
+                            decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
+                            logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
+                    elif sym.endswith('=X') and len(sym) >= 6 and sym[0:3] == 'USD':
+                        if (dxy_tr > 0 and side == 'short') or (dxy_tr < 0 and side == 'long'):
+                            decision['trade_decision'] = 'NO'
+                            decision['action'] = 'hold'
+                            decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
+                            logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
 
                 if decision.get('trade_decision') == 'YES':
                     logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
@@ -1866,6 +2070,13 @@ class TradingBot:
         logger.info("=" * 60)
         logger.info("STARTING TRADING CYCLE")
         logger.info("=" * 60)
+
+        ctx = {"ts": str(datetime.now())}
+        if bool(self.strategy.get("use_macro", USE_MACRO_DEFAULT)):
+            ctx["macro"] = fetch_macro_snapshot()
+        if bool(self.strategy.get("use_polymarket", USE_POLYMARKET_DEFAULT)):
+            ctx["polymarket"] = fetch_polymarket_snapshot()
+        self.context = ctx
 
         for symbol in ALL_SYMBOLS:
             await self.process_symbol(symbol)
