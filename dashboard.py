@@ -74,7 +74,6 @@ st.sidebar.title("⚙️ Configuration")
 
 DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
 CMD_PATH = os.path.join(DATA_DIR, "bot_command.json")
-CMD_ACK_PATH = os.path.join(DATA_DIR, "last_command_ack.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 BOT_API_URL = (os.getenv("BOT_API_URL") or "").rstrip("/")
@@ -117,25 +116,6 @@ def _get_bot_json(path: str):
         return json.loads(resp.read().decode("utf-8") or "{}")
 
 # Assets
-st.sidebar.subheader("🤖 Bot Status")
-ack = None
-try:
-    if os.path.exists(CMD_ACK_PATH):
-        with open(CMD_ACK_PATH, "r", encoding="utf-8") as f:
-            ack = json.load(f) or {}
-except Exception:
-    ack = None
-
-if isinstance(ack, dict) and ack:
-    st.sidebar.write(f"Last command: {ack.get('command')}")
-    st.sidebar.write(f"Status: {ack.get('status')}")
-    if ack.get('time'):
-        st.sidebar.write(f"Time: {ack.get('time')}")
-    if ack.get('error'):
-        st.sidebar.write(f"Error: {ack.get('error')}")
-else:
-    st.sidebar.write("No command acknowledgements yet")
-
 st.sidebar.subheader("📊 Assets")
 assets = st.sidebar.multiselect(
     "Select assets to display",
@@ -187,323 +167,6 @@ use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
 atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
 atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
 
-st.sidebar.subheader("🧪 Adaptive ML")
-adaptive_ml_enabled = st.sidebar.checkbox("Enable adaptive model", value=False)
-adaptive_filter_enabled = st.sidebar.checkbox("Use adaptive as entry filter", value=False)
-adaptive_lookahead_bars = st.sidebar.slider("Adaptive lookahead (bars)", 1, 24, 6, 1)
-adaptive_prob_threshold = st.sidebar.slider("Adaptive prob threshold", 0.50, 0.90, 0.55, 0.01)
-
-st.sidebar.subheader("🔎 Auto-tune Adaptive")
-ad_tune_symbol = st.sidebar.selectbox("Tune (adaptive) symbol", assets if assets else ["EURUSD=X"], index=0)
-ad_tune_period = st.sidebar.selectbox("Tune (adaptive) period", ["30d", "60d", "180d"], index=1)
-ad_tune_interval = "1h"
-ad_min_trades = st.sidebar.slider("Min trades (adaptive)", 5, 200, 20, 5)
-
-@st.cache_data(ttl=300)
-def autotune_adaptive(symbol: str, period: str, interval: str, min_trades: int):
-    from sklearn.linear_model import SGDClassifier
-    from sklearn.preprocessing import StandardScaler
-    import bot as bot_module
-
-    raw = yf.Ticker(symbol).history(period=period, interval=interval)
-    if raw is None or raw.empty:
-        return None
-
-    raw = raw[['Open', 'High', 'Low', 'Close', 'Volume']]
-    raw.columns = ['open', 'high', 'low', 'close', 'volume']
-
-    df = bot_module.calculate_indicators(raw).dropna()
-    if df is None or df.empty or 'atr' not in df.columns:
-        return None
-
-    x = pd.DataFrame(index=df.index)
-    x['ret1'] = pd.to_numeric(df.get('returns'), errors='coerce').fillna(0.0)
-    x['rsi'] = pd.to_numeric(df.get('rsi'), errors='coerce').fillna(0.0)
-    x['macd_h'] = pd.to_numeric(df.get('macd_hist'), errors='coerce').fillna(0.0)
-    x['atr'] = pd.to_numeric(df.get('atr'), errors='coerce').fillna(0.0)
-    x['bb_pos'] = ((pd.to_numeric(df.get('close'), errors='coerce') - pd.to_numeric(df.get('bb_lower'), errors='coerce')) / (pd.to_numeric(df.get('bb_upper'), errors='coerce') - pd.to_numeric(df.get('bb_lower'), errors='coerce'))).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    x['a_bull'] = pd.to_numeric(df.get('alligator_bullish'), errors='coerce').fillna(0.0)
-    x['a_bear'] = pd.to_numeric(df.get('alligator_bearish'), errors='coerce').fillna(0.0)
-    x['f_bull'] = pd.to_numeric(df.get('fractal_bullish'), errors='coerce').fillna(0.0)
-    x['f_bear'] = pd.to_numeric(df.get('fractal_bearish'), errors='coerce').fillna(0.0)
-    x = x.replace([np.inf, -np.inf], 0.0).fillna(0.0)
-
-    lookahead_grid = [3, 6, 12]
-    thr_grid = [0.52, 0.55, 0.58, 0.60]
-
-    rows = []
-    close = pd.to_numeric(df['close'], errors='coerce')
-
-    for lookahead in lookahead_grid:
-        y = (close.shift(-lookahead) > close).astype(int)
-        y = y.dropna()
-        xx = x.loc[y.index]
-
-        scaler = StandardScaler(with_mean=True, with_std=True)
-        model = SGDClassifier(loss='log_loss', alpha=0.0005, max_iter=1, tol=None)
-        fitted = False
-        probs = {}
-
-        for i in range(100, len(xx) - 2):
-            xi = xx.iloc[: i + 1]
-            yi = y.iloc[: i + 1]
-            if len(yi) < 200:
-                continue
-            if not fitted:
-                scaler.fit(xi)
-                model.partial_fit(scaler.transform(xi), yi.values, classes=np.array([0, 1]))
-                fitted = True
-            else:
-                model.partial_fit(scaler.transform(xi.tail(250)), yi.tail(250).values)
-
-            p_up = float(model.predict_proba(scaler.transform(xx.iloc[i:i+1]))[0][1])
-            probs[int(i)] = p_up
-
-        if not probs:
-            continue
-
-        for thr in thr_grid:
-            kept = [p for p in probs.values() if p >= thr or (1.0 - p) >= thr]
-            if len(kept) < int(min_trades):
-                continue
-            rows.append({
-                'lookahead': int(lookahead),
-                'thr': float(thr),
-                'kept_signals': int(len(kept)),
-            })
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return None
-    out = out.sort_values(by=['kept_signals'], ascending=False)
-    best = out.iloc[0].to_dict()
-    return {'best': best, 'table': out}
-
-if st.sidebar.button("🔎 Run auto-tune (adaptive)", width='stretch'):
-    st.session_state['adaptive_tune_res'] = autotune_adaptive(ad_tune_symbol, ad_tune_period, ad_tune_interval, int(ad_min_trades))
-
-ad_res = st.session_state.get('adaptive_tune_res')
-if isinstance(ad_res, dict) and isinstance(ad_res.get('best'), dict):
-    best = ad_res['best']
-    st.sidebar.info(f"Best adaptive: lookahead={best.get('lookahead')} thr={best.get('thr')} | kept={best.get('kept_signals')}")
-    if st.sidebar.button("✅ Apply best Adaptive", width='stretch'):
-        _post_bot_command({
-            "command": "set_filters",
-            "strategy_mode": str(strategy_mode),
-            "block_weak_signals": bool(block_weak_signals),
-            "cooldown_bars": int(cooldown_bars),
-            "use_atr_risk": bool(use_atr_risk),
-            "atr_sl_mult": float(atr_sl_mult),
-            "atr_tp_mult": float(atr_tp_mult),
-            "adaptive_ml_enabled": True,
-            "adaptive_filter_enabled": True,
-            "adaptive_lookahead_bars": int(best.get('lookahead')),
-            "adaptive_prob_threshold": float(best.get('thr')),
-            "time": str(datetime.now()),
-        })
-        st.sidebar.success("Best adaptive applied")
-
-    with st.expander("Adaptive tune table", expanded=False):
-        tbl = ad_res.get('table')
-        if tbl is not None:
-            st.dataframe(tbl, width='stretch')
-
-@st.cache_data(ttl=300)
-def autotune_atr(symbol: str, period: str, interval: str, fee_bps: float, spread_bps: float, risk_pct: float):
-    import bot as bot_module
-
-    raw = yf.Ticker(symbol).history(period=period, interval=interval)
-    if raw is None or raw.empty:
-        return None
-
-    raw = raw[['Open', 'High', 'Low', 'Close', 'Volume']]
-    raw.columns = ['open', 'high', 'low', 'close', 'volume']
-
-    df = bot_module.calculate_indicators(raw).dropna()
-    if df is None or df.empty or 'atr' not in df.columns:
-        return None
-
-    loader = bot_module.MLModelLoader()
-
-    def _cost(notional: float) -> float:
-        return float(notional) * (float(fee_bps) + float(spread_bps)) / 10_000.0
-
-    atr_sl_grid = [1.2, 1.5, 1.8]
-    atr_tp_grid = [2.0, 2.5, 3.0]
-
-    rows = []
-
-    for atr_sl in atr_sl_grid:
-        for atr_tp in atr_tp_grid:
-            bal = 10000.0
-            pos = None
-            pnls = []
-
-            for i in range(60, len(df)):
-                w = df.iloc[: i + 1]
-                px = float(w['close'].iloc[-1])
-                atr = float(w['atr'].iloc[-1])
-
-                if pos is not None:
-                    side = pos['side']
-                    hit = (side == 'long' and (px <= pos['sl'] or px >= pos['tp'])) or (side == 'short' and (px >= pos['sl'] or px <= pos['tp']))
-                    if hit:
-                        pnl = (px - pos['entry']) * pos['size'] if side == 'long' else (pos['entry'] - px) * pos['size']
-                        bal += pnl
-                        bal -= _cost(abs(pos['entry'] * pos['size']))
-                        bal -= _cost(abs(px * pos['size']))
-                        pnls.append(float(pnl))
-                        pos = None
-                    continue
-
-                ml = loader.predict(w)
-                if not ml:
-                    continue
-
-                reg = str(ml.get('regime_name') or '')
-                bull = int(w.get('strong_bullish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bullish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
-                bear = int(w.get('strong_bearish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bearish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
-
-                side = None
-                if bull and reg == 'bullish':
-                    side = 'long'
-                elif bear and reg == 'bearish':
-                    side = 'short'
-
-                if side is None or atr <= 0:
-                    continue
-
-                sl = px - atr * atr_sl if side == 'long' else px + atr * atr_sl
-                tp = px + atr * atr_tp if side == 'long' else px - atr * atr_tp
-
-                risk_amt = float(bal) * float(risk_pct)
-                unit_risk = abs(px - sl)
-                if unit_risk <= 0:
-                    continue
-                size = risk_amt / unit_risk
-                pos = {'side': side, 'entry': px, 'sl': sl, 'tp': tp, 'size': size}
-
-            if not pnls:
-                rows.append({'atr_sl': atr_sl, 'atr_tp': atr_tp, 'trades': 0, 'win_rate_pct': 0.0, 'expectancy': 0.0, 'profit_factor': 0.0, 'total_pnl': 0.0})
-                continue
-
-            pnl = pd.Series(pnls)
-            wins = pnl[pnl > 0]
-            losses = pnl[pnl < 0]
-            pf = float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else (float('inf') if wins.sum() > 0 else 0.0)
-            rows.append({
-                'atr_sl': atr_sl,
-                'atr_tp': atr_tp,
-                'trades': int(len(pnl)),
-                'win_rate_pct': float(len(wins) / len(pnl) * 100.0),
-                'expectancy': float(pnl.mean()),
-                'profit_factor': float(pf),
-                'total_pnl': float(pnl.sum()),
-            })
-
-    out = pd.DataFrame(rows).sort_values(by=['profit_factor', 'expectancy'], ascending=False)
-    best = out.iloc[0].to_dict() if not out.empty else None
-    return {'best': best, 'table': out}
-
-
-@st.cache_data(ttl=300)
-def autotune_atr(symbol: str, period: str, interval: str, fee_bps: float, spread_bps: float, risk_pct: float):
-    import bot as bot_module
-
-    raw = yf.Ticker(symbol).history(period=period, interval=interval)
-    if raw is None or raw.empty:
-        return None
-
-    raw = raw[['Open', 'High', 'Low', 'Close', 'Volume']]
-    raw.columns = ['open', 'high', 'low', 'close', 'volume']
-
-    df = bot_module.calculate_indicators(raw).dropna()
-    if df is None or df.empty or 'atr' not in df.columns:
-        return None
-
-    loader = bot_module.MLModelLoader()
-
-    def _cost(notional: float) -> float:
-        return float(notional) * (float(fee_bps) + float(spread_bps)) / 10_000.0
-
-    atr_sl_grid = [1.2, 1.5, 1.8]
-    atr_tp_grid = [2.0, 2.5, 3.0]
-
-    rows = []
-
-    for atr_sl in atr_sl_grid:
-        for atr_tp in atr_tp_grid:
-            bal = 10000.0
-            pos = None
-            pnls = []
-
-            for i in range(60, len(df)):
-                w = df.iloc[: i + 1]
-                px = float(w['close'].iloc[-1])
-                atr = float(w['atr'].iloc[-1])
-
-                if pos is not None:
-                    side = pos['side']
-                    hit = (side == 'long' and (px <= pos['sl'] or px >= pos['tp'])) or (side == 'short' and (px >= pos['sl'] or px <= pos['tp']))
-                    if hit:
-                        pnl = (px - pos['entry']) * pos['size'] if side == 'long' else (pos['entry'] - px) * pos['size']
-                        bal += pnl
-                        bal -= _cost(abs(pos['entry'] * pos['size']))
-                        bal -= _cost(abs(px * pos['size']))
-                        pnls.append(float(pnl))
-                        pos = None
-                    continue
-
-                ml = loader.predict(w)
-                if not ml:
-                    continue
-
-                reg = str(ml.get('regime_name') or '')
-                bull = int(w.get('strong_bullish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bullish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
-                bear = int(w.get('strong_bearish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bearish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
-
-                side = None
-                if bull and reg == 'bullish':
-                    side = 'long'
-                elif bear and reg == 'bearish':
-                    side = 'short'
-
-                if side is None or atr <= 0:
-                    continue
-
-                sl = px - atr * atr_sl if side == 'long' else px + atr * atr_sl
-                tp = px + atr * atr_tp if side == 'long' else px - atr * atr_tp
-
-                risk_amt = float(bal) * float(risk_pct)
-                unit_risk = abs(px - sl)
-                if unit_risk <= 0:
-                    continue
-                size = risk_amt / unit_risk
-                pos = {'side': side, 'entry': px, 'sl': sl, 'tp': tp, 'size': size}
-
-            if not pnls:
-                rows.append({'atr_sl': atr_sl, 'atr_tp': atr_tp, 'trades': 0, 'win_rate_pct': 0.0, 'expectancy': 0.0, 'profit_factor': 0.0, 'total_pnl': 0.0})
-                continue
-
-            pnl = pd.Series(pnls)
-            wins = pnl[pnl > 0]
-            losses = pnl[pnl < 0]
-            pf = float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else (float('inf') if wins.sum() > 0 else 0.0)
-            rows.append({
-                'atr_sl': atr_sl,
-                'atr_tp': atr_tp,
-                'trades': int(len(pnl)),
-                'win_rate_pct': float(len(wins) / len(pnl) * 100.0),
-                'expectancy': float(pnl.mean()),
-                'profit_factor': float(pf),
-                'total_pnl': float(pnl.sum()),
-            })
-
-    out = pd.DataFrame(rows).sort_values(by=['profit_factor', 'expectancy'], ascending=False)
-    best = out.iloc[0].to_dict() if not out.empty else None
-    return {'best': best, 'table': out}
-
-
 st.sidebar.subheader("🔎 Auto-tune ATR")
 _tune_assets = assets if assets else ["EURUSD=X"]
 tune_symbol = st.sidebar.selectbox("Tune symbol", _tune_assets, index=0)
@@ -548,10 +211,6 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "use_atr_risk": bool(use_atr_risk),
         "atr_sl_mult": float(atr_sl_mult),
         "atr_tp_mult": float(atr_tp_mult),
-        "adaptive_ml_enabled": bool(adaptive_ml_enabled),
-        "adaptive_filter_enabled": bool(adaptive_filter_enabled),
-        "adaptive_lookahead_bars": int(adaptive_lookahead_bars),
-        "adaptive_prob_threshold": float(adaptive_prob_threshold),
         "time": str(datetime.now()),
     })
     st.sidebar.success("Filters applied")
@@ -1051,14 +710,12 @@ else:
         total_blk = int(blocked.get("total") or 0)
         cooldown_blk = int(reasons.get("cooldown") or 0)
         weak_blk = int(reasons.get("weak") or 0)
-        adaptive_blk = int(reasons.get("adaptive") or 0)
 
         st.markdown("### Blocks (filtered entries)")
-        b1, b2, b3, b4 = st.columns(4)
+        b1, b2, b3 = st.columns(3)
         b1.metric("Total blocks", total_blk)
         b2.metric("Cooldown", cooldown_blk)
         b3.metric("Weak blocked", weak_blk)
-        b4.metric("Adaptive", adaptive_blk)
 
         by_symbol = blocked.get("by_symbol")
         if isinstance(by_symbol, dict) and by_symbol:
@@ -1071,7 +728,6 @@ else:
                     "total": int(v.get("total") or 0),
                     "cooldown": int(v.get("cooldown") or 0),
                     "weak": int(v.get("weak") or 0),
-                    "adaptive": int(v.get("adaptive") or 0),
                 })
             if rows:
                 dfb = pd.DataFrame(rows).sort_values(by=["total"], ascending=False)

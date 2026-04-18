@@ -1,7 +1,6 @@
 # =====================================================
 # 1. ИМПОРТ ВСЕХ БИБЛИОТЕК
 # =====================================================
-import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,124 +9,18 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential, Model
-    from tensorflow.keras.layers import (
-        LSTM,
-        Dense,
-        Dropout,
-        Input,
-        MultiHeadAttention,
-        LayerNormalization,
-        GlobalAveragePooling1D,
-        Bidirectional,
-        GRU,
-        Conv1D,
-        MaxPooling1D,
-        Flatten,
-        SimpleRNN,
-        BatchNormalization,
-    )
-    from tensorflow.keras.optimizers import Adam
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-except Exception:
-    tf = None
-    Sequential = None
-    Model = None
-    LSTM = Dense = Dropout = Input = MultiHeadAttention = LayerNormalization = GlobalAveragePooling1D = None
-    Bidirectional = GRU = Conv1D = MaxPooling1D = Flatten = SimpleRNN = BatchNormalization = None
-    Adam = None
-    EarlyStopping = ReduceLROnPlateau = None
+# Deep Learning / RL
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import (LSTM, Dense, Dropout, Input, MultiHeadAttention, 
+                                     LayerNormalization, GlobalAveragePooling1D, 
+                                     Bidirectional, GRU, Conv1D, MaxPooling1D, Flatten,
+                                     SimpleRNN, BatchNormalization)
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 # Данные
 import yfinance as yf
-
-if os.getenv("EXPORT_SWITCH_MODEL", "false").strip().lower() in ("1", "true", "yes"):
-    import json
-    import joblib
-    import bot as bot_module
-
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-
-    symbol = os.getenv("SWITCH_SYMBOL", "EURUSD=X")
-    interval = os.getenv("SWITCH_INTERVAL", "1h")
-    period = os.getenv("SWITCH_PERIOD", "365d")
-    label_horizon = int(os.getenv("SWITCH_LABEL_HORIZON", 12))
-    label_thr_pct = float(os.getenv("SWITCH_LABEL_THR_PCT", 0.20)) / 100.0
-    lookahead = int(os.getenv("SWITCH_LOOKAHEAD", 6))
-
-    out_dir = os.getenv("SWITCH_OUT_DIR", "models")
-    os.makedirs(out_dir, exist_ok=True)
-
-    raw = yf.Ticker(symbol).history(period=period, interval=interval)
-    if raw is None or raw.empty:
-        raise RuntimeError("No data")
-
-    raw = raw[["Open", "High", "Low", "Close", "Volume"]]
-    raw.columns = ["open", "high", "low", "close", "volume"]
-
-    df = bot_module.calculate_indicators(raw).dropna().copy()
-
-    close = pd.to_numeric(df["close"], errors="coerce")
-    fwd = (close.shift(-label_horizon) / close) - 1.0
-    label = np.where(fwd > label_thr_pct, 2, np.where(fwd < -label_thr_pct, 0, 1))
-    label = pd.Series(label, index=df.index)
-
-    sw = (label.ne(label.shift(1))).astype(int)
-    sw.iloc[0] = 0
-
-    future_sw = pd.concat([sw.shift(-i) for i in range(1, lookahead + 1)], axis=1)
-    y = future_sw.max(axis=1)
-
-    feats = [
-        "returns", "log_returns", "volatility", "ema_8", "ema_21", "ema_50",
-        "macd", "macd_signal", "macd_hist", "rsi", "atr", "bb_upper", "bb_lower",
-        "close_kalman", "close_kalman_std", "ema_cross",
-        "jaw", "teeth", "lips",
-        "alligator_asleep", "alligator_bullish", "alligator_bearish", "alligator_expanding",
-        "fractal_bullish", "fractal_bearish",
-        "bullish_fractal_alligator", "bearish_fractal_alligator",
-        "strong_bullish", "strong_bearish",
-        "returns_lag_1", "returns_lag_2", "returns_lag_3", "returns_lag_5",
-        "close_lag_1", "close_lag_2", "close_lag_3", "close_lag_5",
-    ]
-    feats = [c for c in feats if c in df.columns]
-
-    x = df[feats].replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    y = y.loc[x.index].fillna(0).astype(int)
-
-    n = len(x)
-    split = int(n * 0.8)
-    x_train, x_test = x.iloc[:split], x.iloc[split:]
-    y_train, y_test = y.iloc[:split], y.iloc[split:]
-
-    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
-    clf.fit(x_train, y_train)
-
-    proba = clf.predict_proba(x_test)[:, 1]
-    auc = float(roc_auc_score(y_test, proba)) if len(np.unique(y_test)) > 1 else 0.0
-
-    joblib.dump(clf, os.path.join(out_dir, "switch_filter.pkl"))
-    with open(os.path.join(out_dir, "switch_filter_metadata.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "symbol": symbol,
-                "interval": interval,
-                "period": period,
-                "feature_columns": feats,
-                "label_horizon": label_horizon,
-                "label_thr_pct": label_thr_pct,
-                "lookahead": lookahead,
-                "auc_test": auc,
-            },
-            f,
-            indent=2,
-        )
-
-    print(f"✅ switch_filter.pkl exported | AUC={auc:.4f} | feats={len(feats)}")
-    raise SystemExit(0)
 
 # ML модели
 from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier, 
@@ -138,16 +31,8 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.naive_bayes import GaussianNB
 from xgboost import XGBClassifier
-
-try:
-    from lightgbm import LGBMClassifier
-except Exception:
-    LGBMClassifier = None
-
-try:
-    from catboost import CatBoostClassifier
-except Exception:
-    CatBoostClassifier = None
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
 
 # Метрики и preprocessing
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
@@ -162,7 +47,7 @@ from pandas.tseries.offsets import CustomBusinessDay
 
 print(f"✅ TensorFlow: {tf.__version__}")
 print(f"📅 Дата: {datetime.now().strftime('%Y-%m-%d')}")
-
+python
 # =====================================================
 # 2. ЗАГРУЗКА ДАННЫХ (6 ЛЕТ, 8 ФОРЕКС ПАР)
 # =====================================================
@@ -206,7 +91,7 @@ main_pair = 'EURUSD'
 df_raw = market_data[main_pair].copy()
 print(f"\nАнализ для {main_pair}")
 print(df_raw.head())
-
+python
 # =====================================================
 # 3. FEATURE ENGINEERING (БОЛЬШЕ 100 ПРИЗНАКОВ)
 # =====================================================
@@ -336,7 +221,7 @@ df_clean = df.dropna()
 print(f"✅ Всего признаков: {len(df_clean.columns)}")
 print(f"✅ Строк после очистки: {len(df_clean)}")
 print(f"✅ Баланс целевой: {df_clean['target'].mean():.2%} UP сигналов")
-
+python
 # =====================================================
 # 4. ПОДГОТОВКА ДАННЫХ ДЛЯ ОБУЧЕНИЯ
 # =====================================================
@@ -369,7 +254,7 @@ print(f"Обучающая выборка: {X_train.shape}")
 print(f"Тестовая выборка: {X_test.shape}")
 print(f"Баланс train: {y_train.mean():.2%} UP")
 print(f"Баланс test: {y_test.mean():.2%} UP")
-
+python
 # =====================================================
 # 5. МНОЖЕСТВО ML МОДЕЛЕЙ (15 МОДЕЛЕЙ)
 # =====================================================
@@ -448,7 +333,7 @@ print(results_df.round(4))
 best_model_name = results_df.index[0]
 best_model = results[best_model_name]['model']
 print(f"\n🏆 ЛУЧШАЯ МОДЕЛЬ: {best_model_name} (AUC={results_df.iloc[0]['auc']:.4f})")
-
+python
 # =====================================================
 # 6. DEEP LEARNING МОДЕЛИ (LSTM, Bi-LSTM, GRU, RNN)
 # =====================================================
@@ -570,7 +455,7 @@ print("\n" + "="*70)
 print("ИТОГОВЫЙ РЕЙТИНГ (ML + DL)")
 print("="*70)
 print(results_df.round(4))
-
+python
 # =====================================================
 # 7. АНСАМБЛЬ VOTING CLASSIFIER
 # =====================================================
@@ -602,7 +487,7 @@ if len(voting_estimators) >= 2:
     results_df = results_df.sort_values('auc', ascending=False)
     print("\n📊 Финальный рейтинг с ансамблем:")
     print(results_df.head(10).round(4))
-
+python
 # =====================================================
 # 8. ГРАФИКИ: СРАВНЕНИЕ МОДЕЛЕЙ
 # =====================================================
@@ -758,7 +643,7 @@ if len(top5_preds) >= 2:
 
 plt.tight_layout()
 plt.show()
-
+python
 # =====================================================
 # 9. ТОРГОВАЯ СИМУЛЯЦИЯ (BACKTEST)
 # =====================================================
@@ -826,7 +711,7 @@ if trades:
     print(f"   Средний профит: ${avg_win:.2f}")
     print(f"   Средний убыток: ${avg_loss:.2f}")
     print(f"   Sharpe Ratio: {sharpe:.3f}")
-
+python
 # =====================================================
 # 10. ФИНАЛЬНЫЕ ГРАФИКИ ТОРГОВЛИ
 # =====================================================
@@ -919,7 +804,7 @@ ax6.text(0.1, 0.5, summary_text, transform=ax6.transAxes, fontsize=10,
 
 plt.tight_layout()
 plt.show()
-
+python
 # =====================================================
 # 11. ИТОГОВЫЙ ОТЧЁТ
 # =====================================================
@@ -942,94 +827,3 @@ print(f"""
 print("="*70)
 print("✅ АНАЛИЗ ЗАВЕРШЁН")
 print("="*70)
-
-
-def export_switch_model():
-    import os
-    import json
-    import joblib
-    import bot as bot_module
-
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-
-    symbol = os.getenv("SWITCH_SYMBOL", "EURUSD=X")
-    interval = os.getenv("SWITCH_INTERVAL", "1h")
-    period = os.getenv("SWITCH_PERIOD", "365d")
-    label_horizon = int(os.getenv("SWITCH_LABEL_HORIZON", 12))
-    label_thr_pct = float(os.getenv("SWITCH_LABEL_THR_PCT", 0.20)) / 100.0
-    lookahead = int(os.getenv("SWITCH_LOOKAHEAD", 6))
-
-    out_dir = os.getenv("SWITCH_OUT_DIR", "models")
-    os.makedirs(out_dir, exist_ok=True)
-
-    raw = yf.Ticker(symbol).history(period=period, interval=interval)
-    if raw is None or raw.empty:
-        raise RuntimeError("No data")
-
-    raw = raw[["Open", "High", "Low", "Close", "Volume"]]
-    raw.columns = ["open", "high", "low", "close", "volume"]
-
-    df = bot_module.calculate_indicators(raw).dropna().copy()
-
-    close = pd.to_numeric(df["close"], errors="coerce")
-    fwd = (close.shift(-label_horizon) / close) - 1.0
-    label = np.where(fwd > label_thr_pct, 2, np.where(fwd < -label_thr_pct, 0, 1))
-    label = pd.Series(label, index=df.index)
-
-    sw = (label.ne(label.shift(1))).astype(int)
-    sw.iloc[0] = 0
-
-    future_sw = pd.concat([sw.shift(-i) for i in range(1, lookahead + 1)], axis=1)
-    y = future_sw.max(axis=1)
-
-    feats = [
-        "returns", "log_returns", "volatility", "ema_8", "ema_21", "ema_50",
-        "macd", "macd_signal", "macd_hist", "rsi", "atr", "bb_upper", "bb_lower",
-        "close_kalman", "close_kalman_std", "ema_cross",
-        "jaw", "teeth", "lips",
-        "alligator_asleep", "alligator_bullish", "alligator_bearish", "alligator_expanding",
-        "fractal_bullish", "fractal_bearish",
-        "bullish_fractal_alligator", "bearish_fractal_alligator",
-        "strong_bullish", "strong_bearish",
-        "returns_lag_1", "returns_lag_2", "returns_lag_3", "returns_lag_5",
-        "close_lag_1", "close_lag_2", "close_lag_3", "close_lag_5",
-    ]
-    feats = [c for c in feats if c in df.columns]
-
-    x = df[feats].replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    y = y.loc[x.index].fillna(0).astype(int)
-
-    n = len(x)
-    split = int(n * 0.8)
-    x_train, x_test = x.iloc[:split], x.iloc[split:]
-    y_train, y_test = y.iloc[:split], y.iloc[split:]
-
-    clf = LogisticRegression(max_iter=1000, class_weight="balanced")
-    clf.fit(x_train, y_train)
-
-    proba = clf.predict_proba(x_test)[:, 1]
-    auc = float(roc_auc_score(y_test, proba)) if len(np.unique(y_test)) > 1 else 0.0
-
-    joblib.dump(clf, os.path.join(out_dir, "switch_filter.pkl"))
-    with open(os.path.join(out_dir, "switch_filter_metadata.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "symbol": symbol,
-                "interval": interval,
-                "period": period,
-                "feature_columns": feats,
-                "label_horizon": label_horizon,
-                "label_thr_pct": label_thr_pct,
-                "lookahead": lookahead,
-                "auc_test": auc,
-            },
-            f,
-            indent=2,
-        )
-
-    print(f"✅ switch_filter.pkl exported | AUC={auc:.4f} | feats={len(feats)}")
-
-
-if os.getenv("EXPORT_SWITCH_MODEL", "false").strip().lower() in ("1", "true", "yes"):
-    export_switch_model()
