@@ -914,18 +914,50 @@ Rules:
 """
 
         try:
+            system = (
+                "You are a strict trading decision function. "
+                "Rules: (1) Use ONLY the provided INPUTS; do NOT invent news, events, prices, probabilities, or sources. "
+                "(2) If information is missing, respond with trade_decision=NO and a short reasoning_short. "
+                "(3) Output MUST be valid JSON ONLY, no markdown, no extra text. "
+                "(4) Allowed values: trade_decision YES/NO; action entry/hold; side long/short; signal_strength weak/medium/strong."
+            )
+
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.5, # Increased for more variety
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                temperature=0.0,
                 max_tokens=int(self.max_tokens)
             )
-            content = response.choices[0].message.content
+            content = response.choices[0].message.content or ""
+
             import re
-            match = re.search(r'\{[^{}]*\}', content)
-            if match:
-                return json.loads(match.group())
-            return {'action': 'hold', 'confidence': 0, 'reasoning': 'Parse error'}
+            match = re.search(r'\{[\s\S]*\}', content)
+            if not match:
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Parse error'}
+
+            data = json.loads(match.group())
+            if not isinstance(data, dict):
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Invalid JSON'}
+
+            td = str(data.get('trade_decision') or 'NO').upper()
+            act = str(data.get('action') or 'hold').lower()
+            side = str(data.get('side') or 'long').lower()
+            strength = str(data.get('signal_strength') or 'weak').lower()
+
+            if td not in ('YES', 'NO'):
+                td = 'NO'
+            if act not in ('entry', 'hold'):
+                act = 'hold'
+            if side not in ('long', 'short'):
+                side = 'long'
+            if strength not in ('weak', 'medium', 'strong'):
+                strength = 'weak'
+
+            data['trade_decision'] = td
+            data['action'] = act
+            data['side'] = side
+            data['signal_strength'] = strength
+            return data
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg:
@@ -1013,18 +1045,50 @@ Respond ONLY with valid JSON (no extra text):
 """
 
         try:
+            system = (
+                "You are a strict trading decision function. "
+                "Rules: (1) Use ONLY the provided INPUTS; do NOT invent news, events, prices, probabilities, or sources. "
+                "(2) If information is missing, respond with trade_decision=NO and a short reasoning_short. "
+                "(3) Output MUST be valid JSON ONLY, no markdown, no extra text. "
+                "(4) Allowed values: trade_decision YES/NO; action entry/hold; side long/short; signal_strength weak/medium/strong."
+            )
+
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=300,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=int(self.max_tokens),
             )
-            content = response.choices[0].message.content
+            content = response.choices[0].message.content or ""
+
             import re
-            match = re.search(r'\{[^{}]*\}', content)
-            if match:
-                return json.loads(match.group())
-            return {'action': 'hold', 'confidence': 0, 'reasoning': 'Parse error'}
+            match = re.search(r'\{[\s\S]*\}', content)
+            if not match:
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Parse error'}
+
+            data = json.loads(match.group())
+            if not isinstance(data, dict):
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Invalid JSON'}
+
+            td = str(data.get('trade_decision') or 'NO').upper()
+            act = str(data.get('action') or 'hold').lower()
+            side = str(data.get('side') or 'long').lower()
+            strength = str(data.get('signal_strength') or 'weak').lower()
+
+            if td not in ('YES', 'NO'):
+                td = 'NO'
+            if act not in ('entry', 'hold'):
+                act = 'hold'
+            if side not in ('long', 'short'):
+                side = 'long'
+            if strength not in ('weak', 'medium', 'strong'):
+                strength = 'weak'
+
+            data['trade_decision'] = td
+            data['action'] = act
+            data['side'] = side
+            data['signal_strength'] = strength
+            return data
         except Exception as e:
             return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {e}"}
 
