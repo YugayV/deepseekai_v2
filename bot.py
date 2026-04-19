@@ -918,7 +918,7 @@ Rules:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.5, # Increased for more variety
-                max_tokens=300
+                max_tokens=int(self.max_tokens)
             )
             content = response.choices[0].message.content
             import re
@@ -1972,9 +1972,15 @@ class TradingBot:
                     mode = "mix"
                 elif mode == "reinforse":
                     decision = self.ai.get_reinforse_decision(symbol, df, ml_pred, context=ctx)
+                    if int((decision or {}).get('ai_error_code') or 0) == 402:
+                        decision = self._rule_based_decision(symbol, df, ml_pred)
+                        mode = 'reinforse'
                 else:
                     mode = "classic"
                     decision = self.ai.get_decision(symbol, df, ml_pred, context=ctx)
+                    if int((decision or {}).get('ai_error_code') or 0) == 402:
+                        decision = self._rule_based_decision(symbol, df, ml_pred)
+                        mode = 'classic'
 
                 if not isinstance(decision, dict):
                     decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'invalid_decision'}
