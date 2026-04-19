@@ -203,6 +203,8 @@ TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
 
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
+AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", 96))
+AI_MIN_TOKENS_ON_402 = int(os.getenv("AI_MIN_TOKENS_ON_402", 16))
 
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
@@ -825,10 +827,17 @@ class AIAdvisor:
             base_url="https://openrouter.ai/api/v1"
         ) if api_key or AI_API_KEY else None
         self.model = "deepseek/deepseek-chat"
+        self.max_tokens = int(AI_MAX_TOKENS)
 
     def get_decision(self, symbol, df, ml_prediction, context: dict | None = None):
         if not self.client:
-            return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
+            return {
+                'trade_decision': 'NO',
+                'action': 'hold',
+                'signal_strength': 'weak',
+                'reasoning_short': 'AI API key missing',
+                'ai_error_code': 401
+            }
 
         latest = df.iloc[-1]
         prev = df.iloc[-2]
@@ -960,15 +969,43 @@ Rules:
             return data
         except Exception as e:
             error_msg = str(e)
+            if "402" in error_msg:
+                self.max_tokens = max(int(AI_MIN_TOKENS_ON_402), 1)
+                logger.error(f"❌ AI credits exhausted (402). Reduce AI_MAX_TOKENS or add credits. {error_msg}")
+                return {
+                    'trade_decision': 'NO',
+                    'action': 'hold',
+                    'signal_strength': 'weak',
+                    'reasoning_short': 'AI credits exhausted',
+                    'ai_error_code': 402
+                }
             if "401" in error_msg:
-                logger.error(f"❌ API Key Error: Please check your OPENROUTER_API_KEY in .env")
-            else:
-                logger.error(f"AI error: {e}")
-            return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {error_msg}"}
+                logger.error("❌ API Key Error: Please check your OPENROUTER_API_KEY")
+                return {
+                    'trade_decision': 'NO',
+                    'action': 'hold',
+                    'signal_strength': 'weak',
+                    'reasoning_short': 'AI API key error',
+                    'ai_error_code': 401
+                }
+            logger.error(f"AI error: {e}")
+            return {
+                'trade_decision': 'NO',
+                'action': 'hold',
+                'signal_strength': 'weak',
+                'reasoning_short': 'AI API error',
+                'ai_error_code': 500
+            }
 
     def get_reinforse_decision(self, symbol, df, ml_prediction, context: dict | None = None):
         if not self.client:
-            return {'action': 'hold', 'confidence': 0, 'reasoning': 'No API key'}
+            return {
+                'trade_decision': 'NO',
+                'action': 'hold',
+                'signal_strength': 'weak',
+                'reasoning_short': 'AI API key missing',
+                'ai_error_code': 401
+            }
 
         latest = df.iloc[-1]
         recent = df[['open', 'high', 'low', 'close']].tail(12).round(6).to_dict('records')
@@ -1090,7 +1127,24 @@ Respond ONLY with valid JSON (no extra text):
             data['signal_strength'] = strength
             return data
         except Exception as e:
-            return {'action': 'hold', 'confidence': 0, 'reasoning': f"API Error: {e}"}
+            error_msg = str(e)
+            if "402" in error_msg:
+                self.max_tokens = max(int(AI_MIN_TOKENS_ON_402), 1)
+                logger.error(f"❌ AI credits exhausted (402). Reduce AI_MAX_TOKENS or add credits. {error_msg}")
+                return {
+                    'trade_decision': 'NO',
+                    'action': 'hold',
+                    'signal_strength': 'weak',
+                    'reasoning_short': 'AI credits exhausted',
+                    'ai_error_code': 402
+                }
+            return {
+                'trade_decision': 'NO',
+                'action': 'hold',
+                'signal_strength': 'weak',
+                'reasoning_short': 'AI API error',
+                'ai_error_code': 500
+            }
 
 
 # ============================================
@@ -1789,6 +1843,47 @@ class TradingBot:
         await asyncio.sleep(2)
         await self.notifier.send_startup_message()
 
+    def _rule_based_decision(self, symbol: str, df, ml_pred: dict) -> dict:
+        latest = df.iloc[-1]
+        reg = str((ml_pred or {}).get('regime_name') or '').lower()
+
+        strong_bull = int(latest.get('strong_bullish', 0) or 0) == 1
+        strong_bear = int(latest.get('strong_bearish', 0) or 0) == 1
+        bull = int(latest.get('bullish_fractal_alligator', 0) or 0) == 1
+        bear = int(latest.get('bearish_fractal_alligator', 0) or 0) == 1
+
+        if (strong_bull or bull) and reg == 'bullish':
+            return {
+                'trade_decision': 'YES',
+                'action': 'entry',
+                'side': 'long',
+                'signal_strength': 'strong' if strong_bull else 'medium',
+                'tp_pct': float(TAKE_PROFIT_PERCENT),
+                'sl_pct': float(STOP_LOSS_PERCENT),
+                'reasoning_short': 'Fallback rules: bullish signal aligned with ML regime',
+            }
+
+        if (strong_bear or bear) and reg == 'bearish':
+            return {
+                'trade_decision': 'YES',
+                'action': 'entry',
+                'side': 'short',
+                'signal_strength': 'strong' if strong_bear else 'medium',
+                'tp_pct': float(TAKE_PROFIT_PERCENT),
+                'sl_pct': float(STOP_LOSS_PERCENT),
+                'reasoning_short': 'Fallback rules: bearish signal aligned with ML regime',
+            }
+
+        return {
+            'trade_decision': 'NO',
+            'action': 'hold',
+            'side': 'long',
+            'signal_strength': 'weak',
+            'tp_pct': float(TAKE_PROFIT_PERCENT),
+            'sl_pct': float(STOP_LOSS_PERCENT),
+            'reasoning_short': 'Fallback rules: no aligned signal',
+        }
+
     def _bar_seconds(self, df) -> float:
         try:
             diffs = df.index.to_series().diff().dropna().tail(10)
@@ -2047,7 +2142,10 @@ class TradingBot:
                         mode = 'classic'
 
                 if not isinstance(decision, dict):
-                    decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'invalid_decision'}
+                    decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'invalid_decision'}
+
+                if int(decision.get('ai_error_code') or 0) in (401, 402, 500):
+                    decision = self._rule_based_decision(symbol, df, ml_pred)
 
                 decision["strategy_mode"] = mode
 
