@@ -190,13 +190,15 @@ ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
 
 WAVE_WINDOW = int(os.getenv("WAVE_WINDOW", 64))
 WAVE_LEVELS = int(os.getenv("WAVE_LEVELS", 4))
-WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.10))
+WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.30))
+USE_WAVE_FILTER_DEFAULT = (os.getenv("USE_WAVE_FILTER_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
 
 MACRO_SYMBOLS = [s.strip() for s in os.getenv("MACRO_SYMBOLS", "DX-Y.NYB,GC=F,CL=F,^TNX,^VIX").split(",") if s.strip()]
 USE_MACRO_DEFAULT = (os.getenv("USE_MACRO_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
 USE_POLYMARKET_DEFAULT = (os.getenv("USE_POLYMARKET_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 POLYMARKET_FEED_URL = (os.getenv("POLYMARKET_FEED_URL") or "").strip()
-DXY_TREND_BLOCK_PCT = float(os.getenv("DXY_TREND_BLOCK_PCT", 0.08))
+DXY_TREND_BLOCK_PCT = float(os.getenv("DXY_TREND_BLOCK_PCT", 0.20))
+USE_DXY_FILTER_DEFAULT = (os.getenv("USE_DXY_FILTER_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
@@ -1660,6 +1662,10 @@ class TradingBot:
             "atr_tp_mult": float(ATR_TP_MULT),
             "use_macro": bool(USE_MACRO_DEFAULT),
             "use_polymarket": bool(USE_POLYMARKET_DEFAULT),
+            "use_wave_filter": bool(USE_WAVE_FILTER_DEFAULT),
+            "wave_trend_block_pct": float(WAVE_TREND_BLOCK_PCT),
+            "use_dxy_filter": bool(USE_DXY_FILTER_DEFAULT),
+            "dxy_trend_block_pct": float(DXY_TREND_BLOCK_PCT),
         }
         self.context = {}
         self.last_action_ts = {}
@@ -1767,6 +1773,10 @@ class TradingBot:
             self.strategy["atr_tp_mult"] = max(0.1, _as_float(cmd_data.get("atr_tp_mult"), self.strategy.get("atr_tp_mult", 2.5)))
             self.strategy["use_macro"] = _as_bool(cmd_data.get("use_macro"), self.strategy.get("use_macro", USE_MACRO_DEFAULT))
             self.strategy["use_polymarket"] = _as_bool(cmd_data.get("use_polymarket"), self.strategy.get("use_polymarket", USE_POLYMARKET_DEFAULT))
+            self.strategy["use_wave_filter"] = _as_bool(cmd_data.get("use_wave_filter"), self.strategy.get("use_wave_filter", USE_WAVE_FILTER_DEFAULT))
+            self.strategy["wave_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("wave_trend_block_pct"), self.strategy.get("wave_trend_block_pct", WAVE_TREND_BLOCK_PCT)))
+            self.strategy["use_dxy_filter"] = _as_bool(cmd_data.get("use_dxy_filter"), self.strategy.get("use_dxy_filter", USE_DXY_FILTER_DEFAULT))
+            self.strategy["dxy_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("dxy_trend_block_pct"), self.strategy.get("dxy_trend_block_pct", DXY_TREND_BLOCK_PCT)))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("classic", "reinforse", "pro", "mix"):
@@ -2127,15 +2137,31 @@ class TradingBot:
                     side_c = str(d_classic.get('side') or 'long').lower()
                     side_r = str(d_reinf.get('side') or 'long').lower()
 
-                    # STRICT MIX: open only if BOTH strategies agree (and same side)
+                    def _rank(v: str) -> int:
+                        v = str(v or "").lower()
+                        return 3 if v == "strong" else 2 if v == "medium" else 1 if v == "weak" else 0
+
+                    # MIX: (1) open if BOTH agree and same side
                     if yes_c and yes_r and side_c == side_r:
-                        decision = dict(d_reinf)  # prefer pro/reinforse payload when aligned
+                        decision = dict(d_reinf)  # prefer reinforse payload when aligned
                         decision['side'] = side_r
                         decision['trade_decision'] = 'YES'
                         decision['action'] = 'entry'
                         decision['reasoning_short'] = f"MIX agree: classic={d_classic.get('reasoning_short','')}; reinforse={d_reinf.get('reasoning_short','')}"[:250]
+
+                    # (2) strong override: if exactly one says YES and it's STRONG -> allow
+                    elif yes_c ^ yes_r:
+                        winner = d_reinf if yes_r else d_classic
+                        loser = d_classic if yes_r else d_reinf
+                        if _rank(winner.get('signal_strength')) >= 3:
+                            decision = dict(winner)
+                            decision['trade_decision'] = 'YES'
+                            decision['action'] = 'entry'
+                            decision['reasoning_short'] = f"MIX strong override: yes={winner.get('reasoning_short','')}; no={loser.get('reasoning_short','')}"[:250]
+                        else:
+                            decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'MIX disagree'}
                     else:
-                        decision = {'trade_decision': 'NO', 'action': 'hold', 'reasoning_short': 'MIX disagree'}
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'MIX disagree'}
 
                     mode = "mix"
                 elif mode == "reinforse":
@@ -2176,7 +2202,10 @@ class TradingBot:
                     wave_trend = 0.0
 
                 side = str(decision.get('side') or 'long').lower()
-                if abs(wave_trend) >= float(WAVE_TREND_BLOCK_PCT):
+
+                use_wave = bool(self.strategy.get('use_wave_filter', USE_WAVE_FILTER_DEFAULT))
+                wave_thr = float(self.strategy.get('wave_trend_block_pct', WAVE_TREND_BLOCK_PCT) or WAVE_TREND_BLOCK_PCT)
+                if use_wave and abs(wave_trend) >= wave_thr:
                     if (wave_trend > 0 and side == 'short') or (wave_trend < 0 and side == 'long'):
                         decision['trade_decision'] = 'NO'
                         decision['action'] = 'hold'
@@ -2184,7 +2213,9 @@ class TradingBot:
                         logger.info(f"⛔ {symbol}: Wave trend conflicts with side ({wave_trend:.2f}% vs {side})")
 
                 macro = ctx.get('macro') if isinstance(ctx, dict) else None
-                if isinstance(macro, dict) and abs(float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)) >= float(DXY_TREND_BLOCK_PCT):
+                use_dxy = bool(self.strategy.get('use_dxy_filter', USE_DXY_FILTER_DEFAULT))
+                dxy_thr = float(self.strategy.get('dxy_trend_block_pct', DXY_TREND_BLOCK_PCT) or DXY_TREND_BLOCK_PCT)
+                if use_dxy and isinstance(macro, dict) and abs(float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)) >= dxy_thr:
                     dxy_tr = float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)
                     sym = str(symbol)
                     if sym.endswith('=X') and len(sym) >= 6 and sym[3:6] == 'USD':

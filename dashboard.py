@@ -262,6 +262,15 @@ use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
 atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
 atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
 
+use_wave_filter = st.sidebar.checkbox("Use wave filter", value=True)
+wave_trend_block_pct = st.sidebar.slider("Wave block threshold (%)", 0.0, 2.0, 0.30, 0.01)
+
+use_macro = st.sidebar.checkbox("Use macro/commodities context", value=True)
+use_dxy_filter = st.sidebar.checkbox("Use DXY filter", value=False)
+dxy_trend_block_pct = st.sidebar.slider("DXY block threshold (%)", 0.0, 2.0, 0.20, 0.01)
+
+use_polymarket = st.sidebar.checkbox("Use Polymarket context", value=False)
+
 st.sidebar.subheader("🔎 Auto-tune ATR")
 _tune_assets = assets if assets else ["EURUSD=X"]
 tune_symbol = st.sidebar.selectbox("Tune symbol", _tune_assets, index=0)
@@ -288,6 +297,12 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "use_atr_risk": True,
             "atr_sl_mult": float(best.get('atr_sl')),
             "atr_tp_mult": float(best.get('atr_tp')),
+            "use_wave_filter": bool(use_wave_filter),
+            "wave_trend_block_pct": float(wave_trend_block_pct),
+            "use_macro": bool(use_macro),
+            "use_dxy_filter": bool(use_dxy_filter),
+            "dxy_trend_block_pct": float(dxy_trend_block_pct),
+            "use_polymarket": bool(use_polymarket),
             "time": str(datetime.now()),
         })
         st.sidebar.success("Best ATR applied")
@@ -306,6 +321,12 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "use_atr_risk": bool(use_atr_risk),
         "atr_sl_mult": float(atr_sl_mult),
         "atr_tp_mult": float(atr_tp_mult),
+        "use_wave_filter": bool(use_wave_filter),
+        "wave_trend_block_pct": float(wave_trend_block_pct),
+        "use_macro": bool(use_macro),
+        "use_dxy_filter": bool(use_dxy_filter),
+        "dxy_trend_block_pct": float(dxy_trend_block_pct),
+        "use_polymarket": bool(use_polymarket),
         "time": str(datetime.now()),
     })
     st.sidebar.success("Filters applied")
