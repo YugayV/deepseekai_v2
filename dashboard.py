@@ -43,6 +43,11 @@ import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+try:
+    from yfinance.exceptions import YFRateLimitError
+except Exception:
+    YFRateLimitError = Exception
+
 # Load environment variables
 load_dotenv()
 
@@ -72,7 +77,12 @@ if RUN_BOT_IN_PROCESS:
 def autotune_atr(symbol: str, period: str, interval: str, fee_bps: float, spread_bps: float, risk_pct: float):
     import bot as bot_module
 
-    raw = yf.Ticker(symbol).history(period=period, interval=interval)
+    try:
+        raw = yf.Ticker(symbol).history(period=period, interval=interval)
+    except YFRateLimitError:
+        st.session_state["yf_rate_limited"] = True
+        return None
+
     if raw is None or raw.empty:
         return None
 
@@ -432,15 +442,38 @@ def load_trades():
         st.error(f"Error loading trades: {e}")
     return pd.DataFrame()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_asset_data(symbol, period="3mo", interval="1d"):
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval)
-    if df.empty:
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval=interval)
+        if df is None or df.empty:
+            return None
+
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        df.columns = ['open', 'high', 'low', 'close', 'volume']
+
+        key = f"{symbol}|{period}|{interval}"
+        cache = st.session_state.get("_last_yf_ok")
+        if not isinstance(cache, dict):
+            cache = {}
+        cache[key] = df
+        st.session_state["_last_yf_ok"] = cache
+        st.session_state["yf_rate_limited"] = False
+        return df
+    except YFRateLimitError:
+        st.session_state["yf_rate_limited"] = True
+        key = f"{symbol}|{period}|{interval}"
+        cache = st.session_state.get("_last_yf_ok")
+        if isinstance(cache, dict) and key in cache:
+            return cache[key]
         return None
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    df.columns = ['open', 'high', 'low', 'close', 'volume']
-    return df
+    except Exception:
+        key = f"{symbol}|{period}|{interval}"
+        cache = st.session_state.get("_last_yf_ok")
+        if isinstance(cache, dict) and key in cache:
+            return cache[key]
+        return None
 
 
 @st.cache_data(ttl=300)
@@ -601,6 +634,9 @@ st.markdown("---")
 # PRICE CHARTS
 # ============================================
 st.subheader("📈 Price Action & Signals")
+
+if st.session_state.get("yf_rate_limited"):
+    st.warning("Yahoo Finance rate limited. Showing last cached data where possible. Try again later.")
 
 if chart_view == "TradingView (Interactive)":
     for symbol in assets:
