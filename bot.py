@@ -608,7 +608,16 @@ class MLModelLoader:
             with open(metadata_path, 'r') as f:
                 self.metadata = json.load(f)
             self.feature_cols = self.metadata.get('feature_columns', [])
-            self.target_mapping = self.metadata.get('target_mapping', {0: 'bearish', 1: 'flat', 2: 'bullish'})
+            raw_map = self.metadata.get('target_mapping', {0: 'bearish', 1: 'flat', 2: 'bullish'})
+            norm_map = {}
+            if isinstance(raw_map, dict):
+                for k, v in raw_map.items():
+                    try:
+                        ki = int(k)
+                    except Exception:
+                        continue
+                    norm_map[ki] = v
+            self.target_mapping = norm_map or {0: 'bearish', 1: 'flat', 2: 'bullish'}
         except:
             self.feature_cols = []
             self.target_mapping = {0: 'bearish', 1: 'flat', 2: 'bullish'}
