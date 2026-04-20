@@ -208,6 +208,11 @@ AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", 96))
 AI_MIN_TOKENS_ON_402 = int(os.getenv("AI_MIN_TOKENS_ON_402", 16))
 
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
+REVIEW_MAX_TOKENS = int(os.getenv("REVIEW_MAX_TOKENS", 96))
+LESSONS_LIMIT = int(os.getenv("LESSONS_LIMIT", 8))
+
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
 ALL_SYMBOLS = FOREX_SYMBOLS + CRYPTO_SYMBOLS
@@ -611,16 +616,22 @@ class MLModelLoader:
                 self.metadata = json.load(f)
             self.feature_cols = self.metadata.get('feature_columns', [])
             raw_map = self.metadata.get('target_mapping', {0: 'bearish', 1: 'flat', 2: 'bullish'})
-            norm_map = {}
+            norm_map: dict[int, str] = {}
             if isinstance(raw_map, dict):
                 for k, v in raw_map.items():
                     try:
-                        ki = int(k)
+                        ki = int(float(k))
                     except Exception:
                         continue
-                    norm_map[ki] = v
+                    if v is None:
+                        continue
+                    vv = str(v).strip()
+                    if not vv:
+                        continue
+                    norm_map[ki] = vv
             self.target_mapping = norm_map or {0: 'bearish', 1: 'flat', 2: 'bullish'}
-        except:
+        except Exception as e:
+            logger.warning(f"MLModelLoader metadata load failed: {e}")
             self.feature_cols = []
             self.target_mapping = {0: 'bearish', 1: 'flat', 2: 'bullish'}
 
@@ -910,6 +921,7 @@ INPUTS:
 - Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
 - Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
 - Polymarket snapshot: {"; ".join(poly_lines) if poly_lines else "N/A"}
+- Lessons (must follow): {"; ".join([str(x) for x in (ctx.get('lessons') or [])][:8]) if isinstance(ctx, dict) else "N/A"}
 - Last candles (JSON): {recent}
 
 TASK:
@@ -1008,6 +1020,80 @@ Rules:
                 'ai_error_code': 500
             }
 
+    def review_trade(self, trade: dict, context: dict | None = None) -> dict:
+        if not self.client:
+            return {"lesson": "No AI key", "tags": ["ai_off"], "severity": 1, "action_items": []}
+
+        t = trade or {}
+        ctx = context or {}
+        prompt = f"""
+You are a strict post-trade reviewer.
+Rules:
+- Use ONLY provided TRADE + CONTEXT; do not invent news/events/metrics.
+- Output MUST be valid JSON only (no markdown, no extra text).
+
+TRADE:
+- asset: {t.get('asset')}
+- side: {t.get('side')}
+- entry_price: {t.get('entry_price')}
+- exit_price: {t.get('exit_price')}
+- pnl: {t.get('pnl')}
+- pnl_percent: {t.get('pnl_percent')}
+- strategy_mode: {t.get('strategy_mode')}
+- signal_strength: {t.get('signal_strength')}
+- reasoning: {t.get('analysis')}
+- wave_trend: {t.get('wave_trend')}
+- dxy_trend: {t.get('dxy_trend')}
+
+CONTEXT:
+- filters: {ctx.get('filters')}
+- macro: {ctx.get('macro')}
+
+Return JSON:
+{{
+  \"lesson\": \"one short sentence\",
+  \"tags\": [\"tag1\",\"tag2\"],
+  \"severity\": 1,
+  \"action_items\": [\"one short item\"]
+}}
+"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You output strict JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=int(REVIEW_MAX_TOKENS),
+            )
+            content = response.choices[0].message.content or ""
+            import re
+            match = re.search(r"\{[\s\S]*\}", content)
+            if not match:
+                return {"lesson": "Parse error", "tags": ["parse"], "severity": 1, "action_items": []}
+            data = json.loads(match.group())
+            if not isinstance(data, dict):
+                return {"lesson": "Invalid JSON", "tags": ["parse"], "severity": 1, "action_items": []}
+
+            lesson = str(data.get("lesson") or "").strip()[:240] or "No lesson"
+            tags = data.get("tags")
+            if not isinstance(tags, list):
+                tags = []
+            tags = [str(x).strip()[:32] for x in tags[:6] if str(x).strip()]
+            severity = int(data.get("severity") or 1)
+            severity = max(1, min(5, severity))
+            items = data.get("action_items")
+            if not isinstance(items, list):
+                items = []
+            items = [str(x).strip()[:120] for x in items[:5] if str(x).strip()]
+            return {"lesson": lesson, "tags": tags, "severity": severity, "action_items": items}
+        except Exception as e:
+            if "402" in str(e):
+                return {"lesson": "AI credits exhausted", "tags": ["ai_402"], "severity": 1, "action_items": []}
+            return {"lesson": "AI review error", "tags": ["ai_error"], "severity": 1, "action_items": []}
+
     def get_reinforse_decision(self, symbol, df, ml_prediction, context: dict | None = None):
         if not self.client:
             return {
@@ -1072,6 +1158,7 @@ INPUTS (latest bar):
 - Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
 - Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
 - Polymarket snapshot: {"; ".join(poly_lines) if poly_lines else "N/A"}
+- Lessons (must follow): {"; ".join([str(x) for x in (ctx.get('lessons') or [])][:8]) if isinstance(ctx, dict) else "N/A"}
 - Alligator bullish: {int(latest.get('alligator_bullish', 0))} | bearish: {int(latest.get('alligator_bearish', 0))} | asleep: {int(latest.get('alligator_asleep', 0))}
 - Fractal bullish: {int(latest.get('fractal_bullish', 0))} | bearish: {int(latest.get('fractal_bearish', 0))}
 - Last candles (JSON): {recent}
@@ -1156,6 +1243,84 @@ Respond ONLY with valid JSON (no extra text):
                 'reasoning_short': 'AI API error',
                 'ai_error_code': 500
             }
+
+    def review_trade(self, trade: dict, context: dict | None = None) -> dict:
+        if not self.client:
+            return {"lesson": "AI API key missing", "tags": ["ai_off"], "severity": 1, "action_items": []}
+
+        t = trade or {}
+        ctx = context or {}
+
+        prompt = f"""
+You are a strict post-trade reviewer.
+Rules:
+- Use ONLY provided TRADE and CONTEXT. Do NOT invent news, sources, or prices.
+- Output MUST be valid JSON only.
+
+TRADE:
+- asset: {t.get('asset')}
+- side: {t.get('side')}
+- entry_price: {t.get('entry_price')}
+- exit_price: {t.get('exit_price')}
+- pnl: {t.get('pnl')}
+- pnl_percent: {t.get('pnl_percent')}
+- strategy_mode: {t.get('strategy_mode')}
+- signal_strength: {t.get('signal_strength')}
+- analysis: {t.get('analysis')}
+- wave_trend: {t.get('wave_trend')}
+- dxy_trend: {t.get('dxy_trend')}
+
+CONTEXT:
+- filters: {ctx.get('filters')}
+- macro: {ctx.get('macro')}
+
+Return JSON:
+{{
+  "lesson": "one short sentence",
+  "tags": ["tag1", "tag2"],
+  "severity": 1,
+  "action_items": ["one short item"]
+}}
+"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Return strict JSON only. Never hallucinate."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=int(REVIEW_MAX_TOKENS),
+            )
+            content = response.choices[0].message.content or ""
+
+            import re
+            match = re.search(r'\{[\s\S]*\}', content)
+            if not match:
+                return {"lesson": "Parse error", "tags": ["parse"], "severity": 1, "action_items": []}
+
+            data = json.loads(match.group())
+            if not isinstance(data, dict):
+                return {"lesson": "Invalid JSON", "tags": ["parse"], "severity": 1, "action_items": []}
+
+            lesson = str(data.get('lesson') or '').strip()[:240] or "No lesson"
+            tags = data.get('tags')
+            if not isinstance(tags, list):
+                tags = []
+            tags = [str(x).strip()[:32] for x in tags[:6] if str(x).strip()]
+            severity = int(data.get('severity') or 1)
+            severity = max(1, min(5, severity))
+            items = data.get('action_items')
+            if not isinstance(items, list):
+                items = []
+            items = [str(x).strip()[:120] for x in items[:5] if str(x).strip()]
+
+            return {"lesson": lesson, "tags": tags, "severity": severity, "action_items": items}
+        except Exception as e:
+            if "402" in str(e):
+                return {"lesson": "AI credits exhausted", "tags": ["ai_402"], "severity": 1, "action_items": []}
+            return {"lesson": "AI review error", "tags": ["ai_error"], "severity": 1, "action_items": []}
 
 
 # ============================================
@@ -1615,19 +1780,35 @@ class PaperTradingEngine:
         return None
 
     def get_state(self, current_prices):
-        equity = self.balance
+        used_margin = 0.0
+        unrealized_pnl = 0.0
+
         for symbol, pos in self.positions.items():
-            price = current_prices.get(symbol, 0)
-            if pos['side'] == 'long':
-                equity += pos['size'] * price
-            else:
-                equity += pos['size'] * (2 * pos['entry_price'] - price)
+            try:
+                entry = float(pos.get('entry_price') or 0.0)
+                size = float(pos.get('size') or 0.0)
+                side = str(pos.get('side') or 'long')
+                price = float((current_prices or {}).get(symbol, pos.get('last_price') or entry) or entry)
+                margin = float(pos.get('margin') or (size * entry))
+
+                used_margin += margin
+                if side == 'short':
+                    unrealized_pnl += (entry - price) * size
+                else:
+                    unrealized_pnl += (price - entry) * size
+            except Exception:
+                continue
+
+        equity = float(self.balance) + float(used_margin) + float(unrealized_pnl)
+        start = float(self.initial_capital) if float(self.initial_capital) > 0 else float(PAPER_CAPITAL)
 
         return {
-            'balance': self.balance,
-            'equity': equity,
+            'balance': float(self.balance),
+            'equity': float(equity),
+            'used_margin': float(used_margin),
+            'unrealized_pnl': float(unrealized_pnl),
             'positions': len(self.positions),
-            'pnl': (equity - PAPER_CAPITAL) / PAPER_CAPITAL * 100
+            'pnl': (float(equity) - start) / start * 100 if start > 0 else 0.0
         }
 
 
@@ -1678,8 +1859,218 @@ class TradingBot:
             group_id=os.getenv("TELEGRAM_GROUP_ID") or os.getenv("TELEGRAM_CHAT_ID"),
             admin_chat_id=os.getenv("TELEGRAM_CHAT_ID")
         )
+
+        self.db_enabled = bool(DATABASE_URL)
+        self._db_ready = False
+        if self.db_enabled:
+            self._db_ready = self._db_init()
+
         self.running = True
-    
+
+    def _db_connect(self):
+        if not DATABASE_URL:
+            return None
+        try:
+            import psycopg2
+            return psycopg2.connect(DATABASE_URL)
+        except Exception as e:
+            logger.error(f"DB connect error: {e}")
+            return None
+
+    def _db_init(self) -> bool:
+        conn = self._db_connect()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    asset TEXT,
+                    side TEXT,
+                    entry_price DOUBLE PRECISION,
+                    exit_price DOUBLE PRECISION,
+                    pnl DOUBLE PRECISION,
+                    pnl_percent DOUBLE PRECISION,
+                    strategy_mode TEXT,
+                    signal_strength TEXT,
+                    wave_trend DOUBLE PRECISION,
+                    dxy_trend DOUBLE PRECISION,
+                    analysis TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_lessons (
+                    id BIGSERIAL PRIMARY KEY,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    trade_id BIGINT,
+                    asset TEXT,
+                    win BOOLEAN,
+                    pnl DOUBLE PRECISION,
+                    lesson TEXT,
+                    tags TEXT,
+                    severity INTEGER
+                )
+                """
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.error(f"DB init error: {e}")
+            return False
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _db_insert_trade(self, trade: dict) -> int | None:
+        if not self._db_ready:
+            return None
+        conn = self._db_connect()
+        if conn is None:
+            return None
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO trade_events (asset, side, entry_price, exit_price, pnl, pnl_percent, strategy_mode, signal_strength, wave_trend, dxy_trend, analysis)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+                """,
+                (
+                    trade.get('asset'),
+                    trade.get('side'),
+                    float(trade.get('entry_price') or 0.0),
+                    float(trade.get('exit_price') or 0.0),
+                    float(trade.get('pnl') or 0.0),
+                    float(trade.get('pnl_percent') or 0.0),
+                    trade.get('strategy_mode'),
+                    trade.get('signal_strength'),
+                    float(trade.get('wave_trend') or 0.0),
+                    float(trade.get('dxy_trend') or 0.0),
+                    trade.get('analysis'),
+                ),
+            )
+            trade_id = cur.fetchone()[0]
+            conn.commit()
+            return int(trade_id)
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.error(f"DB insert trade error: {e}")
+            return None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _db_insert_lesson(self, trade_id: int | None, trade: dict, lesson: dict):
+        if not self._db_ready:
+            return
+        conn = self._db_connect()
+        if conn is None:
+            return
+        try:
+            cur = conn.cursor()
+            tags = lesson.get('tags')
+            if isinstance(tags, list):
+                tags = ",".join([str(x) for x in tags])
+            cur.execute(
+                """
+                INSERT INTO trade_lessons (trade_id, asset, win, pnl, lesson, tags, severity)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    int(trade_id) if trade_id is not None else None,
+                    trade.get('asset'),
+                    bool((trade.get('pnl') or 0.0) > 0),
+                    float(trade.get('pnl') or 0.0),
+                    str(lesson.get('lesson') or '')[:400],
+                    str(tags or '')[:200],
+                    int(lesson.get('severity') or 1),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.error(f"DB insert lesson error: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _load_lessons(self, limit: int = 8) -> list[str]:
+        if not self._db_ready:
+            return []
+        conn = self._db_connect()
+        if conn is None:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT lesson FROM trade_lessons ORDER BY id DESC LIMIT %s",
+                (int(limit),),
+            )
+            rows = cur.fetchall() or []
+            out = []
+            for r in rows:
+                if r and r[0]:
+                    out.append(str(r[0])[:200])
+            return out
+        except Exception:
+            return []
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _review_and_persist_closed_trade(self, closed: dict, df, ctx: dict):
+        if not isinstance(closed, dict):
+            return
+
+        trade = dict(closed)
+        trade['asset'] = trade.get('asset') or trade.get('symbol')
+        trade['analysis'] = trade.get('analysis') or trade.get('reasoning_short')
+
+        try:
+            trade['wave_trend'] = float(df.iloc[-1].get('wave_trend', 0.0))
+        except Exception:
+            trade['wave_trend'] = 0.0
+
+        dxy_tr = 0.0
+        try:
+            macro = ctx.get('macro') if isinstance(ctx, dict) else None
+            if isinstance(macro, dict):
+                dxy_tr = float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)
+        except Exception:
+            dxy_tr = 0.0
+        trade['dxy_trend'] = dxy_tr
+
+        trade_id = self._db_insert_trade(trade)
+
+        if ENABLE_TRADE_REVIEW:
+            review_ctx = {"filters": dict(self.strategy or {}), "macro": ctx.get('macro') if isinstance(ctx, dict) else None}
+            lesson = self.ai.review_trade(trade, context=review_ctx)
+            if isinstance(lesson, dict):
+                self._db_insert_lesson(trade_id, trade, lesson)
+
     async def apply_command(self, cmd_data: dict):
         global TAKE_PROFIT_PERCENT, STOP_LOSS_PERCENT, MAX_POSITION_SIZE, TRADING_MODE
 
@@ -2110,6 +2501,12 @@ class TradingBot:
                     'reason': closed.get('exit_reason', 'TP/SL hit')
                 })
 
+                try:
+                    ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}
+                    self._review_and_persist_closed_trade(closed, df, ctx)
+                except Exception as e:
+                    logger.error(f"Trade review/persist error: {e}")
+
             # Only enter if no position
             if symbol not in self.engine.positions:
                 if self._in_cooldown(symbol, df):
@@ -2280,10 +2677,13 @@ class TradingBot:
         logger.info("=" * 60)
 
         ctx = {"ts": str(datetime.now())}
+        ctx["filters"] = dict(self.strategy or {})
         if bool(self.strategy.get("use_macro", USE_MACRO_DEFAULT)):
             ctx["macro"] = fetch_macro_snapshot()
         if bool(self.strategy.get("use_polymarket", USE_POLYMARKET_DEFAULT)):
             ctx["polymarket"] = fetch_polymarket_snapshot()
+        if self._db_ready:
+            ctx["lessons"] = self._load_lessons(limit=int(LESSONS_LIMIT))
         self.context = ctx
 
         for symbol in ALL_SYMBOLS:

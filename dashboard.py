@@ -51,6 +51,39 @@ except Exception:
 # Load environment variables
 load_dotenv()
 
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+try:
+    import psycopg2
+except Exception:
+    psycopg2 = None
+
+@st.cache_data(ttl=60)
+def load_trade_lessons(limit: int = 100) -> pd.DataFrame:
+    if not DATABASE_URL or psycopg2 is None:
+        return pd.DataFrame()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, ts, asset, win, pnl, severity, tags, lesson
+            FROM trade_lessons
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (int(limit),),
+        )
+        rows = cur.fetchall() or []
+        cols = ["id", "ts", "asset", "win", "pnl", "severity", "tags", "lesson"]
+        return pd.DataFrame(rows, columns=cols)
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide", page_icon="🤖")
 
 RUN_BOT_IN_PROCESS = (os.getenv("RUN_BOT_IN_PROCESS") or "true").strip().lower() == "true"
@@ -272,6 +305,14 @@ use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
 atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
 atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
 
+trend_only = st.sidebar.checkbox("Trend-only entries", value=True)
+avoid_alligator_asleep = st.sidebar.checkbox("Avoid alligator asleep", value=True)
+
+be_enabled = st.sidebar.checkbox("Break-even stop", value=True)
+be_trigger_atr = st.sidebar.slider("Break-even trigger (ATR)", 0.0, 5.0, 1.0, 0.1)
+trail_enabled = st.sidebar.checkbox("Trailing stop", value=False)
+trail_atr_mult = st.sidebar.slider("Trailing stop (ATR)", 0.0, 10.0, 1.5, 0.1)
+
 use_wave_filter = st.sidebar.checkbox("Use wave filter", value=True)
 wave_trend_block_pct = st.sidebar.slider("Wave block threshold (%)", 0.0, 2.0, 0.30, 0.01)
 
@@ -307,6 +348,12 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "use_atr_risk": True,
             "atr_sl_mult": float(best.get('atr_sl')),
             "atr_tp_mult": float(best.get('atr_tp')),
+            "trend_only": bool(trend_only),
+            "avoid_alligator_asleep": bool(avoid_alligator_asleep),
+            "be_enabled": bool(be_enabled),
+            "be_trigger_atr": float(be_trigger_atr),
+            "trail_enabled": bool(trail_enabled),
+            "trail_atr_mult": float(trail_atr_mult),
             "use_wave_filter": bool(use_wave_filter),
             "wave_trend_block_pct": float(wave_trend_block_pct),
             "use_macro": bool(use_macro),
@@ -331,6 +378,12 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "use_atr_risk": bool(use_atr_risk),
         "atr_sl_mult": float(atr_sl_mult),
         "atr_tp_mult": float(atr_tp_mult),
+        "trend_only": bool(trend_only),
+        "avoid_alligator_asleep": bool(avoid_alligator_asleep),
+        "be_enabled": bool(be_enabled),
+        "be_trigger_atr": float(be_trigger_atr),
+        "trail_enabled": bool(trail_enabled),
+        "trail_atr_mult": float(trail_atr_mult),
         "use_wave_filter": bool(use_wave_filter),
         "wave_trend_block_pct": float(wave_trend_block_pct),
         "use_macro": bool(use_macro),
@@ -627,6 +680,25 @@ else:
     col4.metric("🎯 Positions", "0")
     col5.metric("💹 Trades", "0")
     st.info("Portfolio data not found. Start the bot to generate state.")
+
+st.markdown("---")
+
+st.subheader("🧠 Lessons")
+lessons = load_trade_lessons(limit=100)
+if lessons is None or lessons.empty:
+    st.info("No lessons yet (DATABASE_URL missing or no closed trades).")
+else:
+    st.dataframe(lessons[["ts", "asset", "win", "pnl", "severity", "tags", "lesson"]].head(50), width='stretch')
+
+    tags = []
+    for v in lessons["tags"].dropna().astype(str).tolist():
+        for t in [x.strip() for x in v.split(",") if x.strip()]:
+            tags.append(t)
+    if tags:
+        top = pd.Series(tags).value_counts().head(15).reset_index()
+        top.columns = ["tag", "count"]
+        st.markdown("### Top tags")
+        st.dataframe(top, width='stretch')
 
 st.markdown("---")
 
