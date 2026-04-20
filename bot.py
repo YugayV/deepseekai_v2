@@ -203,6 +203,7 @@ USE_DXY_FILTER_DEFAULT = (os.getenv("USE_DXY_FILTER_DEFAULT", "false").strip().l
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
+STRATEGY_VERSION = (os.getenv("STRATEGY_VERSION") or "v2").strip()
 
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", 96))
@@ -212,6 +213,12 @@ DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
 REVIEW_MAX_TOKENS = int(os.getenv("REVIEW_MAX_TOKENS", 96))
 LESSONS_LIMIT = int(os.getenv("LESSONS_LIMIT", 8))
+
+RISK_GUARD_ENABLED_DEFAULT = (os.getenv("RISK_GUARD_ENABLED_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+MAX_OPEN_POSITIONS_DEFAULT = int(os.getenv("MAX_OPEN_POSITIONS_DEFAULT", 2))
+MAX_DAILY_DRAWDOWN_PCT_DEFAULT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT_DEFAULT", 2.0))
+MAX_LOSS_STREAK_DEFAULT = int(os.getenv("MAX_LOSS_STREAK_DEFAULT", 3))
+GUARD_PAUSE_SECONDS_DEFAULT = int(os.getenv("GUARD_PAUSE_SECONDS_DEFAULT", 900))
 
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
@@ -1515,6 +1522,7 @@ class PaperTradingEngine:
         self.positions = {}
         self.trades = []
         self.daily_trades = 0
+        self.loss_streak = 0
 
         self.max_trades_per_day = MAX_TRADES_PER_DAY
         self.daily_tp_target_percent = DAILY_TP_TARGET_PERCENT
@@ -1582,8 +1590,9 @@ class PaperTradingEngine:
                     'daily_tp_target_percent': float(self.daily_tp_target_percent)
                 }
             }
-            if existing_meta is not None:
-                state['meta'] = existing_meta
+            meta = dict(existing_meta or {})
+            meta['loss_streak'] = int(getattr(self, 'loss_streak', 0) or 0)
+            state['meta'] = meta
 
             with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=4)
@@ -1610,6 +1619,10 @@ class PaperTradingEngine:
                 self.day_date = str(daily.get('date') or self.day_date)
                 self.day_start_balance = float(daily.get('start_balance') or self.balance)
                 self.daily_trades = int(daily.get('trades') or self.daily_trades)
+
+                meta = state.get('meta') if isinstance(state, dict) else None
+                if isinstance(meta, dict):
+                    self.loss_streak = int(meta.get('loss_streak') or self.loss_streak)
                 self.max_trades_per_day = int(daily.get('max_trades_per_day') or self.max_trades_per_day)
                 self.daily_tp_target_percent = float(daily.get('daily_tp_target_percent') or self.daily_tp_target_percent)
                 # Restore datetime objects
@@ -1772,6 +1785,15 @@ class PaperTradingEngine:
             pos['exit_date'] = str(datetime.now())
 
             self.trades.append(pos)
+
+            try:
+                if float(pos.get('pnl') or 0.0) < 0:
+                    self.loss_streak = int(getattr(self, 'loss_streak', 0) or 0) + 1
+                else:
+                    self.loss_streak = 0
+            except Exception:
+                self.loss_streak = int(getattr(self, 'loss_streak', 0) or 0)
+
             del self.positions[symbol]
             
             self._save_state() # Save after exit
@@ -1847,9 +1869,15 @@ class TradingBot:
             "wave_trend_block_pct": float(WAVE_TREND_BLOCK_PCT),
             "use_dxy_filter": bool(USE_DXY_FILTER_DEFAULT),
             "dxy_trend_block_pct": float(DXY_TREND_BLOCK_PCT),
+            "risk_guard_enabled": bool(RISK_GUARD_ENABLED_DEFAULT),
+            "max_open_positions": int(MAX_OPEN_POSITIONS_DEFAULT),
+            "max_daily_drawdown_pct": float(MAX_DAILY_DRAWDOWN_PCT_DEFAULT),
+            "max_loss_streak": int(MAX_LOSS_STREAK_DEFAULT),
+            "guard_pause_seconds": int(GUARD_PAUSE_SECONDS_DEFAULT),
         }
         self.context = {}
         self.last_action_ts = {}
+        self.pause_until_ts = 0.0
         self.blocked = {"total": 0, "cooldown": 0, "weak": 0}
         self.blocked_by_symbol = {}
 
@@ -1896,6 +1924,7 @@ class TradingBot:
                     pnl_percent DOUBLE PRECISION,
                     strategy_mode TEXT,
                     signal_strength TEXT,
+                    strategy_version TEXT,
                     wave_trend DOUBLE PRECISION,
                     dxy_trend DOUBLE PRECISION,
                     analysis TEXT
@@ -1942,8 +1971,8 @@ class TradingBot:
             cur = conn.cursor()
             cur.execute(
                 """
-                INSERT INTO trade_events (asset, side, entry_price, exit_price, pnl, pnl_percent, strategy_mode, signal_strength, wave_trend, dxy_trend, analysis)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                INSERT INTO trade_events (asset, side, entry_price, exit_price, pnl, pnl_percent, strategy_mode, signal_strength, strategy_version, wave_trend, dxy_trend, analysis)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
                 """,
                 (
@@ -1955,6 +1984,7 @@ class TradingBot:
                     float(trade.get('pnl_percent') or 0.0),
                     trade.get('strategy_mode'),
                     trade.get('signal_strength'),
+                    trade.get('strategy_version'),
                     float(trade.get('wave_trend') or 0.0),
                     float(trade.get('dxy_trend') or 0.0),
                     trade.get('analysis'),
@@ -2168,6 +2198,12 @@ class TradingBot:
             self.strategy["wave_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("wave_trend_block_pct"), self.strategy.get("wave_trend_block_pct", WAVE_TREND_BLOCK_PCT)))
             self.strategy["use_dxy_filter"] = _as_bool(cmd_data.get("use_dxy_filter"), self.strategy.get("use_dxy_filter", USE_DXY_FILTER_DEFAULT))
             self.strategy["dxy_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("dxy_trend_block_pct"), self.strategy.get("dxy_trend_block_pct", DXY_TREND_BLOCK_PCT)))
+
+            self.strategy["risk_guard_enabled"] = _as_bool(cmd_data.get("risk_guard_enabled"), self.strategy.get("risk_guard_enabled", RISK_GUARD_ENABLED_DEFAULT))
+            self.strategy["max_open_positions"] = max(0, _as_int(cmd_data.get("max_open_positions"), self.strategy.get("max_open_positions", MAX_OPEN_POSITIONS_DEFAULT)))
+            self.strategy["max_daily_drawdown_pct"] = max(0.0, _as_float(cmd_data.get("max_daily_drawdown_pct"), self.strategy.get("max_daily_drawdown_pct", MAX_DAILY_DRAWDOWN_PCT_DEFAULT)))
+            self.strategy["max_loss_streak"] = max(0, _as_int(cmd_data.get("max_loss_streak"), self.strategy.get("max_loss_streak", MAX_LOSS_STREAK_DEFAULT)))
+            self.strategy["guard_pause_seconds"] = max(0, _as_int(cmd_data.get("guard_pause_seconds"), self.strategy.get("guard_pause_seconds", GUARD_PAUSE_SECONDS_DEFAULT)))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("classic", "reinforse", "pro", "mix"):
@@ -2513,6 +2549,37 @@ class TradingBot:
                     logger.info(f"⏳ {symbol}: Cooldown active")
                     self._record_block(symbol, "cooldown")
                     return
+
+                if float(getattr(self, 'pause_until_ts', 0.0) or 0.0) > time.time():
+                    logger.info(f"⛔ {symbol}: Risk Guard pause active")
+                    return
+
+                if bool(self.strategy.get('risk_guard_enabled', RISK_GUARD_ENABLED_DEFAULT)):
+                    max_pos = int(self.strategy.get('max_open_positions', MAX_OPEN_POSITIONS_DEFAULT) or 0)
+                    if max_pos > 0 and len(self.engine.positions) >= max_pos:
+                        logger.info(f"⛔ {symbol}: Risk Guard (max_open_positions={max_pos})")
+                        return
+
+                    if isinstance(self.engine, PaperTradingEngine):
+                        max_ls = int(self.strategy.get('max_loss_streak', MAX_LOSS_STREAK_DEFAULT) or 0)
+                        if max_ls > 0 and int(getattr(self.engine, 'loss_streak', 0) or 0) >= max_ls:
+                            self.pause_until_ts = time.time() + float(self.strategy.get('guard_pause_seconds', GUARD_PAUSE_SECONDS_DEFAULT) or 0)
+                            logger.info(f"⛔ {symbol}: Risk Guard (loss_streak={self.engine.loss_streak} >= {max_ls})")
+                            return
+
+                        dd_limit = float(self.strategy.get('max_daily_drawdown_pct', MAX_DAILY_DRAWDOWN_PCT_DEFAULT) or 0.0)
+                        try:
+                            used_margin = sum(float(p.get('margin') or 0.0) for p in self.engine.positions.values() if isinstance(p, dict))
+                            unreal = sum(float(p.get('unrealized_pnl') or 0.0) for p in self.engine.positions.values() if isinstance(p, dict))
+                            equity_now = float(self.engine.balance) + used_margin + unreal
+                            day_start = float(getattr(self.engine, 'day_start_balance', 0.0) or 0.0)
+                            dd_pct = ((equity_now - day_start) / day_start * 100.0) if day_start > 0 else 0.0
+                            if dd_limit > 0 and dd_pct <= -abs(dd_limit):
+                                self.pause_until_ts = time.time() + float(self.strategy.get('guard_pause_seconds', GUARD_PAUSE_SECONDS_DEFAULT) or 0)
+                                logger.info(f"⛔ {symbol}: Risk Guard (daily_drawdown={dd_pct:.2f}% <= -{dd_limit:.2f}%)")
+                                return
+                        except Exception:
+                            pass
 
                 logger.info(f"🔍 {symbol}: Requesting AI decision...")
                 ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}

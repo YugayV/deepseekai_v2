@@ -308,6 +308,13 @@ atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
 trend_only = st.sidebar.checkbox("Trend-only entries", value=True)
 avoid_alligator_asleep = st.sidebar.checkbox("Avoid alligator asleep", value=True)
 
+st.sidebar.subheader("🛑 Risk Guard")
+risk_guard_enabled = st.sidebar.checkbox("Enable Risk Guard", value=True)
+max_open_positions = st.sidebar.slider("Max open positions", 0, 10, 2, 1)
+max_daily_drawdown_pct = st.sidebar.slider("Max daily drawdown (%)", 0.0, 10.0, 2.0, 0.1)
+max_loss_streak = st.sidebar.slider("Max loss streak", 0, 10, 3, 1)
+guard_pause_seconds = st.sidebar.slider("Pause after guard (sec)", 0, 7200, 900, 60)
+
 be_enabled = st.sidebar.checkbox("Break-even stop", value=True)
 be_trigger_atr = st.sidebar.slider("Break-even trigger (ATR)", 0.0, 5.0, 1.0, 0.1)
 trail_enabled = st.sidebar.checkbox("Trailing stop", value=False)
@@ -350,6 +357,11 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "atr_tp_mult": float(best.get('atr_tp')),
             "trend_only": bool(trend_only),
             "avoid_alligator_asleep": bool(avoid_alligator_asleep),
+            "risk_guard_enabled": bool(risk_guard_enabled),
+            "max_open_positions": int(max_open_positions),
+            "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
+            "max_loss_streak": int(max_loss_streak),
+            "guard_pause_seconds": int(guard_pause_seconds),
             "be_enabled": bool(be_enabled),
             "be_trigger_atr": float(be_trigger_atr),
             "trail_enabled": bool(trail_enabled),
@@ -380,6 +392,11 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "atr_tp_mult": float(atr_tp_mult),
         "trend_only": bool(trend_only),
         "avoid_alligator_asleep": bool(avoid_alligator_asleep),
+        "risk_guard_enabled": bool(risk_guard_enabled),
+        "max_open_positions": int(max_open_positions),
+        "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
+        "max_loss_streak": int(max_loss_streak),
+        "guard_pause_seconds": int(guard_pause_seconds),
         "be_enabled": bool(be_enabled),
         "be_trigger_atr": float(be_trigger_atr),
         "trail_enabled": bool(trail_enabled),
