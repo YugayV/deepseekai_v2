@@ -856,19 +856,27 @@ def calculate_indicators(df):
 class AIAdvisor:
     def __init__(self, api_key=None):
         self.client = openai.OpenAI(
-            api_key=api_key or AI_API_KEY,
+            api_key=(api_key or AI_API_KEY),
             base_url="https://openrouter.ai/api/v1"
-        ) if api_key or AI_API_KEY else None
+        ) if (api_key or AI_API_KEY) else None
         self.model = "deepseek/deepseek-chat"
         self.max_tokens = int(AI_MAX_TOKENS)
+        self.disabled_until_ts = 0.0
+        self.last_auth_error_log_ts = 0.0
+
+    def _is_disabled(self) -> bool:
+        try:
+            return float(self.disabled_until_ts) > time.time()
+        except Exception:
+            return False
 
     def get_decision(self, symbol, df, ml_prediction, context: dict | None = None):
-        if not self.client:
+        if not self.client or self._is_disabled():
             return {
                 'trade_decision': 'NO',
                 'action': 'hold',
                 'signal_strength': 'weak',
-                'reasoning_short': 'AI API key missing',
+                'reasoning_short': 'AI unavailable (auth/disabled)',
                 'ai_error_code': 401
             }
 
@@ -1013,8 +1021,11 @@ Rules:
                     'reasoning_short': 'AI credits exhausted',
                     'ai_error_code': 402
                 }
-            if "401" in error_msg:
-                logger.error("❌ API Key Error: Please check your OPENROUTER_API_KEY")
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                self.disabled_until_ts = time.time() + 3600
+                if (time.time() - float(self.last_auth_error_log_ts or 0.0)) > 300:
+                    self.last_auth_error_log_ts = time.time()
+                    logger.error("❌ API Key Error: Please check your OPENROUTER_API_KEY")
                 return {
                     'trade_decision': 'NO',
                     'action': 'hold',
@@ -1106,12 +1117,12 @@ Return JSON:
             return {"lesson": "AI review error", "tags": ["ai_error"], "severity": 1, "action_items": []}
 
     def get_reinforse_decision(self, symbol, df, ml_prediction, context: dict | None = None):
-        if not self.client:
+        if not self.client or self._is_disabled():
             return {
                 'trade_decision': 'NO',
                 'action': 'hold',
                 'signal_strength': 'weak',
-                'reasoning_short': 'AI API key missing',
+                'reasoning_short': 'AI unavailable (auth/disabled)',
                 'ai_error_code': 401
             }
 
@@ -2355,7 +2366,10 @@ class TradingBot:
         bull = int(latest.get('bullish_fractal_alligator', 0) or 0) == 1
         bear = int(latest.get('bearish_fractal_alligator', 0) or 0) == 1
 
-        if (strong_bull or bull) and reg == 'bullish':
+        allow_long = (reg != 'bearish')
+        allow_short = (reg != 'bullish')
+
+        if (strong_bull and allow_long) or (bull and reg == 'bullish'):
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
@@ -2363,10 +2377,10 @@ class TradingBot:
                 'signal_strength': 'strong' if strong_bull else 'medium',
                 'tp_pct': float(TAKE_PROFIT_PERCENT),
                 'sl_pct': float(STOP_LOSS_PERCENT),
-                'reasoning_short': 'Fallback rules: bullish signal aligned with ML regime',
+                'reasoning_short': 'Fallback rules: bullish signal (flat allowed, bearish blocked)',
             }
 
-        if (strong_bear or bear) and reg == 'bearish':
+        if (strong_bear and allow_short) or (bear and reg == 'bearish'):
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
@@ -2374,7 +2388,7 @@ class TradingBot:
                 'signal_strength': 'strong' if strong_bear else 'medium',
                 'tp_pct': float(TAKE_PROFIT_PERCENT),
                 'sl_pct': float(STOP_LOSS_PERCENT),
-                'reasoning_short': 'Fallback rules: bearish signal aligned with ML regime',
+                'reasoning_short': 'Fallback rules: bearish signal (flat allowed, bullish blocked)',
             }
 
         return {
@@ -2384,7 +2398,7 @@ class TradingBot:
             'signal_strength': 'weak',
             'tp_pct': float(TAKE_PROFIT_PERCENT),
             'sl_pct': float(STOP_LOSS_PERCENT),
-            'reasoning_short': 'Fallback rules: no aligned signal',
+            'reasoning_short': 'Fallback rules: no signal',
         }
 
     def _bar_seconds(self, df) -> float:
