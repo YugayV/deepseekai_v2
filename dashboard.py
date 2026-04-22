@@ -1,6 +1,6 @@
 """
 Streamlit Dashboard for EURUSD AI Trading Bot
-Extended with Alligator/Fractals visualization and AI analytics
+Simplified (no Alligator/Fractals UI)
 """
 
 import os
@@ -163,11 +163,22 @@ def autotune_atr(symbol: str, period: str, interval: str, fee_bps: float, spread
                 if not ml:
                     continue
 
-                reg = str(ml.get('regime_name') or '')
-                bull = int(w.get('strong_bullish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bullish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
-                bear = int(w.get('strong_bearish', pd.Series([0])).iloc[-1]) == 1 or int(w.get('bearish_fractal_alligator', pd.Series([0])).iloc[-1]) == 1
+                reg = str(ml.get('regime_name') or '').lower()
+                try:
+                    ema_fast = float(w.get('ema_8', pd.Series([0.0])).iloc[-1])
+                    ema_slow = float(w.get('ema_21', pd.Series([0.0])).iloc[-1])
+                    macd_h = float(w.get('macd_hist', pd.Series([0.0])).iloc[-1])
+                    rsi_v = float(w.get('rsi', pd.Series([50.0])).iloc[-1])
+                except Exception:
+                    ema_fast, ema_slow, macd_h, rsi_v = 0.0, 0.0, 0.0, 50.0
 
-                side = 'long' if (bull and reg == 'bullish') else 'short' if (bear and reg == 'bearish') else None
+                trend_up = ema_fast > ema_slow
+                trend_dn = ema_fast < ema_slow
+
+                long_ok = trend_up and macd_h > 0 and rsi_v <= 65
+                short_ok = trend_dn and macd_h < 0 and rsi_v >= 35
+
+                side = 'long' if (long_ok and reg != 'bearish') else 'short' if (short_ok and reg != 'bullish') else None
                 if side is None or atr <= 0:
                     continue
 
@@ -299,31 +310,23 @@ st.sidebar.subheader("🧠 Strategy Filters")
 strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro", "Mix"], index=0)
 strategy_mode = "classic" if strategy_label == "Classic" else "pro" if strategy_label == "Pro" else "mix"
 
-block_weak_signals = st.sidebar.checkbox("Block weak signals", value=True)
-cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 3, 1)
+block_weak_signals = st.sidebar.checkbox("Block weak signals", value=False)
+cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 0, 1)
 use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
 atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
 atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
 
-trend_only = st.sidebar.checkbox("Trend-only entries", value=True)
-avoid_alligator_asleep = st.sidebar.checkbox("Avoid alligator asleep", value=True)
-
 st.sidebar.subheader("🛑 Risk Guard")
-risk_guard_enabled = st.sidebar.checkbox("Enable Risk Guard", value=True)
+risk_guard_enabled = st.sidebar.checkbox("Enable Risk Guard", value=False)
 max_open_positions = st.sidebar.slider("Max open positions", 0, 10, 2, 1)
-max_daily_drawdown_pct = st.sidebar.slider("Max daily drawdown (%)", 0.0, 10.0, 2.0, 0.1)
-max_loss_streak = st.sidebar.slider("Max loss streak", 0, 10, 3, 1)
-guard_pause_seconds = st.sidebar.slider("Pause after guard (sec)", 0, 7200, 900, 60)
+max_daily_drawdown_pct = st.sidebar.slider("Max daily drawdown (%)", 0.0, 20.0, 10.0, 0.1)
+max_loss_streak = st.sidebar.slider("Max loss streak", 0, 20, 6, 1)
+guard_pause_seconds = st.sidebar.slider("Pause after guard (sec)", 0, 7200, 300, 60)
 
-be_enabled = st.sidebar.checkbox("Break-even stop", value=True)
-be_trigger_atr = st.sidebar.slider("Break-even trigger (ATR)", 0.0, 5.0, 1.0, 0.1)
-trail_enabled = st.sidebar.checkbox("Trailing stop", value=False)
-trail_atr_mult = st.sidebar.slider("Trailing stop (ATR)", 0.0, 10.0, 1.5, 0.1)
-
-use_wave_filter = st.sidebar.checkbox("Use wave filter", value=True)
+use_wave_filter = st.sidebar.checkbox("Use wave filter", value=False)
 wave_trend_block_pct = st.sidebar.slider("Wave block threshold (%)", 0.0, 2.0, 0.30, 0.01)
 
-use_macro = st.sidebar.checkbox("Use macro/commodities context", value=True)
+use_macro = st.sidebar.checkbox("Use macro/commodities context", value=False)
 use_dxy_filter = st.sidebar.checkbox("Use DXY filter", value=False)
 dxy_trend_block_pct = st.sidebar.slider("DXY block threshold (%)", 0.0, 2.0, 0.20, 0.01)
 
@@ -355,17 +358,11 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "use_atr_risk": True,
             "atr_sl_mult": float(best.get('atr_sl')),
             "atr_tp_mult": float(best.get('atr_tp')),
-            "trend_only": bool(trend_only),
-            "avoid_alligator_asleep": bool(avoid_alligator_asleep),
             "risk_guard_enabled": bool(risk_guard_enabled),
             "max_open_positions": int(max_open_positions),
             "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
             "max_loss_streak": int(max_loss_streak),
             "guard_pause_seconds": int(guard_pause_seconds),
-            "be_enabled": bool(be_enabled),
-            "be_trigger_atr": float(be_trigger_atr),
-            "trail_enabled": bool(trail_enabled),
-            "trail_atr_mult": float(trail_atr_mult),
             "use_wave_filter": bool(use_wave_filter),
             "wave_trend_block_pct": float(wave_trend_block_pct),
             "use_macro": bool(use_macro),
@@ -390,17 +387,11 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "use_atr_risk": bool(use_atr_risk),
         "atr_sl_mult": float(atr_sl_mult),
         "atr_tp_mult": float(atr_tp_mult),
-        "trend_only": bool(trend_only),
-        "avoid_alligator_asleep": bool(avoid_alligator_asleep),
         "risk_guard_enabled": bool(risk_guard_enabled),
         "max_open_positions": int(max_open_positions),
         "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
         "max_loss_streak": int(max_loss_streak),
         "guard_pause_seconds": int(guard_pause_seconds),
-        "be_enabled": bool(be_enabled),
-        "be_trigger_atr": float(be_trigger_atr),
-        "trail_enabled": bool(trail_enabled),
-        "trail_atr_mult": float(trail_atr_mult),
         "use_wave_filter": bool(use_wave_filter),
         "wave_trend_block_pct": float(wave_trend_block_pct),
         "use_macro": bool(use_macro),
@@ -828,66 +819,6 @@ else:
 
 
 st.markdown("---")
-
-# ============================================
-# ALLIGATOR & FRACTALS CHART
-# ============================================
-st.subheader("🐊 Alligator Indicator & Fractals")
-
-for symbol in assets:
-    df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
-    if df is None:
-        continue
-
-    # Calculate Alligator
-    # Jaws (Blue line): 13-period smoothed moving average, shifted 8 bars into the future.
-    # Teeth (Red line): 8-period smoothed moving average, shifted 5 bars into the future.
-    # Lips (Green line): 5-period smoothed moving average, shifted 3 bars into the future.
-    df['jaw'] = df['close'].rolling(13).mean().shift(8)
-    df['teeth'] = df['close'].rolling(8).mean().shift(5)
-    df['lips'] = df['close'].rolling(5).mean().shift(3)
-
-    # Fractal detection (Williams Fractals)
-    window = 2
-    df['fractal_bullish'] = 0
-    df['fractal_bearish'] = 0
-
-    for i in range(window, len(df) - window):
-        if all(df['low'].iloc[i] < df['low'].iloc[i - j] for j in range(1, window + 1)) and \
-           all(df['low'].iloc[i] < df['low'].iloc[i + j] for j in range(1, window + 1)):
-            df.loc[df.index[i], 'fractal_bullish'] = 1
-        if all(df['high'].iloc[i] > df['high'].iloc[i - j] for j in range(1, window + 1)) and \
-           all(df['high'].iloc[i] > df['high'].iloc[i + j] for j in range(1, window + 1)):
-            df.loc[df.index[i], 'fractal_bearish'] = 1
-
-    fig = go.Figure()
-
-    # Price Candlestick instead of just line
-    fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        name='Price',
-        opacity=0.4
-    ))
-
-    # Alligator
-    fig.add_trace(go.Scatter(x=df.index, y=df['jaw'], name='Jaws (13,8)', line=dict(color='blue', width=2)))
-    fig.add_trace(go.Scatter(x=df.index, y=df['teeth'], name='Teeth (8,5)', line=dict(color='red', width=2)))
-    fig.add_trace(go.Scatter(x=df.index, y=df['lips'], name='Lips (5,3)', line=dict(color='green', width=2)))
-
-    # Fractals
-    bullish_idx = df[df['fractal_bullish'] == 1].index
-    bearish_idx = df[df['fractal_bearish'] == 1].index
-    fig.add_trace(go.Scatter(x=bullish_idx, y=df.loc[bullish_idx, 'low'], mode='markers',
-                              marker=dict(symbol='triangle-up', size=12, color='green'), name='Bullish Fractal'))
-    fig.add_trace(go.Scatter(x=bearish_idx, y=df.loc[bearish_idx, 'high'], mode='markers',
-                              marker=dict(symbol='triangle-down', size=12, color='red'), name='Bearish Fractal'))
-
-    fig.update_layout(title=f'{symbol} ({timeframe}) - Alligator + Fractals', height=600, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, width='stretch')
 
 st.markdown("---")
 

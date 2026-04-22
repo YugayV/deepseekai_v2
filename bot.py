@@ -1,7 +1,7 @@
 """
 EURUSD AI Trading Bot with AI
 Inspired by: https://github.com/tot-gromov/llm-deepseek-trading
-Optimized models with Alligator + Fractals
+Slim strategy defaults (no mandatory Alligator/Fractals)
 """
 
 import os
@@ -182,8 +182,8 @@ DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
 DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 300))
 REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
 
-BLOCK_WEAK_SIGNALS = (os.getenv("BLOCK_WEAK_SIGNALS", "true").strip().lower() in ("1", "true", "yes"))
-COOLDOWN_BARS = int(os.getenv("COOLDOWN_BARS", 3))
+BLOCK_WEAK_SIGNALS = (os.getenv("BLOCK_WEAK_SIGNALS", "false").strip().lower() in ("1", "true", "yes"))
+COOLDOWN_BARS = int(os.getenv("COOLDOWN_BARS", 0))
 USE_ATR_RISK = (os.getenv("USE_ATR_RISK", "true").strip().lower() in ("1", "true", "yes"))
 ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", 1.5))
 ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
@@ -191,10 +191,10 @@ ATR_TP_MULT = float(os.getenv("ATR_TP_MULT", 2.5))
 WAVE_WINDOW = int(os.getenv("WAVE_WINDOW", 64))
 WAVE_LEVELS = int(os.getenv("WAVE_LEVELS", 4))
 WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.30))
-USE_WAVE_FILTER_DEFAULT = (os.getenv("USE_WAVE_FILTER_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+USE_WAVE_FILTER_DEFAULT = (os.getenv("USE_WAVE_FILTER_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 
 MACRO_SYMBOLS = [s.strip() for s in os.getenv("MACRO_SYMBOLS", "DX-Y.NYB,GC=F,CL=F,^TNX,^VIX").split(",") if s.strip()]
-USE_MACRO_DEFAULT = (os.getenv("USE_MACRO_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+USE_MACRO_DEFAULT = (os.getenv("USE_MACRO_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 USE_POLYMARKET_DEFAULT = (os.getenv("USE_POLYMARKET_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 POLYMARKET_FEED_URL = (os.getenv("POLYMARKET_FEED_URL") or "").strip()
 DXY_TREND_BLOCK_PCT = float(os.getenv("DXY_TREND_BLOCK_PCT", 0.20))
@@ -214,11 +214,11 @@ ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() 
 REVIEW_MAX_TOKENS = int(os.getenv("REVIEW_MAX_TOKENS", 96))
 LESSONS_LIMIT = int(os.getenv("LESSONS_LIMIT", 8))
 
-RISK_GUARD_ENABLED_DEFAULT = (os.getenv("RISK_GUARD_ENABLED_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+RISK_GUARD_ENABLED_DEFAULT = (os.getenv("RISK_GUARD_ENABLED_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 MAX_OPEN_POSITIONS_DEFAULT = int(os.getenv("MAX_OPEN_POSITIONS_DEFAULT", 2))
-MAX_DAILY_DRAWDOWN_PCT_DEFAULT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT_DEFAULT", 2.0))
-MAX_LOSS_STREAK_DEFAULT = int(os.getenv("MAX_LOSS_STREAK_DEFAULT", 3))
-GUARD_PAUSE_SECONDS_DEFAULT = int(os.getenv("GUARD_PAUSE_SECONDS_DEFAULT", 900))
+MAX_DAILY_DRAWDOWN_PCT_DEFAULT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT_DEFAULT", 10.0))
+MAX_LOSS_STREAK_DEFAULT = int(os.getenv("MAX_LOSS_STREAK_DEFAULT", 6))
+GUARD_PAUSE_SECONDS_DEFAULT = int(os.getenv("GUARD_PAUSE_SECONDS_DEFAULT", 300))
 
 YF_MULTI_TF = (os.getenv("YF_MULTI_TF", "false").strip().lower() in ("1", "true", "yes"))
 YF_MIN_FETCH_INTERVAL_SECONDS = int(os.getenv("YF_MIN_FETCH_INTERVAL_SECONDS", 180))
@@ -689,7 +689,7 @@ class MLModelLoader:
 
 
 # ============================================
-# INDICATORS CALCULATION (Alligator + Fractals)
+# INDICATORS CALCULATION
 # ============================================
 def _haar_trend_pct(arr: np.ndarray, levels: int) -> float:
     x = np.asarray(arr, dtype=float)
@@ -741,7 +741,7 @@ def _haar_energy(arr: np.ndarray, levels: int) -> float:
 
 
 def calculate_indicators(df):
-    """Calculate all technical indicators (Alligator + Fractals)"""
+    """Calculate technical indicators used by the bot."""
     df = df.copy()
 
     # Returns
@@ -795,47 +795,7 @@ def calculate_indicators(df):
     df.loc[(df['ema_8'] > df['ema_21']) & (df['ema_8'].shift(1) <= df['ema_21'].shift(1)), 'ema_cross'] = 1
     df.loc[(df['ema_8'] < df['ema_21']) & (df['ema_8'].shift(1) >= df['ema_21'].shift(1)), 'ema_cross'] = -1
 
-    # ALLIGATOR (SMAs with shifts)
-    df['jaw'] = df['close'].rolling(13).mean().shift(8)
-    df['teeth'] = df['close'].rolling(8).mean().shift(5)
-    df['lips'] = df['close'].rolling(5).mean().shift(3)
-
-    jaw_lips_diff = (df['jaw'] - df['lips']).abs()
-    df['alligator_asleep'] = (jaw_lips_diff < df['atr'] * 0.5).astype(int)
-    df['alligator_bullish'] = ((df['jaw'] < df['teeth']) & (df['teeth'] < df['lips'])).astype(int)
-    df['alligator_bearish'] = ((df['jaw'] > df['teeth']) & (df['teeth'] > df['lips'])).astype(int)
-
-    jaw_teeth_diff = (df['jaw'] - df['teeth']).abs()
-    teeth_lips_diff = (df['teeth'] - df['lips']).abs()
-    df['alligator_expanding'] = ((jaw_teeth_diff > df['atr'] * 0.3) & (teeth_lips_diff > df['atr'] * 0.3)).astype(int)
-
-    # FRACTALS
-    window = 2
-    bullish = np.zeros(len(df))
-    bearish = np.zeros(len(df))
-
-    for i in range(window, len(df) - window):
-        if all(df['low'].iloc[i] < df['low'].iloc[i - j] for j in range(1, window + 1)) and \
-           all(df['low'].iloc[i] < df['low'].iloc[i + j] for j in range(1, window + 1)):
-            bullish[i] = 1
-        if all(df['high'].iloc[i] > df['high'].iloc[i - j] for j in range(1, window + 1)) and \
-           all(df['high'].iloc[i] > df['high'].iloc[i + j] for j in range(1, window + 1)):
-            bearish[i] = 1
-
-    df['fractal_bullish'] = pd.Series(bullish).shift(window).fillna(0).values
-    df['fractal_bearish'] = pd.Series(bearish).shift(window).fillna(0).values
-
-    # Combined signals
-    df['bullish_fractal_alligator'] = ((df['fractal_bullish'] == 1) &
-                                        ((df['alligator_bullish'] == 1) | (df['alligator_asleep'] == 1))).astype(int)
-    df['bearish_fractal_alligator'] = ((df['fractal_bearish'] == 1) &
-                                        ((df['alligator_bearish'] == 1) | (df['alligator_asleep'] == 1))).astype(int)
-    df['strong_bullish'] = ((df['fractal_bullish'] == 1) &
-                            (df['alligator_bullish'] == 1) &
-                            (df['alligator_expanding'] == 1)).astype(int)
-    df['strong_bearish'] = ((df['fractal_bearish'] == 1) &
-                            (df['alligator_bearish'] == 1) &
-                            (df['alligator_expanding'] == 1)).astype(int)
+    # (Alligator/Fractals removed to reduce constraints and simplify strategy)
 
     # Wave (Haar) features
     if int(WAVE_WINDOW) >= 8:
@@ -885,14 +845,10 @@ class AIAdvisor:
 
         recent = df[['open', 'high', 'low', 'close']].tail(6).round(6).to_dict('records')
 
-        if int(latest.get('alligator_bullish', 0)) == 1:
-            alligator_state = "BULLISH"
-        elif int(latest.get('alligator_bearish', 0)) == 1:
-            alligator_state = "BEARISH"
-        else:
-            alligator_state = "NEUTRAL"
-
-        fractal_state = "BULLISH" if int(latest.get('fractal_bullish', 0)) == 1 else "BEARISH" if int(latest.get('fractal_bearish', 0)) == 1 else "NONE"
+        rsi_v = float(latest.get('rsi', 0.0) or 0.0)
+        macd_h = float(latest.get('macd_hist', 0.0) or 0.0)
+        ema_fast = float(latest.get('ema_8', 0.0) or 0.0)
+        ema_slow = float(latest.get('ema_21', 0.0) or 0.0)
 
         ctx = context or {}
         macro = ctx.get("macro") if isinstance(ctx, dict) else None
@@ -934,8 +890,9 @@ INPUTS:
 - Timeframe: 1h (primary)
 - ML Regime: {ml_prediction['regime_name'].upper()}
 - ML Confidence: {ml_prediction['confidence']:.1%}
-- Alligator: {alligator_state} (jaw={float(latest.get('jaw', 0)):.6f}, teeth={float(latest.get('teeth', 0)):.6f}, lips={float(latest.get('lips', 0)):.6f})
-- Fractals: {fractal_state}
+- EMA8/EMA21: {ema_fast:.6f} / {ema_slow:.6f}
+- RSI(14): {rsi_v:.2f}
+- MACD hist: {macd_h:.6f}
 - Wave trend (Haar, %): {float(latest.get('wave_trend', 0.0)):.3f}
 - Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
 - Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
@@ -945,7 +902,7 @@ INPUTS:
 
 TASK:
 Decide if we should open a position RIGHT NOW.
-Use Alligator + Fractals as primary filter; ML confidence is secondary.
+Use trend/momentum (EMA, RSI, MACD) plus wave trend as context; ML regime is supportive.
 
 Respond ONLY with valid JSON (no extra text):
 {{
@@ -1181,8 +1138,6 @@ INPUTS (latest bar):
 - Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
 - Polymarket snapshot: {"; ".join(poly_lines) if poly_lines else "N/A"}
 - Lessons (must follow): {"; ".join([str(x) for x in (ctx.get('lessons') or [])][:8]) if isinstance(ctx, dict) else "N/A"}
-- Alligator bullish: {int(latest.get('alligator_bullish', 0))} | bearish: {int(latest.get('alligator_bearish', 0))} | asleep: {int(latest.get('alligator_asleep', 0))}
-- Fractal bullish: {int(latest.get('fractal_bullish', 0))} | bearish: {int(latest.get('fractal_bearish', 0))}
 - Last candles (JSON): {recent}
 
 TASK:
@@ -2361,34 +2316,62 @@ class TradingBot:
         latest = df.iloc[-1]
         reg = str((ml_pred or {}).get('regime_name') or '').lower()
 
-        strong_bull = int(latest.get('strong_bullish', 0) or 0) == 1
-        strong_bear = int(latest.get('strong_bearish', 0) or 0) == 1
-        bull = int(latest.get('bullish_fractal_alligator', 0) or 0) == 1
-        bear = int(latest.get('bearish_fractal_alligator', 0) or 0) == 1
+        try:
+            ema_fast = float(latest.get('ema_8', 0.0) or 0.0)
+            ema_slow = float(latest.get('ema_21', 0.0) or 0.0)
+            macd_h = float(latest.get('macd_hist', 0.0) or 0.0)
+            rsi_v = float(latest.get('rsi', 50.0) or 50.0)
+        except Exception:
+            ema_fast, ema_slow, macd_h, rsi_v = 0.0, 0.0, 0.0, 50.0
+
+        trend_up = ema_fast > ema_slow
+        trend_dn = ema_fast < ema_slow
 
         allow_long = (reg != 'bearish')
         allow_short = (reg != 'bullish')
 
-        if (strong_bull and allow_long) or (bull and reg == 'bullish'):
+        long_score = 0
+        short_score = 0
+
+        if trend_up:
+            long_score += 1
+        if trend_dn:
+            short_score += 1
+
+        if macd_h > 0:
+            long_score += 1
+        if macd_h < 0:
+            short_score += 1
+
+        if rsi_v <= 60:
+            long_score += 1
+        if rsi_v >= 40:
+            short_score += 1
+
+        strength = 'weak'
+        if max(long_score, short_score) >= 3:
+            strength = 'medium'
+
+        if long_score >= 3 and allow_long:
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
                 'side': 'long',
-                'signal_strength': 'strong' if strong_bull else 'medium',
+                'signal_strength': strength,
                 'tp_pct': float(TAKE_PROFIT_PERCENT),
                 'sl_pct': float(STOP_LOSS_PERCENT),
-                'reasoning_short': 'Fallback rules: bullish signal (flat allowed, bearish blocked)',
+                'reasoning_short': 'Fallback: EMA/MACD/RSI bullish alignment',
             }
 
-        if (strong_bear and allow_short) or (bear and reg == 'bearish'):
+        if short_score >= 3 and allow_short:
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
                 'side': 'short',
-                'signal_strength': 'strong' if strong_bear else 'medium',
+                'signal_strength': strength,
                 'tp_pct': float(TAKE_PROFIT_PERCENT),
                 'sl_pct': float(STOP_LOSS_PERCENT),
-                'reasoning_short': 'Fallback rules: bearish signal (flat allowed, bullish blocked)',
+                'reasoning_short': 'Fallback: EMA/MACD/RSI bearish alignment',
             }
 
         return {
@@ -2398,7 +2381,7 @@ class TradingBot:
             'signal_strength': 'weak',
             'tp_pct': float(TAKE_PROFIT_PERCENT),
             'sl_pct': float(STOP_LOSS_PERCENT),
-            'reasoning_short': 'Fallback rules: no signal',
+            'reasoning_short': 'Fallback: no clean alignment',
         }
 
     def _bar_seconds(self, df) -> float:
@@ -2586,8 +2569,12 @@ class TradingBot:
             # ML Prediction
             ml_pred = self.ml_loader.predict(df)
             if not ml_pred:
-                logger.warning(f"⚠️ {symbol}: ML prediction failed")
-                return
+                ml_pred = {
+                    'regime': 1,
+                    'regime_name': 'flat',
+                    'confidence': 0.34,
+                    'probabilities': {'bearish': 0.33, 'flat': 0.34, 'bullish': 0.33},
+                }
 
             # Check exits first
             closed = self.engine.check_exits(symbol, current_price)
@@ -2726,7 +2713,7 @@ class TradingBot:
                     atr = None
                 decision = self._decorate_decision_with_risk(symbol, float(current_price), ml_pred, decision, atr=atr)
 
-                if bool(self.strategy.get("block_weak_signals", True)) and str(decision.get("signal_strength") or "").lower() == "weak":
+                if bool(self.strategy.get("block_weak_signals", False)) and str(decision.get("signal_strength") or "").lower() == "weak":
                     logger.info(f"⛔ {symbol}: Weak signal blocked")
                     self._record_block(symbol, "weak")
                     return
