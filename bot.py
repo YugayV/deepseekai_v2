@@ -220,6 +220,10 @@ MAX_DAILY_DRAWDOWN_PCT_DEFAULT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT_DEFAULT
 MAX_LOSS_STREAK_DEFAULT = int(os.getenv("MAX_LOSS_STREAK_DEFAULT", 3))
 GUARD_PAUSE_SECONDS_DEFAULT = int(os.getenv("GUARD_PAUSE_SECONDS_DEFAULT", 900))
 
+YF_MULTI_TF = (os.getenv("YF_MULTI_TF", "false").strip().lower() in ("1", "true", "yes"))
+YF_MIN_FETCH_INTERVAL_SECONDS = int(os.getenv("YF_MIN_FETCH_INTERVAL_SECONDS", 180))
+YF_CACHE_TTL_SECONDS = int(os.getenv("YF_CACHE_TTL_SECONDS", 3600))
+
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
 ALL_SYMBOLS = FOREX_SYMBOLS + CRYPTO_SYMBOLS
@@ -1333,29 +1337,63 @@ Return JSON:
 # ============================================
 # DATA FETCHER (multi-timeframe)
 # ============================================
+_YF_DATA_CACHE = {}
+
+
 def fetch_data(symbol):
-    """Fetch latest data and calculate indicators (15m, 1h, 4h for multi-timeframe)"""
-    ticker = yf.Ticker(symbol)
+    now = time.time()
+    cached = _YF_DATA_CACHE.get(symbol)
+    if cached is not None:
+        age = now - float(cached.get("ts") or 0.0)
+        if age < float(YF_MIN_FETCH_INTERVAL_SECONDS):
+            return cached.get("df")
 
-    # Fetch multiple timeframes
-    df_15m = ticker.history(period="5d", interval="15m")
-    df_1h = ticker.history(period="1mo", interval="1h")
-    df_4h = ticker.history(period="3mo", interval="4h")
+    try:
+        from yfinance.exceptions import YFRateLimitError
+    except Exception:
+        YFRateLimitError = None
 
-    # Use 1h as primary for trading signals
-    df = df_1h if not df_1h.empty else df_4h
+    try:
+        ticker = yf.Ticker(symbol)
 
-    if df.empty:
-        # Fallback to daily if hourly fails
-        df = ticker.history(period="3mo", interval="1d")
+        if bool(YF_MULTI_TF):
+            df_1h = ticker.history(period="1mo", interval="1h")
+            if df_1h is None or df_1h.empty:
+                df_4h = ticker.history(period="3mo", interval="4h")
+            else:
+                df_4h = None
+        else:
+            df_1h = ticker.history(period="3mo", interval="1h")
+            df_4h = None
 
-    if df.empty:
-        return None
+        df = df_1h if df_1h is not None and not df_1h.empty else df_4h
+        if df is None or df.empty:
+            df = ticker.history(period="3mo", interval="1d")
 
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    df.columns = ['open', 'high', 'low', 'close', 'volume']
+        if df is None or df.empty:
+            if cached is not None and (now - float(cached.get("ts") or 0.0)) < float(YF_CACHE_TTL_SECONDS):
+                logger.warning(f"⚠️ {symbol}: yfinance empty, using cached data")
+                return cached.get("df")
+            return None
 
-    return calculate_indicators(df)
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+        df.columns = ["open", "high", "low", "close", "volume"]
+
+        out = calculate_indicators(df)
+        _YF_DATA_CACHE[symbol] = {"ts": now, "df": out}
+        return out
+    except Exception as e:
+        if YFRateLimitError is not None and isinstance(e, YFRateLimitError):
+            if cached is not None and (now - float(cached.get("ts") or 0.0)) < float(YF_CACHE_TTL_SECONDS):
+                logger.warning(f"⚠️ {symbol}: yfinance rate limited, using cached data")
+                return cached.get("df")
+            logger.warning(f"⚠️ {symbol}: yfinance rate limited")
+            return None
+
+        if cached is not None and (now - float(cached.get("ts") or 0.0)) < float(YF_CACHE_TTL_SECONDS):
+            logger.warning(f"⚠️ {symbol}: yfinance error, using cached data: {e}")
+            return cached.get("df")
+        raise
 
 
 def _safe_fetch_json(url: str, allowed_hosts: set[str]):
@@ -1376,7 +1414,20 @@ def _safe_fetch_json(url: str, allowed_hosts: set[str]):
         return None
 
 
+_MACRO_CACHE = {"ts": 0.0, "data": {}}
+
+
 def fetch_macro_snapshot():
+    now = time.time()
+    try:
+        age = now - float(_MACRO_CACHE.get("ts") or 0.0)
+        if age < float(YF_MIN_FETCH_INTERVAL_SECONDS):
+            data = _MACRO_CACHE.get("data")
+            if isinstance(data, dict) and data:
+                return data
+    except Exception:
+        pass
+
     out = {}
     for sym in MACRO_SYMBOLS:
         try:
@@ -1405,6 +1456,12 @@ def fetch_macro_snapshot():
             }
         except Exception:
             continue
+
+    try:
+        _MACRO_CACHE["ts"] = now
+        _MACRO_CACHE["data"] = out
+    except Exception:
+        pass
 
     return out
 
