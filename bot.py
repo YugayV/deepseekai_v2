@@ -220,6 +220,19 @@ MAX_DAILY_DRAWDOWN_PCT_DEFAULT = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT_DEFAULT
 MAX_LOSS_STREAK_DEFAULT = int(os.getenv("MAX_LOSS_STREAK_DEFAULT", 6))
 GUARD_PAUSE_SECONDS_DEFAULT = int(os.getenv("GUARD_PAUSE_SECONDS_DEFAULT", 300))
 
+QUALITY_MODE_DEFAULT = (os.getenv("QUALITY_MODE_DEFAULT") or ("high" if (os.getenv("TRADING_MODE", "demo").lower() == "real") else "balanced")).strip().lower()
+MIN_SETUP_SCORE_DEFAULT = int(os.getenv("MIN_SETUP_SCORE_DEFAULT", 4 if (os.getenv("TRADING_MODE", "demo").lower() == "real") else 3))
+USE_SESSION_FILTER_DEFAULT = (os.getenv("USE_SESSION_FILTER_DEFAULT", "true" if (os.getenv("TRADING_MODE", "demo").lower() == "real") else "false").strip().lower() in ("1", "true", "yes"))
+MIN_ATR_PCT_DEFAULT = float(os.getenv("MIN_ATR_PCT_DEFAULT", 0.05))
+MAX_ATR_PCT_DEFAULT = float(os.getenv("MAX_ATR_PCT_DEFAULT", 1.50))
+
+RISK_PER_TRADE_PCT_DEMO = float(os.getenv("RISK_PER_TRADE_PCT_DEMO", 1.0))
+RISK_PER_TRADE_PCT_REAL = float(os.getenv("RISK_PER_TRADE_PCT_REAL", 0.5))
+PAPER_FEE_BPS = float(os.getenv("PAPER_FEE_BPS", 2.0))
+PAPER_SPREAD_BPS = float(os.getenv("PAPER_SPREAD_BPS", 1.0))
+
+ENABLE_REAL_TRADING = (os.getenv("ENABLE_REAL_TRADING", "false").strip().lower() in ("1", "true", "yes"))
+
 YF_MULTI_TF = (os.getenv("YF_MULTI_TF", "false").strip().lower() in ("1", "true", "yes"))
 YF_MIN_FETCH_INTERVAL_SECONDS = int(os.getenv("YF_MIN_FETCH_INTERVAL_SECONDS", 180))
 YF_CACHE_TTL_SECONDS = int(os.getenv("YF_CACHE_TTL_SECONDS", 3600))
@@ -1491,6 +1504,9 @@ def fetch_polymarket_snapshot():
 # ============================================
 class RealTradingEngine:
     def __init__(self, exchange_id, api_key, secret):
+        self.exchange = None
+        self.enabled = bool(ENABLE_REAL_TRADING)
+        self.positions = {}
         try:
             import ccxt
             exchange_class = getattr(ccxt, exchange_id)
@@ -1499,27 +1515,149 @@ class RealTradingEngine:
                 'secret': secret,
                 'enableRateLimit': True,
             })
-            logger.info(f"✅ Real Trading initialized on {exchange_id}")
+            try:
+                self.exchange.load_markets()
+            except Exception:
+                pass
+            logger.info(f"✅ Real Trading initialized on {exchange_id} (enabled={self.enabled})")
         except Exception as e:
             logger.error(f"❌ Failed to init real trading: {e}")
             self.exchange = None
 
+    def _to_exchange_symbol(self, symbol: str) -> str | None:
+        s = str(symbol or '').strip()
+        if not s:
+            return None
+        if '/' in s:
+            return s
+        if s.endswith('-USD'):
+            base = s.replace('-USD', '').strip()
+            if base:
+                return f"{base}/USDT"
+        return None
+
     def execute_entry(self, symbol, decision, price):
-        if not self.exchange: return None
+        if not self.exchange:
+            return None
+        if not self.enabled:
+            logger.warning("Real trading disabled (set ENABLE_REAL_TRADING=true to allow orders)")
+            return None
+
+        ex_symbol = self._to_exchange_symbol(symbol)
+        if not ex_symbol:
+            logger.warning(f"Real mode: unsupported symbol {symbol}")
+            return None
+
         try:
-            side = decision.get('side', 'long')
+            side = str(decision.get('side', 'long') or 'long').lower()
             order_side = 'buy' if side == 'long' else 'sell'
-            balance = self.exchange.fetch_balance()
-            amount = (balance['total']['USDT'] * (MAX_POSITION_SIZE / 100)) / price
-            
-            logger.info(f"🚀 PLACING REAL ORDER: {symbol} {order_side} {amount}")
-            return {'side': side, 'entry_price': price, 'size': amount}
+
+            bal = self.exchange.fetch_balance() or {}
+            usdt = float(((bal.get('free') or {}).get('USDT') or (bal.get('total') or {}).get('USDT') or 0.0))
+            if usdt <= 0:
+                return None
+
+            try:
+                risk_pct = float(getattr(decision, 'risk_per_trade_pct', None) or 0.0)
+            except Exception:
+                risk_pct = 0.0
+
+            if risk_pct <= 0:
+                risk_pct = float(RISK_PER_TRADE_PCT_REAL)
+
+            sl = float(decision.get('stop_loss') or 0.0)
+            if sl <= 0:
+                return None
+
+            unit_risk = abs(float(price) - float(sl))
+            if unit_risk <= 0:
+                return None
+
+            risk_amount = float(usdt) * (float(risk_pct) / 100.0)
+            amount = float(risk_amount) / float(unit_risk)
+
+            if amount <= 0:
+                return None
+
+            order = self.exchange.create_order(ex_symbol, 'market', order_side, amount)
+
+            self.positions[ex_symbol] = {
+                'asset': symbol,
+                'exchange_symbol': ex_symbol,
+                'side': side,
+                'entry_price': float(price),
+                'size': float(amount),
+                'stop_loss': float(decision.get('stop_loss') or 0.0),
+                'take_profit': float(decision.get('take_profit') or 0.0),
+                'order': order,
+            }
+
+            return {'side': side, 'entry_price': float(price), 'size': float(amount)}
         except Exception as e:
             logger.error(f"Order error: {e}")
             return None
 
     def check_exits(self, symbol, price):
-        return None
+        ex_symbol = self._to_exchange_symbol(symbol)
+        if not ex_symbol:
+            return None
+        pos = self.positions.get(ex_symbol)
+        if not isinstance(pos, dict):
+            return None
+
+        side = str(pos.get('side') or 'long')
+        sl = float(pos.get('stop_loss') or 0.0)
+        tp = float(pos.get('take_profit') or 0.0)
+
+        hit = False
+        reason = None
+        if side == 'long':
+            if sl > 0 and float(price) <= sl:
+                hit = True
+                reason = 'stop_loss'
+            elif tp > 0 and float(price) >= tp:
+                hit = True
+                reason = 'take_profit'
+        else:
+            if sl > 0 and float(price) >= sl:
+                hit = True
+                reason = 'stop_loss'
+            elif tp > 0 and float(price) <= tp:
+                hit = True
+                reason = 'take_profit'
+
+        if not hit:
+            return None
+
+        if not self.enabled or not self.exchange:
+            return None
+
+        try:
+            close_side = 'sell' if side == 'long' else 'buy'
+            amount = float(pos.get('size') or 0.0)
+            if amount <= 0:
+                return None
+            self.exchange.create_order(ex_symbol, 'market', close_side, amount)
+        except Exception as e:
+            logger.error(f"Close order error: {e}")
+            return None
+
+        out = {
+            'asset': symbol,
+            'side': side,
+            'entry_price': float(pos.get('entry_price') or 0.0),
+            'exit_price': float(price),
+            'size': float(pos.get('size') or 0.0),
+            'pnl': (float(price) - float(pos.get('entry_price') or 0.0)) * float(pos.get('size') or 0.0) if side == 'long' else (float(pos.get('entry_price') or 0.0) - float(price)) * float(pos.get('size') or 0.0),
+            'exit_reason': reason,
+        }
+
+        try:
+            del self.positions[ex_symbol]
+        except Exception:
+            pass
+
+        return out
 
     def get_state(self, current_prices):
         if not self.exchange: return {'balance': 0, 'equity': 0, 'positions': 0, 'pnl': 0}
@@ -1728,22 +1866,63 @@ class PaperTradingEngine:
         target = decision.get('take_profit', price * (1 + TAKE_PROFIT_PERCENT/100 if side == 'long' else 1 - TAKE_PROFIT_PERCENT/100))
         confidence = float(decision.get('confidence', 50)) / 100
 
-        risk_amount = self.balance * (MAX_POSITION_SIZE / 100) * confidence
-        risk_per_unit = abs(price - stop)
-        
+        strength = str(decision.get('signal_strength') or '').lower()
+        mult = 1.0
+        if strength == 'weak':
+            mult = 0.6
+        elif strength == 'strong':
+            mult = 1.2
+
+        try:
+            risk_pct = float(getattr(self, 'risk_per_trade_pct', 1.0) or 0.0)
+        except Exception:
+            risk_pct = 1.0
+        risk_pct = max(0.0, risk_pct)
+
+        risk_amount = float(self.balance) * (risk_pct / 100.0) * float(mult)
+        risk_per_unit = abs(float(price) - float(stop))
+
         if risk_per_unit <= 0:
             logger.warning(f"❌ {symbol}: Risk per unit is 0 (Price={price}, SL={stop})")
             return None
 
-        size = risk_amount / risk_per_unit
-        size = min(size, self.balance * 0.3 / price) # Max 30% of balance
-
+        size = float(risk_amount) / float(risk_per_unit)
         if size <= 0:
             logger.warning(f"❌ {symbol}: Calculated size is 0 (Risk={risk_amount}, UnitRisk={risk_per_unit})")
             return None
 
+        try:
+            lev = float(getattr(self, 'leverage', 1.0) or 1.0)
+        except Exception:
+            lev = 1.0
+        lev = max(1.0, lev)
+
+        notional = float(size) * float(price)
+        margin = float(notional) / lev
+
+        max_margin = float(self.balance) * 0.30
+        if margin > max_margin and max_margin > 0:
+            scale = max_margin / margin
+            size *= scale
+            notional = float(size) * float(price)
+            margin = float(notional) / lev
+
+        try:
+            fee_bps = float(getattr(self, 'fee_bps', 0.0) or 0.0)
+        except Exception:
+            fee_bps = 0.0
+        try:
+            spread_bps = float(getattr(self, 'spread_bps', 0.0) or 0.0)
+        except Exception:
+            spread_bps = 0.0
+
+        entry_cost = float(abs(notional)) * (max(0.0, fee_bps) + max(0.0, spread_bps)) / 10_000.0
+
+        if margin + entry_cost > float(self.balance):
+            logger.warning(f"❌ {symbol}: Insufficient balance (need margin+cost={margin+entry_cost:.2f}, bal={self.balance:.2f})")
+            return None
+
         balance_before = float(self.balance)
-        margin = float(size * price)
 
         self.positions[symbol] = {
             'asset': symbol,
@@ -1762,12 +1941,14 @@ class PaperTradingEngine:
             'ml_confidence': float(decision.get('ml_confidence', 0) or 0),
             'strategy_mode': str(decision.get('strategy_mode', '') or ''),
             'margin': float(margin),
-            'notional': float(size * price),
+            'notional': float(notional),
+            'leverage': float(lev),
+            'entry_cost': float(entry_cost),
             'last_price': float(price),
             'balance_before': float(balance_before),
         }
 
-        self.balance -= margin
+        self.balance -= float(margin) + float(entry_cost)
         self.positions[symbol]['balance_after'] = float(self.balance)
         self.daily_trades += 1
 
@@ -1800,9 +1981,23 @@ class PaperTradingEngine:
 
         if close_reason:
             margin = float(pos.get('margin') or (pos['size'] * pos['entry_price']))
-            self.balance += margin + pnl
+
+            try:
+                fee_bps = float(getattr(self, 'fee_bps', 0.0) or 0.0)
+            except Exception:
+                fee_bps = 0.0
+            try:
+                spread_bps = float(getattr(self, 'spread_bps', 0.0) or 0.0)
+            except Exception:
+                spread_bps = 0.0
+
+            exit_notional = float(abs(float(price) * float(pos.get('size') or 0.0)))
+            exit_cost = float(exit_notional) * (max(0.0, fee_bps) + max(0.0, spread_bps)) / 10_000.0
+
+            self.balance += float(margin) + float(pnl) - float(exit_cost)
             pos['exit_price'] = price
             pos['pnl'] = pnl
+            pos['exit_cost'] = float(exit_cost)
             pos['pnl_percent'] = (pnl / margin) * 100 if margin > 0 else 0
             pos['exit_reason'] = close_reason
             pos['exit_date'] = str(datetime.now())
@@ -1872,7 +2067,13 @@ class TradingBot:
             self.engine = RealTradingEngine(EXCHANGE_ID, EXCHANGE_API_KEY, EXCHANGE_API_SECRET)
         else:
             self.engine = PaperTradingEngine()
-        
+
+        if isinstance(self.engine, PaperTradingEngine):
+            self.engine.leverage = float(getattr(self.engine, "leverage", 1.0) or 1.0)
+            self.engine.risk_per_trade_pct = float(getattr(self.engine, "risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)))
+            self.engine.fee_bps = float(getattr(self.engine, "fee_bps", PAPER_FEE_BPS))
+            self.engine.spread_bps = float(getattr(self.engine, "spread_bps", PAPER_SPREAD_BPS))
+
         self.global_risk = {
             "tp_pct": float(TAKE_PROFIT_PERCENT),
             "sl_pct": float(STOP_LOSS_PERCENT),
@@ -1897,6 +2098,14 @@ class TradingBot:
             "max_daily_drawdown_pct": float(MAX_DAILY_DRAWDOWN_PCT_DEFAULT),
             "max_loss_streak": int(MAX_LOSS_STREAK_DEFAULT),
             "guard_pause_seconds": int(GUARD_PAUSE_SECONDS_DEFAULT),
+            "quality_mode": str(QUALITY_MODE_DEFAULT or "balanced"),
+            "min_setup_score": int(MIN_SETUP_SCORE_DEFAULT),
+            "use_session_filter": bool(USE_SESSION_FILTER_DEFAULT),
+            "min_atr_pct": float(MIN_ATR_PCT_DEFAULT),
+            "max_atr_pct": float(MAX_ATR_PCT_DEFAULT),
+            "risk_per_trade_pct": float((RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)),
+            "paper_fee_bps": float(PAPER_FEE_BPS),
+            "paper_spread_bps": float(PAPER_SPREAD_BPS),
         }
         self.context = {}
         self.last_action_ts = {}
@@ -2135,13 +2344,33 @@ class TradingBot:
             logger.info(f"🚀 Command: START ALL (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
             TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
             STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
-            MAX_POSITION_SIZE = 5.0 * float(cmd_data.get("leverage", 1))
 
             if isinstance(self.engine, PaperTradingEngine):
+                lev = float(cmd_data.get("leverage", getattr(self.engine, "leverage", 1.0) or 1.0) or 1.0)
+                self.engine.leverage = max(1.0, lev)
+
+                if "risk_per_trade_pct" in (cmd_data or {}):
+                    try:
+                        self.engine.risk_per_trade_pct = float(cmd_data.get("risk_per_trade_pct"))
+                    except Exception:
+                        pass
+
+                if "paper_fee_bps" in (cmd_data or {}):
+                    try:
+                        self.engine.fee_bps = float(cmd_data.get("paper_fee_bps"))
+                    except Exception:
+                        pass
+
+                if "paper_spread_bps" in (cmd_data or {}):
+                    try:
+                        self.engine.spread_bps = float(cmd_data.get("paper_spread_bps"))
+                    except Exception:
+                        pass
+
                 self.engine.max_trades_per_day = int(cmd_data.get("max_trades_per_day", self.engine.max_trades_per_day))
                 self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
                 self.engine._roll_day_if_needed()
-                logger.info(f"✅ Demo limits: max_trades_per_day={self.engine.max_trades_per_day}, daily_tp_target_percent={self.engine.daily_tp_target_percent}")
+                logger.info(f"✅ Demo limits: max_trades_per_day={self.engine.max_trades_per_day}, daily_tp_target_percent={self.engine.daily_tp_target_percent}, leverage={self.engine.leverage}")
 
             self.force_cycle = True
             logger.info("⚡ Force-cycle set")
@@ -2221,6 +2450,29 @@ class TradingBot:
             self.strategy["wave_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("wave_trend_block_pct"), self.strategy.get("wave_trend_block_pct", WAVE_TREND_BLOCK_PCT)))
             self.strategy["use_dxy_filter"] = _as_bool(cmd_data.get("use_dxy_filter"), self.strategy.get("use_dxy_filter", USE_DXY_FILTER_DEFAULT))
             self.strategy["dxy_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("dxy_trend_block_pct"), self.strategy.get("dxy_trend_block_pct", DXY_TREND_BLOCK_PCT)))
+
+            self.strategy["quality_mode"] = str((cmd_data.get("quality_mode") if cmd_data.get("quality_mode") is not None else self.strategy.get("quality_mode", QUALITY_MODE_DEFAULT)) or "balanced").strip().lower()
+            self.strategy["min_setup_score"] = max(0, _as_int(cmd_data.get("min_setup_score"), self.strategy.get("min_setup_score", MIN_SETUP_SCORE_DEFAULT)))
+            self.strategy["use_session_filter"] = _as_bool(cmd_data.get("use_session_filter"), self.strategy.get("use_session_filter", USE_SESSION_FILTER_DEFAULT))
+            self.strategy["min_atr_pct"] = max(0.0, _as_float(cmd_data.get("min_atr_pct"), self.strategy.get("min_atr_pct", MIN_ATR_PCT_DEFAULT)))
+            self.strategy["max_atr_pct"] = max(0.0, _as_float(cmd_data.get("max_atr_pct"), self.strategy.get("max_atr_pct", MAX_ATR_PCT_DEFAULT)))
+            self.strategy["risk_per_trade_pct"] = max(0.0, _as_float(cmd_data.get("risk_per_trade_pct"), self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO))))
+            self.strategy["paper_fee_bps"] = max(0.0, _as_float(cmd_data.get("paper_fee_bps"), self.strategy.get("paper_fee_bps", PAPER_FEE_BPS)))
+            self.strategy["paper_spread_bps"] = max(0.0, _as_float(cmd_data.get("paper_spread_bps"), self.strategy.get("paper_spread_bps", PAPER_SPREAD_BPS)))
+
+            if isinstance(self.engine, PaperTradingEngine):
+                try:
+                    self.engine.risk_per_trade_pct = float(self.strategy.get("risk_per_trade_pct"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.fee_bps = float(self.strategy.get("paper_fee_bps"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.spread_bps = float(self.strategy.get("paper_spread_bps"))
+                except Exception:
+                    pass
 
             self.strategy["risk_guard_enabled"] = _as_bool(cmd_data.get("risk_guard_enabled"), self.strategy.get("risk_guard_enabled", RISK_GUARD_ENABLED_DEFAULT))
             self.strategy["max_open_positions"] = max(0, _as_int(cmd_data.get("max_open_positions"), self.strategy.get("max_open_positions", MAX_OPEN_POSITIONS_DEFAULT)))
@@ -2384,6 +2636,77 @@ class TradingBot:
             'reasoning_short': 'Fallback: no clean alignment',
         }
 
+    def _atr_pct(self, df) -> float | None:
+        try:
+            latest = df.iloc[-1]
+            close = float(latest.get('close', 0.0) or 0.0)
+            atr = float(latest.get('atr', 0.0) or 0.0)
+            if close <= 0 or atr <= 0:
+                return None
+            return float(atr / close * 100.0)
+        except Exception:
+            return None
+
+    def _setup_score(self, df, side: str) -> int:
+        side = str(side or 'long').lower()
+        if side not in ('long', 'short'):
+            side = 'long'
+
+        try:
+            latest = df.iloc[-1]
+            ema_fast = float(latest.get('ema_8', 0.0) or 0.0)
+            ema_slow = float(latest.get('ema_21', 0.0) or 0.0)
+            macd_h = float(latest.get('macd_hist', 0.0) or 0.0)
+            rsi_v = float(latest.get('rsi', 50.0) or 50.0)
+            wave = float(latest.get('wave_trend', 0.0) or 0.0)
+        except Exception:
+            ema_fast, ema_slow, macd_h, rsi_v, wave = 0.0, 0.0, 0.0, 50.0, 0.0
+
+        score = 0
+
+        trend_up = ema_fast > ema_slow
+        trend_dn = ema_fast < ema_slow
+
+        if side == 'long' and trend_up:
+            score += 1
+        if side == 'short' and trend_dn:
+            score += 1
+
+        if side == 'long' and macd_h > 0:
+            score += 1
+        if side == 'short' and macd_h < 0:
+            score += 1
+
+        if side == 'long' and 35.0 <= rsi_v <= 65.0:
+            score += 1
+        if side == 'short' and 35.0 <= rsi_v <= 65.0:
+            score += 1
+
+        if bool(self.strategy.get('use_wave_filter', USE_WAVE_FILTER_DEFAULT)):
+            if side == 'long' and wave >= 0:
+                score += 1
+            if side == 'short' and wave <= 0:
+                score += 1
+
+        return int(score)
+
+    def _session_ok(self, symbol: str, df) -> bool:
+        sym = str(symbol or '')
+        if not sym.endswith('=X'):
+            return True
+
+        try:
+            ts = df.index[-1]
+            if hasattr(ts, 'to_pydatetime'):
+                ts = ts.to_pydatetime()
+            hour = int(getattr(ts, 'hour', None))
+            if hour < 0 or hour > 23:
+                hour = int(datetime.utcnow().hour)
+        except Exception:
+            hour = int(datetime.utcnow().hour)
+
+        return 6 <= hour <= 20
+
     def _bar_seconds(self, df) -> float:
         try:
             diffs = df.index.to_series().diff().dropna().tail(10)
@@ -2423,12 +2746,21 @@ class TradingBot:
             meta = dict((data.get("meta") or {}))
             meta["strategy_mode"] = str(getattr(self, "strategy_mode", "classic"))
             meta["filters"] = dict(self.strategy or {})
+            reasons = {}
+            for k, v in (self.blocked or {}).items():
+                if k == "total":
+                    continue
+                try:
+                    reasons[str(k)] = int(v)
+                except Exception:
+                    continue
+
+            reasons.setdefault("cooldown", int((self.blocked or {}).get("cooldown", 0)))
+            reasons.setdefault("weak", int((self.blocked or {}).get("weak", 0)))
+
             meta["blocked"] = {
                 "total": int((self.blocked or {}).get("total", 0)),
-                "reasons": {
-                    "cooldown": int((self.blocked or {}).get("cooldown", 0)),
-                    "weak": int((self.blocked or {}).get("weak", 0)),
-                },
+                "reasons": reasons,
                 "by_symbol": dict(self.blocked_by_symbol or {}),
             }
 
@@ -2442,14 +2774,14 @@ class TradingBot:
 
     def _record_block(self, symbol: str, reason: str):
         try:
+            rsn = str(reason or "unknown")
             self.blocked["total"] = int(self.blocked.get("total", 0)) + 1
-            if reason in ("cooldown", "weak"):
-                self.blocked[reason] = int(self.blocked.get(reason, 0)) + 1
+            self.blocked[rsn] = int(self.blocked.get(rsn, 0)) + 1
 
             sym = str(symbol)
             s = dict(self.blocked_by_symbol.get(sym) or {})
             s["total"] = int(s.get("total", 0)) + 1
-            s[reason] = int(s.get(reason, 0)) + 1
+            s[rsn] = int(s.get(rsn, 0)) + 1
             self.blocked_by_symbol[sym] = s
         except Exception:
             return
@@ -2712,6 +3044,43 @@ class TradingBot:
                 except Exception:
                     atr = None
                 decision = self._decorate_decision_with_risk(symbol, float(current_price), ml_pred, decision, atr=atr)
+
+                side = str(decision.get('side') or 'long').lower()
+                quality_mode = str(self.strategy.get('quality_mode') or 'balanced').lower()
+                min_score = int(self.strategy.get('min_setup_score', MIN_SETUP_SCORE_DEFAULT) or 0)
+
+                setup_score = self._setup_score(df, side)
+                atr_pct = self._atr_pct(df)
+                use_sess = bool(self.strategy.get('use_session_filter', USE_SESSION_FILTER_DEFAULT))
+                sess_ok = (not use_sess) or self._session_ok(symbol, df)
+
+                min_atr = float(self.strategy.get('min_atr_pct', MIN_ATR_PCT_DEFAULT) or 0.0)
+                max_atr = float(self.strategy.get('max_atr_pct', MAX_ATR_PCT_DEFAULT) or 0.0)
+                atr_ok = True
+                if atr_pct is not None and max_atr > 0:
+                    atr_ok = (atr_pct >= min_atr) and (atr_pct <= max_atr)
+
+                if str(decision.get('trade_decision') or '').upper() == 'YES':
+                    if not sess_ok:
+                        decision['trade_decision'] = 'NO'
+                        decision['action'] = 'hold'
+                        decision['reasoning_short'] = 'Quality: session filter'
+                        self._record_block(symbol, 'quality_session')
+                    elif not atr_ok:
+                        decision['trade_decision'] = 'NO'
+                        decision['action'] = 'hold'
+                        decision['reasoning_short'] = f"Quality: ATR% out of range ({(atr_pct or 0.0):.3f}%)"
+                        self._record_block(symbol, 'quality_atr')
+                    elif quality_mode == 'high' and min_score > 0 and setup_score < min_score:
+                        decision['trade_decision'] = 'NO'
+                        decision['action'] = 'hold'
+                        decision['reasoning_short'] = f"Quality: setup_score {setup_score}/{min_score}"
+                        self._record_block(symbol, 'quality_score')
+                    elif quality_mode == 'high' and str(decision.get('signal_strength') or '').lower() == 'weak':
+                        decision['trade_decision'] = 'NO'
+                        decision['action'] = 'hold'
+                        decision['reasoning_short'] = 'Quality: weak strength'
+                        self._record_block(symbol, 'quality_strength')
 
                 if bool(self.strategy.get("block_weak_signals", False)) and str(decision.get("signal_strength") or "").lower() == "weak":
                     logger.info(f"⛔ {symbol}: Weak signal blocked")

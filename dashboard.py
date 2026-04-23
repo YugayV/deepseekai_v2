@@ -300,11 +300,14 @@ else:
 st.sidebar.subheader("🛡️ Risk Management")
 manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 4.0, 0.5)
 manual_sl = st.sidebar.slider("Stop Loss (%)", 0.5, 5.0, 2.0, 0.5)
+risk_per_trade_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 0.5 if is_real else 1.0, 0.1)
+paper_fee_bps = st.sidebar.slider("Paper fee (bps)", 0.0, 20.0, 2.0, 0.5)
+paper_spread_bps = st.sidebar.slider("Paper spread (bps)", 0.0, 20.0, 1.0, 0.5)
 leverage = st.sidebar.selectbox("Leverage", [1, 2, 5, 10, 20, 50, 100], index=2)
 
 st.sidebar.subheader("🕒 Demo Limits")
-max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 5, 1)
-daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 10.0, 1.0)
+max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
+daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
 strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro", "Mix"], index=0)
@@ -315,6 +318,14 @@ cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 0, 1)
 use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
 atr_sl_mult = st.sidebar.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
 atr_tp_mult = st.sidebar.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
+
+st.sidebar.subheader("🎯 Quality (Fewer trades)")
+quality_label = st.sidebar.selectbox("Quality mode", ["High (fewer)", "Balanced"], index=0 if is_real else 1)
+quality_mode = "high" if quality_label.startswith("High") else "balanced"
+min_setup_score = st.sidebar.slider("Min setup score", 0, 5, 4 if is_real else 3, 1)
+use_session_filter = st.sidebar.checkbox("Session filter (forex)", value=is_real)
+min_atr_pct = st.sidebar.slider("Min ATR%", 0.0, 5.0, 0.05, 0.01)
+max_atr_pct = st.sidebar.slider("Max ATR%", 0.0, 5.0, 1.50, 0.05)
 
 st.sidebar.subheader("🛑 Risk Guard")
 risk_guard_enabled = st.sidebar.checkbox("Enable Risk Guard", value=False)
@@ -337,12 +348,12 @@ _tune_assets = assets if assets else ["EURUSD=X"]
 tune_symbol = st.sidebar.selectbox("Tune symbol", _tune_assets, index=0)
 tune_period = st.sidebar.selectbox("Tune period", ["30d", "60d", "180d"], index=1)
 tune_interval = "1h"
-fee_bps = st.sidebar.slider("Fee (bps)", 0.0, 20.0, 2.0, 0.5)
-spread_bps = st.sidebar.slider("Spread (bps)", 0.0, 20.0, 1.0, 0.5)
-risk_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 1.0, 0.1) / 100.0
+tune_fee_bps = st.sidebar.slider("Fee (bps)", 0.0, 20.0, 2.0, 0.5)
+tune_spread_bps = st.sidebar.slider("Spread (bps)", 0.0, 20.0, 1.0, 0.5)
+tune_risk_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 1.0, 0.1) / 100.0
 
 if st.sidebar.button("🔎 Run auto-tune", width='stretch'):
-    res = autotune_atr(tune_symbol, tune_period, tune_interval, float(fee_bps), float(spread_bps), float(risk_pct))
+    res = autotune_atr(tune_symbol, tune_period, tune_interval, float(tune_fee_bps), float(tune_spread_bps), float(tune_risk_pct))
     st.session_state['atr_tune_res'] = res
 
 res = st.session_state.get('atr_tune_res')
@@ -358,6 +369,14 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "use_atr_risk": True,
             "atr_sl_mult": float(best.get('atr_sl')),
             "atr_tp_mult": float(best.get('atr_tp')),
+            "quality_mode": str(quality_mode),
+            "min_setup_score": int(min_setup_score),
+            "use_session_filter": bool(use_session_filter),
+            "min_atr_pct": float(min_atr_pct),
+            "max_atr_pct": float(max_atr_pct),
+            "risk_per_trade_pct": float(risk_per_trade_pct),
+            "paper_fee_bps": float(paper_fee_bps),
+            "paper_spread_bps": float(paper_spread_bps),
             "risk_guard_enabled": bool(risk_guard_enabled),
             "max_open_positions": int(max_open_positions),
             "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
@@ -387,6 +406,14 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "use_atr_risk": bool(use_atr_risk),
         "atr_sl_mult": float(atr_sl_mult),
         "atr_tp_mult": float(atr_tp_mult),
+        "quality_mode": str(quality_mode),
+        "min_setup_score": int(min_setup_score),
+        "use_session_filter": bool(use_session_filter),
+        "min_atr_pct": float(min_atr_pct),
+        "max_atr_pct": float(max_atr_pct),
+        "risk_per_trade_pct": float(risk_per_trade_pct),
+        "paper_fee_bps": float(paper_fee_bps),
+        "paper_spread_bps": float(paper_spread_bps),
         "risk_guard_enabled": bool(risk_guard_enabled),
         "max_open_positions": int(max_open_positions),
         "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
@@ -411,6 +438,9 @@ if col_btn1.button("🚀 Start All", width='stretch'):
         "tp": float(manual_tp),
         "sl": float(manual_sl),
         "leverage": int(leverage),
+        "risk_per_trade_pct": float(risk_per_trade_pct),
+        "paper_fee_bps": float(paper_fee_bps),
+        "paper_spread_bps": float(paper_spread_bps),
         "max_trades_per_day": int(max_trades_per_day),
         "daily_tp_target_percent": float(daily_tp_target_percent),
         "time": str(datetime.now())
@@ -788,25 +818,49 @@ else:
         weak_blk = int(reasons.get("weak") or 0)
 
         st.markdown("### Blocks (filtered entries)")
-        b1, b2, b3 = st.columns(3)
+        b1, b2 = st.columns(2)
         b1.metric("Total blocks", total_blk)
-        b2.metric("Cooldown", cooldown_blk)
-        b3.metric("Weak blocked", weak_blk)
+        b2.metric("Symbols blocked", int(len((blocked or {}).get('by_symbol') or {})))
+
+        reasons = blocked.get('reasons') if isinstance(blocked, dict) else None
+        if isinstance(reasons, dict) and reasons:
+            rrows = []
+            for k, v in reasons.items():
+                try:
+                    rrows.append({'reason': str(k), 'count': int(v)})
+                except Exception:
+                    continue
+            if rrows:
+                dfr = pd.DataFrame(rrows).sort_values(by=['count'], ascending=False)
+                st.dataframe(dfr, width='stretch')
 
         by_symbol = blocked.get("by_symbol")
         if isinstance(by_symbol, dict) and by_symbol:
+            keys = set()
+            for _, v in by_symbol.items():
+                if isinstance(v, dict):
+                    keys |= set(v.keys())
+            keys.discard('symbol')
+            cols = ['symbol'] + [k for k in sorted(keys) if k != 'symbol']
+
             rows = []
             for sym, v in by_symbol.items():
                 if not isinstance(v, dict):
                     continue
-                rows.append({
-                    "symbol": sym,
-                    "total": int(v.get("total") or 0),
-                    "cooldown": int(v.get("cooldown") or 0),
-                    "weak": int(v.get("weak") or 0),
-                })
+                row = {'symbol': sym}
+                for k in keys:
+                    if k == 'symbol':
+                        continue
+                    try:
+                        row[k] = int(v.get(k) or 0)
+                    except Exception:
+                        row[k] = 0
+                rows.append(row)
+
             if rows:
-                dfb = pd.DataFrame(rows).sort_values(by=["total"], ascending=False)
+                dfb = pd.DataFrame(rows)
+                if 'total' in dfb.columns:
+                    dfb = dfb.sort_values(by=['total'], ascending=False)
                 st.dataframe(dfb, width='stretch')
 
     if 'strategy_mode' in t.columns or 'signal_strength' in t.columns:
