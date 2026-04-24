@@ -670,101 +670,99 @@ def _tv_symbol(sym: str) -> str:
 _tv_interval = "60" if timeframe == "1h" else "15" if timeframe == "15m" else "D"
 
 if chart_view == "Dual (Plotly + TradingView)":
-    left, right = st.columns([1.2, 1.0], gap="large")
+    df = fetch_asset_data(chart_symbol, period="3mo", interval=timeframe)
+    if df is None:
+        st.warning(f"No data for {chart_symbol}")
+    else:
+        df = df.copy()
+        df['sma_20'] = df['close'].rolling(20).mean()
+        df['sma_50'] = df['close'].rolling(50).mean()
 
-    with left:
-        df = fetch_asset_data(chart_symbol, period="3mo", interval=timeframe)
-        if df is None:
-            st.warning(f"No data for {chart_symbol}")
-        else:
-            df = df.copy()
-            df['sma_20'] = df['close'].rolling(20).mean()
-            df['sma_50'] = df['close'].rolling(50).mean()
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.72, 0.28],
+            subplot_titles=(f"{chart_symbol} - Price", "RSI (14)")
+        )
 
-            fig = make_subplots(
-                rows=2, cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.03,
-                row_heights=[0.72, 0.28],
-                subplot_titles=(f"{chart_symbol} - Price", "RSI (14)")
-            )
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df['open'],
+                high=df['high'],
+                low=df['low'],
+                close=df['close'],
+                name=chart_symbol
+            ),
+            row=1, col=1
+        )
 
-            fig.add_trace(
-                go.Candlestick(
-                    x=df.index,
-                    open=df['open'],
-                    high=df['high'],
-                    low=df['low'],
-                    close=df['close'],
-                    name=chart_symbol
-                ),
-                row=1, col=1
-            )
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='deepskyblue', width=1)),
+            row=1, col=1
+        )
 
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='deepskyblue', width=1)),
-                row=1, col=1
-            )
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        df['rsi'] = 100 - (100 / (1 + rs))
 
-            delta = df['close'].diff()
-            gain = delta.where(delta > 0, 0)
-            loss = -delta.where(delta < 0, 0)
-            avg_gain = gain.rolling(14).mean()
-            avg_loss = loss.rolling(14).mean()
-            rs = avg_gain / avg_loss
-            df['rsi'] = 100 - (100 / (1 + rs))
+        fig.add_trace(
+            go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='violet', width=1)),
+            row=2, col=1
+        )
+        fig.add_hline(y=70, line_dash="dash", line_color="tomato", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="springgreen", row=2, col=1)
 
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='violet', width=1)),
-                row=2, col=1
-            )
-            fig.add_hline(y=70, line_dash="dash", line_color="tomato", row=2, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="springgreen", row=2, col=1)
+        fig.update_layout(
+            height=820,
+            template="plotly_dark",
+            showlegend=True,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=40, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        fig.update_xaxes(title_text="Date", row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
 
-            fig.update_layout(
-                height=860,
-                template="plotly_dark",
-                showlegend=True,
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=10, r=10, t=40, b=10),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            )
-            fig.update_xaxes(title_text="Date", row=2, col=1)
-            st.plotly_chart(fig, use_container_width=True)
+    st.markdown("---")
 
-    with right:
-        tv = _tv_symbol(chart_symbol)
-        tradingview_html = f"""
-        <div class=\"tradingview-widget-container\" style=\"height:860px;width:100%;\">
-          <div id=\"tradingview_dual\" style=\"height:860px;width:100%;\"></div>
-          <script type=\"text/javascript\" src=\"https://s3.tradingview.com/tv.js\"></script>
-          <script type=\"text/javascript\">
-          new TradingView.widget({{
-            \"autosize\": true,
-            \"symbol\": \"{tv}\",
-            \"interval\": \"{_tv_interval}\",
-            \"timezone\": \"Etc/UTC\",
-            \"theme\": \"dark\",
-            \"style\": \"1\",
-            \"locale\": \"en\",
-            \"toolbar_bg\": \"#0e1117\",
-            \"enable_publishing\": false,
-            \"withdateranges\": true,
-            \"hide_side_toolbar\": false,
-            \"allow_symbol_change\": true,
-            \"details\": true,
-            \"hotlist\": true,
-            \"calendar\": true,
-            \"container_id\": \"tradingview_dual\"
-          }});
-          </script>
-        </div>
-        """
-        components.html(tradingview_html, height=880)
+    tv = _tv_symbol(chart_symbol)
+    tradingview_html = f"""
+    <div class=\"tradingview-widget-container\" style=\"height:860px;width:100%;\">
+      <div id=\"tradingview_dual\" style=\"height:860px;width:100%;\"></div>
+      <script type=\"text/javascript\" src=\"https://s3.tradingview.com/tv.js\"></script>
+      <script type=\"text/javascript\">
+      new TradingView.widget({{
+        \"autosize\": true,
+        \"symbol\": \"{tv}\",
+        \"interval\": \"{_tv_interval}\",
+        \"timezone\": \"Etc/UTC\",
+        \"theme\": \"dark\",
+        \"style\": \"1\",
+        \"locale\": \"en\",
+        \"toolbar_bg\": \"#0e1117\",
+        \"enable_publishing\": false,
+        \"withdateranges\": true,
+        \"hide_side_toolbar\": false,
+        \"allow_symbol_change\": true,
+        \"details\": true,
+        \"hotlist\": true,
+        \"calendar\": true,
+        \"container_id\": \"tradingview_dual\"
+      }});
+      </script>
+    </div>
+    """
+    components.html(tradingview_html, height=900)
 
 elif chart_view == "TradingView (Interactive)":
     for symbol in assets:
