@@ -810,10 +810,24 @@ def calculate_indicators(df):
 
     # (Alligator/Fractals removed to reduce constraints and simplify strategy)
 
-    # Wave (Haar) features
+    # Wave (Haar) features (multi-scale)
+    try:
+        levels = int(WAVE_LEVELS)
+    except Exception:
+        levels = 4
+
+    for w in (32, 64, 128):
+        if len(df) >= int(w) and int(w) >= 8:
+            df[f'wave_trend_{w}'] = df['close'].rolling(int(w)).apply(lambda a: _haar_trend_pct(a, levels), raw=True)
+            df[f'wave_energy_{w}'] = df['close'].rolling(int(w)).apply(lambda a: _haar_energy(a, levels), raw=True)
+
     if int(WAVE_WINDOW) >= 8:
-        df['wave_trend'] = df['close'].rolling(int(WAVE_WINDOW)).apply(lambda a: _haar_trend_pct(a, int(WAVE_LEVELS)), raw=True)
-        df['wave_energy'] = df['close'].rolling(int(WAVE_WINDOW)).apply(lambda a: _haar_energy(a, int(WAVE_LEVELS)), raw=True)
+        df['wave_trend'] = df['close'].rolling(int(WAVE_WINDOW)).apply(lambda a: _haar_trend_pct(a, levels), raw=True)
+        df['wave_energy'] = df['close'].rolling(int(WAVE_WINDOW)).apply(lambda a: _haar_energy(a, levels), raw=True)
+        if 'wave_trend_64' not in df.columns and int(WAVE_WINDOW) == 64:
+            df['wave_trend_64'] = df['wave_trend']
+        if 'wave_energy_64' not in df.columns and int(WAVE_WINDOW) == 64:
+            df['wave_energy_64'] = df['wave_energy']
 
     # Lags
     for lag in [1, 2, 3, 5]:
@@ -1558,7 +1572,7 @@ class RealTradingEngine:
                 return None
 
             try:
-                risk_pct = float(getattr(decision, 'risk_per_trade_pct', None) or 0.0)
+                risk_pct = float((decision or {}).get('risk_per_trade_pct') or 0.0)
             except Exception:
                 risk_pct = 0.0
 
@@ -2658,9 +2672,10 @@ class TradingBot:
             ema_slow = float(latest.get('ema_21', 0.0) or 0.0)
             macd_h = float(latest.get('macd_hist', 0.0) or 0.0)
             rsi_v = float(latest.get('rsi', 50.0) or 50.0)
-            wave = float(latest.get('wave_trend', 0.0) or 0.0)
+            wave_64 = float(latest.get('wave_trend_64', latest.get('wave_trend', 0.0)) or 0.0)
+            wave_128 = float(latest.get('wave_trend_128', 0.0) or 0.0)
         except Exception:
-            ema_fast, ema_slow, macd_h, rsi_v, wave = 0.0, 0.0, 0.0, 50.0, 0.0
+            ema_fast, ema_slow, macd_h, rsi_v, wave_64, wave_128 = 0.0, 0.0, 0.0, 50.0, 0.0, 0.0
 
         score = 0
 
@@ -2682,10 +2697,16 @@ class TradingBot:
         if side == 'short' and 35.0 <= rsi_v <= 65.0:
             score += 1
 
-        if bool(self.strategy.get('use_wave_filter', USE_WAVE_FILTER_DEFAULT)):
-            if side == 'long' and wave >= 0:
+        if np.isfinite(wave_64):
+            if side == 'long' and wave_64 >= 0:
                 score += 1
-            if side == 'short' and wave <= 0:
+            if side == 'short' and wave_64 <= 0:
+                score += 1
+
+        if np.isfinite(wave_128) and wave_128 != 0:
+            if side == 'long' and wave_128 >= 0:
+                score += 1
+            if side == 'short' and wave_128 <= 0:
                 score += 1
 
         return int(score)
@@ -3037,6 +3058,7 @@ class TradingBot:
                     decision = self._rule_based_decision(symbol, df, ml_pred)
 
                 decision["strategy_mode"] = mode
+                decision["risk_per_trade_pct"] = float(self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)))
 
                 atr = None
                 try:

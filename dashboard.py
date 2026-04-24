@@ -300,7 +300,7 @@ else:
 st.sidebar.subheader("🛡️ Risk Management")
 manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 4.0, 0.5)
 manual_sl = st.sidebar.slider("Stop Loss (%)", 0.5, 5.0, 2.0, 0.5)
-risk_per_trade_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 0.5 if is_real else 1.0, 0.1)
+risk_per_trade_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 0.5 if is_real else 1.0, 0.1, key="risk_per_trade_pct")
 paper_fee_bps = st.sidebar.slider("Paper fee (bps)", 0.0, 20.0, 2.0, 0.5)
 paper_spread_bps = st.sidebar.slider("Paper spread (bps)", 0.0, 20.0, 1.0, 0.5)
 leverage = st.sidebar.selectbox("Leverage", [1, 2, 5, 10, 20, 50, 100], index=2)
@@ -350,7 +350,7 @@ tune_period = st.sidebar.selectbox("Tune period", ["30d", "60d", "180d"], index=
 tune_interval = "1h"
 tune_fee_bps = st.sidebar.slider("Fee (bps)", 0.0, 20.0, 2.0, 0.5)
 tune_spread_bps = st.sidebar.slider("Spread (bps)", 0.0, 20.0, 1.0, 0.5)
-tune_risk_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 1.0, 0.1) / 100.0
+tune_risk_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 1.0, 0.1, key="tune_risk_pct") / 100.0
 
 if st.sidebar.button("🔎 Run auto-tune", width='stretch'):
     res = autotune_atr(tune_symbol, tune_period, tune_interval, float(tune_fee_bps), float(tune_spread_bps), float(tune_risk_pct))
@@ -471,9 +471,14 @@ if st.sidebar.button("🧹 Reset statistics", width='stretch'):
 
 # Timeframe
 timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h", "15m"], index=1)
+chart_symbol = st.sidebar.selectbox("Chart asset", assets if assets else ["EURUSD=X"], index=0)
 
 # Chart Type
-chart_view = st.sidebar.radio("Chart View", ["Standard (Plotly)", "TradingView (Interactive)"], index=0)
+chart_view = st.sidebar.radio(
+    "Chart View",
+    ["Dual (Plotly + TradingView)", "Standard (Plotly)", "TradingView (Interactive)"],
+    index=0,
+)
 
 # Update interval
 st.sidebar.caption(f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -484,8 +489,8 @@ if st.sidebar.button("🔄 Refresh Data"):
 # ============================================
 # MAIN TITLE
 # ============================================
-st.title("🤖 Multi-Asset AI Trading Bot with AI")
-st.markdown("**Alligator + Fractals | Ensemble ML | Real-time Signals**")
+st.title("🤖 Multi-Asset AI Trading Bot")
+st.markdown("**Wave Multi-Scale | Ensemble ML | Real-time Signals**")
 st.markdown("---")
 
 # ============================================
@@ -652,19 +657,120 @@ st.subheader("📈 Price Action & Signals")
 if st.session_state.get("yf_rate_limited"):
     st.warning("Yahoo Finance rate limited. Showing last cached data where possible. Try again later.")
 
-if chart_view == "TradingView (Interactive)":
+def _tv_symbol(sym: str) -> str:
+    tv = sym
+    if "=" in sym:
+        tv = sym.replace("=X", "")
+        if sym.startswith("EUR") or sym.startswith("GBP") or sym.startswith("USD") or sym.startswith("JPY"):
+            tv = f"FX_IDC:{tv}"
+    elif "-USD" in sym:
+        tv = f"BINANCE:{sym.replace('-', '')}"
+    return tv
+
+_tv_interval = "60" if timeframe == "1h" else "15" if timeframe == "15m" else "D"
+
+if chart_view == "Dual (Plotly + TradingView)":
+    left, right = st.columns([1.2, 1.0], gap="large")
+
+    with left:
+        df = fetch_asset_data(chart_symbol, period="3mo", interval=timeframe)
+        if df is None:
+            st.warning(f"No data for {chart_symbol}")
+        else:
+            df = df.copy()
+            df['sma_20'] = df['close'].rolling(20).mean()
+            df['sma_50'] = df['close'].rolling(50).mean()
+
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                row_heights=[0.72, 0.28],
+                subplot_titles=(f"{chart_symbol} - Price", "RSI (14)")
+            )
+
+            fig.add_trace(
+                go.Candlestick(
+                    x=df.index,
+                    open=df['open'],
+                    high=df['high'],
+                    low=df['low'],
+                    close=df['close'],
+                    name=chart_symbol
+                ),
+                row=1, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='deepskyblue', width=1)),
+                row=1, col=1
+            )
+
+            delta = df['close'].diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+            avg_gain = gain.rolling(14).mean()
+            avg_loss = loss.rolling(14).mean()
+            rs = avg_gain / avg_loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+
+            fig.add_trace(
+                go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='violet', width=1)),
+                row=2, col=1
+            )
+            fig.add_hline(y=70, line_dash="dash", line_color="tomato", row=2, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="springgreen", row=2, col=1)
+
+            fig.update_layout(
+                height=860,
+                template="plotly_dark",
+                showlegend=True,
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=10, r=10, t=40, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            fig.update_xaxes(title_text="Date", row=2, col=1)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with right:
+        tv = _tv_symbol(chart_symbol)
+        tradingview_html = f"""
+        <div class=\"tradingview-widget-container\" style=\"height:860px;width:100%;\">
+          <div id=\"tradingview_dual\" style=\"height:860px;width:100%;\"></div>
+          <script type=\"text/javascript\" src=\"https://s3.tradingview.com/tv.js\"></script>
+          <script type=\"text/javascript\">
+          new TradingView.widget({{
+            \"autosize\": true,
+            \"symbol\": \"{tv}\",
+            \"interval\": \"{_tv_interval}\",
+            \"timezone\": \"Etc/UTC\",
+            \"theme\": \"dark\",
+            \"style\": \"1\",
+            \"locale\": \"en\",
+            \"toolbar_bg\": \"#0e1117\",
+            \"enable_publishing\": false,
+            \"withdateranges\": true,
+            \"hide_side_toolbar\": false,
+            \"allow_symbol_change\": true,
+            \"details\": true,
+            \"hotlist\": true,
+            \"calendar\": true,
+            \"container_id\": \"tradingview_dual\"
+          }});
+          </script>
+        </div>
+        """
+        components.html(tradingview_html, height=880)
+
+elif chart_view == "TradingView (Interactive)":
     for symbol in assets:
         st.markdown(f"### 📊 {symbol} Interactive Chart")
-        
-        # Mapping symbol for TradingView (e.g., EURUSD=X -> FX_IDC:EURUSD)
-        tv_symbol = symbol
-        if "=" in symbol:
-            tv_symbol = symbol.replace("=X", "")
-            if symbol.startswith("EUR") or symbol.startswith("GBP") or symbol.startswith("USD"):
-                tv_symbol = f"FX_IDC:{tv_symbol}"
-        elif "-USD" in symbol:
-            tv_symbol = f"BINANCE:{symbol.replace('-', '')}"
-            
+
+        tv = _tv_symbol(symbol)
         tradingview_html = f"""
         <div class=\"tradingview-widget-container\" style=\"height:900px;width:100%;\">
           <div id=\"tradingview_{symbol}\" style=\"height:900px;width:100%;\"></div>
@@ -672,8 +778,8 @@ if chart_view == "TradingView (Interactive)":
           <script type=\"text/javascript\">
           new TradingView.widget({{
             \"autosize\": true,
-            \"symbol\": \"{tv_symbol}\",
-            \"interval\": \"60\",
+            \"symbol\": \"{tv}\",
+            \"interval\": \"{_tv_interval}\",
             \"timezone\": \"Etc/UTC\",
             \"theme\": \"dark\",
             \"style\": \"1\",
@@ -692,6 +798,7 @@ if chart_view == "TradingView (Interactive)":
         </div>
         """
         components.html(tradingview_html, height=920)
+
 else:
     for symbol in assets:
         df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
@@ -707,7 +814,7 @@ else:
             rows=2, cols=1,
             shared_xaxes=True,
             vertical_spacing=0.03,
-            row_heights=[0.7, 0.3],
+            row_heights=[0.72, 0.28],
             subplot_titles=(f"{symbol} - Price", "RSI (14)")
         )
 
@@ -728,7 +835,7 @@ else:
             row=1, col=1
         )
         fig.add_trace(
-            go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='blue', width=1)),
+            go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='deepskyblue', width=1)),
             row=1, col=1
         )
 
@@ -741,15 +848,22 @@ else:
         df['rsi'] = 100 - (100 / (1 + rs))
 
         fig.add_trace(
-            go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='purple', width=1)),
+            go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='violet', width=1)),
             row=2, col=1
         )
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="tomato", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="springgreen", row=2, col=1)
 
-        fig.update_layout(height=600, showlegend=True, xaxis_rangeslider_visible=False)
+        fig.update_layout(
+            height=780,
+            template="plotly_dark",
+            showlegend=True,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=40, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
         fig.update_xaxes(title_text="Date", row=2, col=1)
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
 
 st.markdown("---")
@@ -807,7 +921,7 @@ else:
     fig_eq = go.Figure()
     fig_eq.add_trace(go.Scatter(x=t['exit_dt'].fillna(method='ffill'), y=equity, mode='lines', name='Equity'))
     fig_eq.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Time", yaxis_title="Equity")
-    st.plotly_chart(fig_eq, width='stretch')
+    st.plotly_chart(fig_eq, use_container_width=True)
 
     meta = (portfolio or {}).get("meta") if isinstance(portfolio, dict) else None
     blocked = (meta or {}).get("blocked") if isinstance(meta, dict) else None
