@@ -2593,8 +2593,13 @@ class TradingBot:
         trend_up = ema_fast > ema_slow
         trend_dn = ema_fast < ema_slow
 
-        allow_long = (reg != 'bearish')
-        allow_short = (reg != 'bullish')
+        try:
+            conf = float((ml_pred or {}).get('confidence') or 0.0)
+        except Exception:
+            conf = 0.0
+
+        allow_long = not (reg == 'bearish' and conf >= 0.65)
+        allow_short = not (reg == 'bullish' and conf >= 0.65)
 
         long_score = 0
         short_score = 0
@@ -2609,16 +2614,20 @@ class TradingBot:
         if macd_h < 0:
             short_score += 1
 
-        if rsi_v <= 60:
+        if rsi_v < 60:
             long_score += 1
-        if rsi_v >= 40:
+        if rsi_v > 40:
             short_score += 1
 
-        strength = 'weak'
-        if max(long_score, short_score) >= 3:
+        best = max(long_score, short_score)
+        if best >= 3:
+            strength = 'strong'
+        elif best >= 2:
             strength = 'medium'
+        else:
+            strength = 'weak'
 
-        if long_score >= 3 and allow_long:
+        if long_score >= 2 and allow_long:
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
@@ -2629,7 +2638,7 @@ class TradingBot:
                 'reasoning_short': 'Fallback: EMA/MACD/RSI bullish alignment',
             }
 
-        if short_score >= 3 and allow_short:
+        if short_score >= 2 and allow_short:
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
@@ -3030,7 +3039,7 @@ class TradingBot:
                     elif yes_c ^ yes_r:
                         winner = d_reinf if yes_r else d_classic
                         loser = d_classic if yes_r else d_reinf
-                        if _rank(winner.get('signal_strength')) >= 3:
+                        if _rank(winner.get('signal_strength')) >= 2:
                             decision = dict(winner)
                             decision['trade_decision'] = 'YES'
                             decision['action'] = 'entry'
