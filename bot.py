@@ -2996,6 +2996,8 @@ class TradingBot:
                 ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}
                 mode = (getattr(self, "strategy_mode", None) or STRATEGY_MODE or "classic").strip().lower()
 
+                rb = self._rule_based_decision(symbol, df, ml_pred) or {}
+
                 # Backward-compat: "pro" == "reinforse"
                 if mode == "pro":
                     mode = "reinforse"
@@ -3054,10 +3056,32 @@ class TradingBot:
                 if not isinstance(decision, dict):
                     decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'invalid_decision'}
 
+                decision_source = "ai"
+
                 if int(decision.get('ai_error_code') or 0) in (401, 402, 500):
-                    decision = self._rule_based_decision(symbol, df, ml_pred)
+                    decision = dict(rb)
+                    decision_source = "fallback"
+
+                if str(decision.get('trade_decision') or '').upper() != 'YES' and str(rb.get('trade_decision') or '').upper() == 'YES':
+                    rb_side = str(rb.get('side') or 'long').lower()
+                    rb_score = self._setup_score(df, rb_side)
+
+                    quality_mode = str(self.strategy.get('quality_mode') or 'balanced').lower()
+                    min_score = int(self.strategy.get('min_setup_score', MIN_SETUP_SCORE_DEFAULT) or 0)
+
+                    if quality_mode == 'high':
+                        allow_override = (min_score <= 0) or (rb_score >= min_score)
+                    else:
+                        allow_override = rb_score >= max(2, min_score - 1)
+
+                    if allow_override:
+                        ai_reason = str(decision.get('reasoning_short') or '')
+                        decision = dict(rb)
+                        decision['reasoning_short'] = (f"Hybrid: rule-based override (AI NO: {ai_reason})")[:250]
+                        decision_source = "hybrid"
 
                 decision["strategy_mode"] = mode
+                decision["decision_source"] = decision_source
                 decision["risk_per_trade_pct"] = float(self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)))
 
                 atr = None
