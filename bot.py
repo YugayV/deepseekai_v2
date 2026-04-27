@@ -1611,7 +1611,7 @@ class RealTradingEngine:
             logger.error(f"Order error: {e}")
             return None
 
-    def check_exits(self, symbol, price):
+    def check_exits(self, symbol, price, high=None, low=None):
         ex_symbol = self._to_exchange_symbol(symbol)
         if not ex_symbol:
             return None
@@ -1623,20 +1623,33 @@ class RealTradingEngine:
         sl = float(pos.get('stop_loss') or 0.0)
         tp = float(pos.get('take_profit') or 0.0)
 
+        try:
+            hi = float(price if high is None else high)
+        except Exception:
+            hi = float(price)
+        try:
+            lo = float(price if low is None else low)
+        except Exception:
+            lo = float(price)
+
         hit = False
         reason = None
         if side == 'long':
-            if sl > 0 and float(price) <= sl:
+            sl_hit = (sl > 0 and lo <= sl)
+            tp_hit = (tp > 0 and hi >= tp)
+            if sl_hit:
                 hit = True
                 reason = 'stop_loss'
-            elif tp > 0 and float(price) >= tp:
+            elif tp_hit:
                 hit = True
                 reason = 'take_profit'
         else:
-            if sl > 0 and float(price) >= sl:
+            sl_hit = (sl > 0 and hi >= sl)
+            tp_hit = (tp > 0 and lo <= tp)
+            if sl_hit:
                 hit = True
                 reason = 'stop_loss'
-            elif tp > 0 and float(price) <= tp:
+            elif tp_hit:
                 hit = True
                 reason = 'take_profit'
 
@@ -1970,7 +1983,7 @@ class PaperTradingEngine:
         self._save_state() # Save after entry
         return self.positions[symbol]
 
-    def check_exits(self, symbol, price):
+    def check_exits(self, symbol, price, high=None, low=None):
         if symbol not in self.positions:
             return None
 
@@ -1978,20 +1991,47 @@ class PaperTradingEngine:
         close_reason = None
         pnl = 0
 
+        try:
+            hi = float(price if high is None else high)
+        except Exception:
+            hi = float(price)
+        try:
+            lo = float(price if low is None else low)
+        except Exception:
+            lo = float(price)
+
+        exit_price = float(price)
+
         if pos['side'] == 'long':
-            if price <= pos['stop_loss']:
+            sl = float(pos.get('stop_loss') or 0.0)
+            tp = float(pos.get('take_profit') or 0.0)
+            sl_hit = (sl > 0 and lo <= sl)
+            tp_hit = (tp > 0 and hi >= tp)
+
+            if sl_hit:
                 close_reason = 'stop_loss'
-                pnl = (price - pos['entry_price']) * pos['size']
-            elif price >= pos['take_profit']:
+                exit_price = float(sl)
+            elif tp_hit:
                 close_reason = 'take_profit'
-                pnl = (price - pos['entry_price']) * pos['size']
+                exit_price = float(tp)
+
+            if close_reason:
+                pnl = (float(exit_price) - float(pos['entry_price'])) * float(pos['size'])
         else:
-            if price >= pos['stop_loss']:
+            sl = float(pos.get('stop_loss') or 0.0)
+            tp = float(pos.get('take_profit') or 0.0)
+            sl_hit = (sl > 0 and hi >= sl)
+            tp_hit = (tp > 0 and lo <= tp)
+
+            if sl_hit:
                 close_reason = 'stop_loss'
-                pnl = (pos['entry_price'] - price) * pos['size']
-            elif price <= pos['take_profit']:
+                exit_price = float(sl)
+            elif tp_hit:
                 close_reason = 'take_profit'
-                pnl = (pos['entry_price'] - price) * pos['size']
+                exit_price = float(tp)
+
+            if close_reason:
+                pnl = (float(pos['entry_price']) - float(exit_price)) * float(pos['size'])
 
         if close_reason:
             margin = float(pos.get('margin') or (pos['size'] * pos['entry_price']))
@@ -2005,11 +2045,11 @@ class PaperTradingEngine:
             except Exception:
                 spread_bps = 0.0
 
-            exit_notional = float(abs(float(price) * float(pos.get('size') or 0.0)))
+            exit_notional = float(abs(float(exit_price) * float(pos.get('size') or 0.0)))
             exit_cost = float(exit_notional) * (max(0.0, fee_bps) + max(0.0, spread_bps)) / 10_000.0
 
             self.balance += float(margin) + float(pnl) - float(exit_cost)
-            pos['exit_price'] = price
+            pos['exit_price'] = float(exit_price)
             pos['pnl'] = pnl
             pos['exit_cost'] = float(exit_cost)
             pos['pnl_percent'] = (pnl / margin) * 100 if margin > 0 else 0
@@ -2939,7 +2979,16 @@ class TradingBot:
                 }
 
             # Check exits first
-            closed = self.engine.check_exits(symbol, current_price)
+            bar_high = None
+            bar_low = None
+            try:
+                bar_high = float(df['high'].iloc[-1])
+                bar_low = float(df['low'].iloc[-1])
+            except Exception:
+                bar_high = None
+                bar_low = None
+
+            closed = self.engine.check_exits(symbol, current_price, high=bar_high, low=bar_low)
             if closed:
                 try:
                     self.last_action_ts[symbol] = df.index[-1]
