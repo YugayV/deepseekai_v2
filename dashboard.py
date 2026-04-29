@@ -304,6 +304,16 @@ risk_per_trade_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 0.5 if is
 paper_fee_bps = st.sidebar.slider("Paper fee (bps)", 0.0, 20.0, 2.0, 0.5)
 paper_spread_bps = st.sidebar.slider("Paper spread (bps)", 0.0, 20.0, 1.0, 0.5)
 leverage = st.sidebar.selectbox("Leverage", [1, 2, 5, 10, 20, 50, 100], index=2)
+trade_alloc_pct = st.sidebar.slider("Trade allocation (%)", 1.0, 50.0, 10.0, 0.5, key="trade_alloc_pct")
+
+st.sidebar.subheader("🎯 Partial Take")
+use_partial_take = st.sidebar.checkbox("Partial take (TP1 then BE)", value=(not is_real))
+partial_take_fraction = st.sidebar.slider("Partial take fraction", 0.1, 0.9, 0.5, 0.05, key="partial_take_fraction")
+partial_take_r = st.sidebar.slider("TP1 at R multiple", 0.5, 3.0, 1.0, 0.1, key="partial_take_r")
+
+st.sidebar.subheader("💸 Spread-Aware Allocation")
+spread_alloc_reduce_threshold_bps = st.sidebar.slider("Spread reduce threshold (bps)", 0.0, 50.0, 5.0, 0.5, key="spread_alloc_reduce_threshold_bps")
+spread_alloc_reduce_pct = st.sidebar.slider("Spread allocation reduce (%)", 0.0, 90.0, 40.0, 1.0, key="spread_alloc_reduce_pct")
 
 st.sidebar.subheader("🕒 Demo Limits")
 max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
@@ -326,6 +336,7 @@ min_setup_score = st.sidebar.slider("Min setup score", 0, 5, 4 if is_real else 3
 use_session_filter = st.sidebar.checkbox("Session filter (forex)", value=is_real)
 min_atr_pct = st.sidebar.slider("Min ATR%", 0.0, 5.0, 0.05, 0.01)
 max_atr_pct = st.sidebar.slider("Max ATR%", 0.0, 5.0, 1.50, 0.05)
+max_hold_bars = st.sidebar.slider("Max hold (bars)", 0, 48, 6, 1, key="max_hold_bars")
 
 st.sidebar.subheader("🛑 Risk Guard")
 risk_guard_enabled = st.sidebar.checkbox("Enable Risk Guard", value=False)
@@ -381,6 +392,13 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "risk_per_trade_pct": float(risk_per_trade_pct),
             "paper_fee_bps": float(paper_fee_bps),
             "paper_spread_bps": float(paper_spread_bps),
+            "max_trade_alloc_pct": float(trade_alloc_pct),
+            "max_hold_bars": int(max_hold_bars),
+            "use_partial_take": bool(use_partial_take),
+            "partial_take_fraction": float(partial_take_fraction),
+            "partial_take_r": float(partial_take_r),
+            "spread_alloc_reduce_threshold_bps": float(spread_alloc_reduce_threshold_bps),
+            "spread_alloc_reduce_pct": float(spread_alloc_reduce_pct),
             "risk_guard_enabled": bool(risk_guard_enabled),
             "max_open_positions": int(max_open_positions),
             "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
@@ -420,6 +438,13 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "risk_per_trade_pct": float(risk_per_trade_pct),
         "paper_fee_bps": float(paper_fee_bps),
         "paper_spread_bps": float(paper_spread_bps),
+        "max_trade_alloc_pct": float(trade_alloc_pct),
+        "max_hold_bars": int(max_hold_bars),
+        "use_partial_take": bool(use_partial_take),
+        "partial_take_fraction": float(partial_take_fraction),
+        "partial_take_r": float(partial_take_r),
+        "spread_alloc_reduce_threshold_bps": float(spread_alloc_reduce_threshold_bps),
+        "spread_alloc_reduce_pct": float(spread_alloc_reduce_pct),
         "risk_guard_enabled": bool(risk_guard_enabled),
         "max_open_positions": int(max_open_positions),
         "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
@@ -449,6 +474,13 @@ if col_btn1.button("🚀 Start All", width='stretch'):
         "risk_per_trade_pct": float(risk_per_trade_pct),
         "paper_fee_bps": float(paper_fee_bps),
         "paper_spread_bps": float(paper_spread_bps),
+        "max_trade_alloc_pct": float(trade_alloc_pct),
+        "max_hold_bars": int(max_hold_bars),
+        "use_partial_take": bool(use_partial_take),
+        "partial_take_fraction": float(partial_take_fraction),
+        "partial_take_r": float(partial_take_r),
+        "spread_alloc_reduce_threshold_bps": float(spread_alloc_reduce_threshold_bps),
+        "spread_alloc_reduce_pct": float(spread_alloc_reduce_pct),
         "max_trades_per_day": int(max_trades_per_day),
         "daily_tp_target_percent": float(daily_tp_target_percent),
         "time": str(datetime.now())

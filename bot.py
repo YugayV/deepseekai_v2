@@ -173,7 +173,7 @@ load_dotenv()
 # CONFIG
 # ============================================
 PAPER_CAPITAL = float(os.getenv("PAPER_START_CAPITAL", 10000))
-MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 5.0))
+MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 10.0))
 STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
 TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
 
@@ -232,6 +232,12 @@ RISK_PER_TRADE_PCT_DEMO = float(os.getenv("RISK_PER_TRADE_PCT_DEMO", 1.0))
 RISK_PER_TRADE_PCT_REAL = float(os.getenv("RISK_PER_TRADE_PCT_REAL", 0.5))
 PAPER_FEE_BPS = float(os.getenv("PAPER_FEE_BPS", 2.0))
 PAPER_SPREAD_BPS = float(os.getenv("PAPER_SPREAD_BPS", 1.0))
+MAX_HOLD_BARS_DEFAULT = int(os.getenv("MAX_HOLD_BARS_DEFAULT", 6))
+USE_PARTIAL_TAKE_DEFAULT = (os.getenv("USE_PARTIAL_TAKE_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PARTIAL_TAKE_FRACTION_DEFAULT = float(os.getenv("PARTIAL_TAKE_FRACTION_DEFAULT", 0.5))
+PARTIAL_TAKE_R_DEFAULT = float(os.getenv("PARTIAL_TAKE_R_DEFAULT", 1.0))
+SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT = float(os.getenv("SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT", 5.0))
+SPREAD_ALLOC_REDUCE_PCT_DEFAULT = float(os.getenv("SPREAD_ALLOC_REDUCE_PCT_DEFAULT", 40.0))
 
 ENABLE_REAL_TRADING = (os.getenv("ENABLE_REAL_TRADING", "false").strip().lower() in ("1", "true", "yes"))
 
@@ -1831,6 +1837,20 @@ class PaperTradingEngine:
         self.daily_trades = 0
         self.loss_streak = 0
 
+        self.leverage = float(getattr(self, 'leverage', 1.0) or 1.0)
+        self.fee_bps = float(getattr(self, 'fee_bps', PAPER_FEE_BPS) or PAPER_FEE_BPS)
+        self.spread_bps = float(getattr(self, 'spread_bps', PAPER_SPREAD_BPS) or PAPER_SPREAD_BPS)
+
+        self.max_trade_alloc_pct = float(getattr(self, 'max_trade_alloc_pct', MAX_POSITION_SIZE) or MAX_POSITION_SIZE)
+        self.max_hold_bars = int(getattr(self, 'max_hold_bars', MAX_HOLD_BARS_DEFAULT) or MAX_HOLD_BARS_DEFAULT)
+
+        self.use_partial_take = bool(getattr(self, 'use_partial_take', USE_PARTIAL_TAKE_DEFAULT))
+        self.partial_take_fraction = float(getattr(self, 'partial_take_fraction', PARTIAL_TAKE_FRACTION_DEFAULT) or PARTIAL_TAKE_FRACTION_DEFAULT)
+        self.partial_take_r = float(getattr(self, 'partial_take_r', PARTIAL_TAKE_R_DEFAULT) or PARTIAL_TAKE_R_DEFAULT)
+
+        self.spread_alloc_reduce_threshold_bps = float(getattr(self, 'spread_alloc_reduce_threshold_bps', SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT) or SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT)
+        self.spread_alloc_reduce_pct = float(getattr(self, 'spread_alloc_reduce_pct', SPREAD_ALLOC_REDUCE_PCT_DEFAULT) or SPREAD_ALLOC_REDUCE_PCT_DEFAULT)
+
         self.max_trades_per_day = MAX_TRADES_PER_DAY
         self.daily_tp_target_percent = DAILY_TP_TARGET_PERCENT
         self.day_date = datetime.utcnow().date().isoformat()
@@ -2012,29 +2032,9 @@ class PaperTradingEngine:
         target = decision.get('take_profit', price * (1 + TAKE_PROFIT_PERCENT/100 if side == 'long' else 1 - TAKE_PROFIT_PERCENT/100))
         confidence = float(decision.get('confidence', 50)) / 100
 
-        strength = str(decision.get('signal_strength') or '').lower()
-        mult = 1.0
-        if strength == 'weak':
-            mult = 0.6
-        elif strength == 'strong':
-            mult = 1.2
-
-        try:
-            risk_pct = float(getattr(self, 'risk_per_trade_pct', 1.0) or 0.0)
-        except Exception:
-            risk_pct = 1.0
-        risk_pct = max(0.0, risk_pct)
-
-        risk_amount = float(self.balance) * (risk_pct / 100.0) * float(mult)
         risk_per_unit = abs(float(price) - float(stop))
-
         if risk_per_unit <= 0:
             logger.warning(f"❌ {symbol}: Risk per unit is 0 (Price={price}, SL={stop})")
-            return None
-
-        size = float(risk_amount) / float(risk_per_unit)
-        if size <= 0:
-            logger.warning(f"❌ {symbol}: Calculated size is 0 (Risk={risk_amount}, UnitRisk={risk_per_unit})")
             return None
 
         try:
@@ -2043,15 +2043,38 @@ class PaperTradingEngine:
             lev = 1.0
         lev = max(1.0, lev)
 
-        notional = float(size) * float(price)
-        margin = float(notional) / lev
+        try:
+            alloc_pct = float(decision.get('trade_alloc_pct') or decision.get('max_trade_alloc_pct') or getattr(self, 'max_trade_alloc_pct', None) or MAX_POSITION_SIZE)
+        except Exception:
+            alloc_pct = float(MAX_POSITION_SIZE)
+        alloc_pct = max(0.0, min(100.0, float(alloc_pct)))
 
-        max_margin = float(self.balance) * 0.30
-        if margin > max_margin and max_margin > 0:
-            scale = max_margin / margin
-            size *= scale
-            notional = float(size) * float(price)
-            margin = float(notional) / lev
+        try:
+            spread_bps = float(getattr(self, 'spread_bps', 0.0) or 0.0)
+        except Exception:
+            spread_bps = 0.0
+        try:
+            thr = float(getattr(self, 'spread_alloc_reduce_threshold_bps', SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT) or SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT)
+        except Exception:
+            thr = float(SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT)
+        try:
+            red = float(getattr(self, 'spread_alloc_reduce_pct', SPREAD_ALLOC_REDUCE_PCT_DEFAULT) or SPREAD_ALLOC_REDUCE_PCT_DEFAULT)
+        except Exception:
+            red = float(SPREAD_ALLOC_REDUCE_PCT_DEFAULT)
+
+        if thr > 0 and spread_bps >= thr:
+            red = max(0.0, min(90.0, float(red)))
+            alloc_pct = float(alloc_pct) * (1.0 - red / 100.0)
+
+        margin = float(self.balance) * (alloc_pct / 100.0)
+        notional = float(margin) * float(lev)
+
+        if float(price) <= 0:
+            return None
+
+        size = float(notional) / float(price)
+        if size <= 0 or margin <= 0:
+            return None
 
         try:
             fee_bps = float(getattr(self, 'fee_bps', 0.0) or 0.0)
@@ -2070,12 +2093,39 @@ class PaperTradingEngine:
 
         balance_before = float(self.balance)
 
+        tp1 = None
+        tp1_hit = False
+        use_pt = bool(getattr(self, 'use_partial_take', USE_PARTIAL_TAKE_DEFAULT))
+        try:
+            frac = float(getattr(self, 'partial_take_fraction', PARTIAL_TAKE_FRACTION_DEFAULT) or PARTIAL_TAKE_FRACTION_DEFAULT)
+        except Exception:
+            frac = float(PARTIAL_TAKE_FRACTION_DEFAULT)
+        frac = max(0.0, min(1.0, float(frac)))
+
+        try:
+            r_mult = float(getattr(self, 'partial_take_r', PARTIAL_TAKE_R_DEFAULT) or PARTIAL_TAKE_R_DEFAULT)
+        except Exception:
+            r_mult = float(PARTIAL_TAKE_R_DEFAULT)
+        r_mult = max(0.0, float(r_mult))
+
+        if use_pt and frac > 0 and frac < 1 and r_mult > 0:
+            unit_risk = abs(float(price) - float(stop))
+            if unit_risk > 0:
+                if str(side).lower() == 'short':
+                    tp1 = float(price) - float(unit_risk) * float(r_mult)
+                else:
+                    tp1 = float(price) + float(unit_risk) * float(r_mult)
+
         self.positions[symbol] = {
             'asset': symbol,
             'side': side,
             'entry_price': float(price),
             'stop_loss': float(stop),
             'take_profit': float(target),
+            'tp1': float(tp1) if tp1 is not None else None,
+            'tp1_hit': bool(tp1_hit),
+            'partial_take_fraction': float(frac),
+            'partial_take_r': float(r_mult),
             'size': float(size),
             'confidence': float(confidence),
             'entry_date': datetime.now(),
@@ -2120,6 +2170,116 @@ class PaperTradingEngine:
             lo = float(price)
 
         exit_price = float(price)
+
+        try:
+            mhb = int(getattr(self, 'max_hold_bars', MAX_HOLD_BARS_DEFAULT) or MAX_HOLD_BARS_DEFAULT)
+        except Exception:
+            mhb = int(MAX_HOLD_BARS_DEFAULT)
+
+        if mhb > 0:
+            try:
+                entry_dt = pos.get('entry_date')
+                if isinstance(entry_dt, str):
+                    entry_dt = datetime.fromisoformat(entry_dt)
+                if isinstance(entry_dt, datetime):
+                    hold_seconds = float(mhb) * 3600.0
+                    if (datetime.now() - entry_dt).total_seconds() >= hold_seconds:
+                        close_reason = 'time_exit'
+                        exit_price = float(price)
+                        pnl = (float(exit_price) - float(pos['entry_price'])) * float(pos['size']) if pos['side'] == 'long' else (float(pos['entry_price']) - float(exit_price)) * float(pos['size'])
+            except Exception:
+                pass
+
+        if close_reason is None:
+            tp1 = pos.get('tp1')
+            if tp1 is not None and not bool(pos.get('tp1_hit')):
+                try:
+                    use_pt = bool(getattr(self, 'use_partial_take', USE_PARTIAL_TAKE_DEFAULT))
+                except Exception:
+                    use_pt = bool(USE_PARTIAL_TAKE_DEFAULT)
+
+                if use_pt:
+                    if pos['side'] == 'long' and float(hi) >= float(tp1):
+                        close_size = float(pos.get('size') or 0.0) * float(pos.get('partial_take_fraction') or PARTIAL_TAKE_FRACTION_DEFAULT)
+                        if close_size > 0 and close_size < float(pos.get('size') or 0.0):
+                            frac = float(close_size) / float(pos.get('size') or 1.0)
+                            margin_part = float(pos.get('margin') or 0.0) * frac
+                            pnl_part = (float(tp1) - float(pos['entry_price'])) * float(close_size)
+
+                            try:
+                                fee_bps = float(getattr(self, 'fee_bps', 0.0) or 0.0)
+                            except Exception:
+                                fee_bps = 0.0
+                            try:
+                                spread_bps = float(getattr(self, 'spread_bps', 0.0) or 0.0)
+                            except Exception:
+                                spread_bps = 0.0
+
+                            exit_notional = float(abs(float(tp1) * float(close_size)))
+                            exit_cost = float(exit_notional) * (max(0.0, fee_bps) + max(0.0, spread_bps)) / 10_000.0
+
+                            self.balance += float(margin_part) + float(pnl_part) - float(exit_cost)
+
+                            part_trade = dict(pos)
+                            part_trade['size'] = float(close_size)
+                            part_trade['margin'] = float(margin_part)
+                            part_trade['exit_price'] = float(tp1)
+                            part_trade['pnl'] = float(pnl_part)
+                            part_trade['exit_cost'] = float(exit_cost)
+                            part_trade['pnl_percent'] = (float(pnl_part) / float(margin_part) * 100.0) if float(margin_part) > 0 else 0.0
+                            part_trade['exit_reason'] = 'partial_take'
+                            part_trade['exit_date'] = str(datetime.now())
+                            part_trade['is_partial'] = True
+                            self.trades.append(part_trade)
+
+                            pos['size'] = float(pos.get('size') or 0.0) - float(close_size)
+                            pos['margin'] = float(pos.get('margin') or 0.0) - float(margin_part)
+                            pos['tp1_hit'] = True
+                            pos['stop_loss'] = float(pos.get('entry_price') or pos.get('stop_loss') or 0.0)
+
+                            self._save_state()
+                            return None
+
+                    if pos['side'] == 'short' and float(lo) <= float(tp1):
+                        close_size = float(pos.get('size') or 0.0) * float(pos.get('partial_take_fraction') or PARTIAL_TAKE_FRACTION_DEFAULT)
+                        if close_size > 0 and close_size < float(pos.get('size') or 0.0):
+                            frac = float(close_size) / float(pos.get('size') or 1.0)
+                            margin_part = float(pos.get('margin') or 0.0) * frac
+                            pnl_part = (float(pos['entry_price']) - float(tp1)) * float(close_size)
+
+                            try:
+                                fee_bps = float(getattr(self, 'fee_bps', 0.0) or 0.0)
+                            except Exception:
+                                fee_bps = 0.0
+                            try:
+                                spread_bps = float(getattr(self, 'spread_bps', 0.0) or 0.0)
+                            except Exception:
+                                spread_bps = 0.0
+
+                            exit_notional = float(abs(float(tp1) * float(close_size)))
+                            exit_cost = float(exit_notional) * (max(0.0, fee_bps) + max(0.0, spread_bps)) / 10_000.0
+
+                            self.balance += float(margin_part) + float(pnl_part) - float(exit_cost)
+
+                            part_trade = dict(pos)
+                            part_trade['size'] = float(close_size)
+                            part_trade['margin'] = float(margin_part)
+                            part_trade['exit_price'] = float(tp1)
+                            part_trade['pnl'] = float(pnl_part)
+                            part_trade['exit_cost'] = float(exit_cost)
+                            part_trade['pnl_percent'] = (float(pnl_part) / float(margin_part) * 100.0) if float(margin_part) > 0 else 0.0
+                            part_trade['exit_reason'] = 'partial_take'
+                            part_trade['exit_date'] = str(datetime.now())
+                            part_trade['is_partial'] = True
+                            self.trades.append(part_trade)
+
+                            pos['size'] = float(pos.get('size') or 0.0) - float(close_size)
+                            pos['margin'] = float(pos.get('margin') or 0.0) - float(margin_part)
+                            pos['tp1_hit'] = True
+                            pos['stop_loss'] = float(pos.get('entry_price') or pos.get('stop_loss') or 0.0)
+
+                            self._save_state()
+                            return None
 
         if pos['side'] == 'long':
             sl = float(pos.get('stop_loss') or 0.0)
@@ -2281,6 +2441,13 @@ class TradingBot:
             "risk_per_trade_pct": float((RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)),
             "paper_fee_bps": float(PAPER_FEE_BPS),
             "paper_spread_bps": float(PAPER_SPREAD_BPS),
+            "max_trade_alloc_pct": float(MAX_POSITION_SIZE),
+            "max_hold_bars": int(MAX_HOLD_BARS_DEFAULT),
+            "use_partial_take": bool(USE_PARTIAL_TAKE_DEFAULT),
+            "partial_take_fraction": float(PARTIAL_TAKE_FRACTION_DEFAULT),
+            "partial_take_r": float(PARTIAL_TAKE_R_DEFAULT),
+            "spread_alloc_reduce_threshold_bps": float(SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT),
+            "spread_alloc_reduce_pct": float(SPREAD_ALLOC_REDUCE_PCT_DEFAULT),
         }
         self.context = {}
         self.last_action_ts = {}
@@ -2542,6 +2709,48 @@ class TradingBot:
                     except Exception:
                         pass
 
+                if "max_trade_alloc_pct" in (cmd_data or {}):
+                    try:
+                        self.engine.max_trade_alloc_pct = float(cmd_data.get("max_trade_alloc_pct"))
+                    except Exception:
+                        pass
+
+                if "max_hold_bars" in (cmd_data or {}):
+                    try:
+                        self.engine.max_hold_bars = int(cmd_data.get("max_hold_bars"))
+                    except Exception:
+                        pass
+
+                if "use_partial_take" in (cmd_data or {}):
+                    try:
+                        self.engine.use_partial_take = bool(cmd_data.get("use_partial_take"))
+                    except Exception:
+                        pass
+
+                if "partial_take_fraction" in (cmd_data or {}):
+                    try:
+                        self.engine.partial_take_fraction = float(cmd_data.get("partial_take_fraction"))
+                    except Exception:
+                        pass
+
+                if "partial_take_r" in (cmd_data or {}):
+                    try:
+                        self.engine.partial_take_r = float(cmd_data.get("partial_take_r"))
+                    except Exception:
+                        pass
+
+                if "spread_alloc_reduce_threshold_bps" in (cmd_data or {}):
+                    try:
+                        self.engine.spread_alloc_reduce_threshold_bps = float(cmd_data.get("spread_alloc_reduce_threshold_bps"))
+                    except Exception:
+                        pass
+
+                if "spread_alloc_reduce_pct" in (cmd_data or {}):
+                    try:
+                        self.engine.spread_alloc_reduce_pct = float(cmd_data.get("spread_alloc_reduce_pct"))
+                    except Exception:
+                        pass
+
                 self.engine.max_trades_per_day = int(cmd_data.get("max_trades_per_day", self.engine.max_trades_per_day))
                 self.engine.daily_tp_target_percent = float(cmd_data.get("daily_tp_target_percent", self.engine.daily_tp_target_percent))
                 self.engine._roll_day_if_needed()
@@ -2634,6 +2843,13 @@ class TradingBot:
             self.strategy["risk_per_trade_pct"] = max(0.0, _as_float(cmd_data.get("risk_per_trade_pct"), self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO))))
             self.strategy["paper_fee_bps"] = max(0.0, _as_float(cmd_data.get("paper_fee_bps"), self.strategy.get("paper_fee_bps", PAPER_FEE_BPS)))
             self.strategy["paper_spread_bps"] = max(0.0, _as_float(cmd_data.get("paper_spread_bps"), self.strategy.get("paper_spread_bps", PAPER_SPREAD_BPS)))
+            self.strategy["max_trade_alloc_pct"] = max(0.0, _as_float(cmd_data.get("max_trade_alloc_pct"), self.strategy.get("max_trade_alloc_pct", MAX_POSITION_SIZE)))
+            self.strategy["max_hold_bars"] = max(0, _as_int(cmd_data.get("max_hold_bars"), self.strategy.get("max_hold_bars", MAX_HOLD_BARS_DEFAULT)))
+            self.strategy["use_partial_take"] = _as_bool(cmd_data.get("use_partial_take"), self.strategy.get("use_partial_take", USE_PARTIAL_TAKE_DEFAULT))
+            self.strategy["partial_take_fraction"] = max(0.0, min(1.0, _as_float(cmd_data.get("partial_take_fraction"), self.strategy.get("partial_take_fraction", PARTIAL_TAKE_FRACTION_DEFAULT))))
+            self.strategy["partial_take_r"] = max(0.0, _as_float(cmd_data.get("partial_take_r"), self.strategy.get("partial_take_r", PARTIAL_TAKE_R_DEFAULT)))
+            self.strategy["spread_alloc_reduce_threshold_bps"] = max(0.0, _as_float(cmd_data.get("spread_alloc_reduce_threshold_bps"), self.strategy.get("spread_alloc_reduce_threshold_bps", SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT)))
+            self.strategy["spread_alloc_reduce_pct"] = max(0.0, min(90.0, _as_float(cmd_data.get("spread_alloc_reduce_pct"), self.strategy.get("spread_alloc_reduce_pct", SPREAD_ALLOC_REDUCE_PCT_DEFAULT))))
 
             if isinstance(self.engine, PaperTradingEngine):
                 try:
@@ -2646,6 +2862,34 @@ class TradingBot:
                     pass
                 try:
                     self.engine.spread_bps = float(self.strategy.get("paper_spread_bps"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.max_trade_alloc_pct = float(self.strategy.get("max_trade_alloc_pct"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.max_hold_bars = int(self.strategy.get("max_hold_bars"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.use_partial_take = bool(self.strategy.get("use_partial_take"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.partial_take_fraction = float(self.strategy.get("partial_take_fraction"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.partial_take_r = float(self.strategy.get("partial_take_r"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.spread_alloc_reduce_threshold_bps = float(self.strategy.get("spread_alloc_reduce_threshold_bps"))
+                except Exception:
+                    pass
+                try:
+                    self.engine.spread_alloc_reduce_pct = float(self.strategy.get("spread_alloc_reduce_pct"))
                 except Exception:
                     pass
 
@@ -3374,6 +3618,12 @@ class TradingBot:
                         decision['reasoning_short'] = (f"{rs}; {suffix}" if rs else suffix)[:250]
 
                 if decision.get('trade_decision') == 'YES':
+                    if decision.get('trade_alloc_pct') is None:
+                        try:
+                            decision['trade_alloc_pct'] = float(self.strategy.get('max_trade_alloc_pct', MAX_POSITION_SIZE) or MAX_POSITION_SIZE)
+                        except Exception:
+                            decision['trade_alloc_pct'] = float(MAX_POSITION_SIZE)
+
                     logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
                     if position:
