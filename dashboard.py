@@ -343,6 +343,10 @@ dxy_trend_block_pct = st.sidebar.slider("DXY block threshold (%)", 0.0, 2.0, 0.2
 
 use_polymarket = st.sidebar.checkbox("Use Polymarket context", value=False)
 
+st.sidebar.subheader("🌍 Macro Score")
+use_macro_score = st.sidebar.checkbox("Use macro score", value=True)
+macro_alloc_reduce_pct = st.sidebar.slider("Macro allocation reduce (%)", 0.0, 90.0, 35.0, 1.0)
+
 st.sidebar.subheader("🔎 Auto-tune ATR")
 _tune_assets = assets if assets else ["EURUSD=X"]
 tune_symbol = st.sidebar.selectbox("Tune symbol", _tune_assets, index=0)
@@ -388,6 +392,8 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "use_dxy_filter": bool(use_dxy_filter),
             "dxy_trend_block_pct": float(dxy_trend_block_pct),
             "use_polymarket": bool(use_polymarket),
+            "use_macro_score": bool(use_macro_score),
+            "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
             "time": str(datetime.now()),
         })
         st.sidebar.success("Best ATR applied")
@@ -425,6 +431,8 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "use_dxy_filter": bool(use_dxy_filter),
         "dxy_trend_block_pct": float(dxy_trend_block_pct),
         "use_polymarket": bool(use_polymarket),
+        "use_macro_score": bool(use_macro_score),
+        "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
         "time": str(datetime.now()),
     })
     st.sidebar.success("Filters applied")
@@ -627,6 +635,49 @@ else:
     col4.metric("🎯 Positions", "0")
     col5.metric("💹 Trades", "0")
     st.info("Portfolio data not found. Start the bot to generate state.")
+
+st.markdown("---")
+
+st.subheader("🌍 Macro (USD strength)")
+if isinstance(portfolio, dict):
+    meta = portfolio.get('meta') if isinstance(portfolio.get('meta'), dict) else {}
+    last_decisions = meta.get('last_decisions') if isinstance(meta.get('last_decisions'), list) else []
+
+    mrows = []
+    for d in last_decisions[-80:]:
+        if not isinstance(d, dict):
+            continue
+        sym = str(d.get('symbol') or d.get('asset') or '').strip()
+        if not sym:
+            continue
+        try:
+            usd24 = float(d.get('usd_strength_24h') or 0.0)
+        except Exception:
+            usd24 = 0.0
+        try:
+            align = float(d.get('macro_align') or 0.0)
+        except Exception:
+            align = 0.0
+        mrows.append({'symbol': sym, 'usd_strength_24h': usd24, 'macro_align': align})
+
+    if mrows:
+        mdf = pd.DataFrame(mrows)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("USD strength avg (24h)", f"{mdf['usd_strength_24h'].mean():+.2f}%")
+        c2.metric("Macro align avg", f"{mdf['macro_align'].mean():+.2f}")
+        c3.metric("Samples", int(len(mdf)))
+
+        figm = go.Figure()
+        figm.add_trace(go.Scatter(y=mdf['usd_strength_24h'], mode='lines', name='USD strength 24h (%)'))
+        figm.add_hline(y=0, line_dash='dash', line_color='gray')
+        figm.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(figm, use_container_width=True)
+
+        st.dataframe(mdf.tail(20), width='stretch')
+    else:
+        st.info("Macro data will appear after new decisions. Run the bot for a few cycles.")
+else:
+    st.info("Start the bot to populate macro data.")
 
 st.markdown("---")
 

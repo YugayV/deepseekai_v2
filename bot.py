@@ -193,8 +193,10 @@ WAVE_LEVELS = int(os.getenv("WAVE_LEVELS", 4))
 WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.30))
 USE_WAVE_FILTER_DEFAULT = (os.getenv("USE_WAVE_FILTER_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 
-MACRO_SYMBOLS = [s.strip() for s in os.getenv("MACRO_SYMBOLS", "DX-Y.NYB,GC=F,CL=F,^TNX,^VIX").split(",") if s.strip()]
+MACRO_SYMBOLS = [s.strip() for s in os.getenv("MACRO_SYMBOLS", "DX-Y.NYB,UUP,GLD,GC=F,CL=F,^TNX,^VIX").split(",") if s.strip()]
 USE_MACRO_DEFAULT = (os.getenv("USE_MACRO_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+USE_MACRO_SCORE_DEFAULT = (os.getenv("USE_MACRO_SCORE_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+MACRO_ALLOC_REDUCE_PCT_DEFAULT = float(os.getenv("MACRO_ALLOC_REDUCE_PCT_DEFAULT", 35.0))
 USE_POLYMARKET_DEFAULT = (os.getenv("USE_POLYMARKET_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 POLYMARKET_FEED_URL = (os.getenv("POLYMARKET_FEED_URL") or "").strip()
 DXY_TREND_BLOCK_PCT = float(os.getenv("DXY_TREND_BLOCK_PCT", 0.20))
@@ -1369,8 +1371,47 @@ def fetch_data(symbol):
                 return cached.get("df")
             return None
 
-        df = df[["Open", "High", "Low", "Close", "Volume"]]
-        df.columns = ["open", "high", "low", "close", "volume"]
+        try:
+            if isinstance(df.columns, pd.MultiIndex):
+                def _pick(name: str):
+                    if name in df.columns.get_level_values(0):
+                        s = df[name]
+                        return s.iloc[:, 0] if getattr(s, 'ndim', 1) > 1 else s
+                    for col in df.columns:
+                        if str(col[0]).lower() == name.lower():
+                            return df[col]
+                    return None
+
+                o = _pick('Open')
+                h = _pick('High')
+                l = _pick('Low')
+                c = _pick('Close')
+                v = _pick('Volume')
+
+                df = pd.DataFrame({
+                    'open': pd.to_numeric(o, errors='coerce') if o is not None else np.nan,
+                    'high': pd.to_numeric(h, errors='coerce') if h is not None else np.nan,
+                    'low': pd.to_numeric(l, errors='coerce') if l is not None else np.nan,
+                    'close': pd.to_numeric(c, errors='coerce') if c is not None else np.nan,
+                    'volume': pd.to_numeric(v, errors='coerce') if v is not None else 0.0,
+                })
+            else:
+                cols = df.columns
+                use = [x for x in ("Open", "High", "Low", "Close") if x in cols]
+                if not use:
+                    return None
+                out_df = df[use].copy()
+                out_df.columns = [x.lower() for x in use]
+                if "Volume" in cols:
+                    out_df["volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+                else:
+                    out_df["volume"] = 0.0
+                df = out_df
+        except Exception:
+            df = df[["Open", "High", "Low", "Close", "Volume"]]
+            df.columns = ["open", "high", "low", "close", "volume"]
+
+        df = df.dropna(subset=["close"]).copy()
 
         out = calculate_indicators(df)
         _YF_DATA_CACHE[symbol] = {"ts": now, "df": out}
@@ -1431,7 +1472,19 @@ def fetch_macro_snapshot():
             if df is None or df.empty:
                 continue
 
-            close = df["Close"].astype(float).dropna()
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if 'Close' in df.columns.get_level_values(0):
+                        c = df['Close']
+                        close = (c.iloc[:, 0] if getattr(c, 'ndim', 1) > 1 else c)
+                    else:
+                        close = df.iloc[:, 0]
+                else:
+                    close = df["Close"] if "Close" in df.columns else df.iloc[:, 0]
+
+                close = pd.to_numeric(close, errors='coerce').dropna()
+            except Exception:
+                close = pd.Series(dtype=float)
             if close.empty:
                 continue
 
@@ -1457,6 +1510,72 @@ def fetch_macro_snapshot():
         pass
 
     return out
+
+
+def _fx_parts(symbol: str):
+    s = str(symbol or "")
+    if not s.endswith("=X"):
+        return None
+    pair = s.replace("=X", "")
+    if len(pair) < 6:
+        return None
+    base = pair[0:3]
+    quote = pair[3:6]
+    if not base.isalpha() or not quote.isalpha():
+        return None
+    return base.upper(), quote.upper()
+
+
+def _macro_usd_strength_24h(macro: dict) -> float:
+    src = None
+    if isinstance(macro.get("UUP"), dict):
+        src = macro.get("UUP")
+    elif isinstance(macro.get("DX-Y.NYB"), dict):
+        src = macro.get("DX-Y.NYB")
+
+    gold = None
+    if isinstance(macro.get("GLD"), dict):
+        gold = macro.get("GLD")
+    elif isinstance(macro.get("GC=F"), dict):
+        gold = macro.get("GC=F")
+
+    try:
+        u = float((src or {}).get("ret_24") or 0.0)
+    except Exception:
+        u = 0.0
+    try:
+        g = float((gold or {}).get("ret_24") or 0.0)
+    except Exception:
+        g = 0.0
+
+    usd_strength = float(u) - 0.5 * float(g)
+    return float(usd_strength) if np.isfinite(usd_strength) else 0.0
+
+
+def _macro_align_for_fx(symbol: str, side: str, macro: dict) -> tuple[float, float]:
+    parts = _fx_parts(symbol)
+    if parts is None:
+        return 0.0, 0.0
+
+    base, quote = parts
+    s = str(side or "long").lower()
+
+    if s not in ("long", "short"):
+        s = "long"
+
+    if quote == "USD":
+        desired_usd = -1.0 if s == "long" else 1.0
+    elif base == "USD":
+        desired_usd = 1.0 if s == "long" else -1.0
+    else:
+        return 0.0, 0.0
+
+    usd_strength = _macro_usd_strength_24h(macro)
+    align = float(desired_usd) * float(usd_strength)
+    if not np.isfinite(align):
+        align = 0.0
+
+    return float(align), float(usd_strength)
 
 
 def fetch_polymarket_snapshot():
@@ -2142,6 +2261,8 @@ class TradingBot:
             "atr_sl_mult": float(ATR_SL_MULT),
             "atr_tp_mult": float(ATR_TP_MULT),
             "use_macro": bool(USE_MACRO_DEFAULT),
+            "use_macro_score": bool(USE_MACRO_SCORE_DEFAULT),
+            "macro_alloc_reduce_pct": float(MACRO_ALLOC_REDUCE_PCT_DEFAULT),
             "use_polymarket": bool(USE_POLYMARKET_DEFAULT),
             "use_wave_filter": bool(USE_WAVE_FILTER_DEFAULT),
             "wave_trend_block_pct": float(WAVE_TREND_BLOCK_PCT),
@@ -3226,6 +3347,32 @@ class TradingBot:
                             decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
                             logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
 
+                use_macro_score = bool(self.strategy.get('use_macro_score', USE_MACRO_SCORE_DEFAULT))
+                if use_macro_score and isinstance(macro, dict):
+                    align, usd_strength = _macro_align_for_fx(symbol, side, macro)
+                    decision['macro_align'] = float(align)
+                    decision['usd_strength_24h'] = float(usd_strength)
+
+                    if decision.get('trade_decision') == 'YES' and float(align) < -0.20:
+                        try:
+                            reduce_pct = float(self.strategy.get('macro_alloc_reduce_pct', MACRO_ALLOC_REDUCE_PCT_DEFAULT) or MACRO_ALLOC_REDUCE_PCT_DEFAULT)
+                        except Exception:
+                            reduce_pct = float(MACRO_ALLOC_REDUCE_PCT_DEFAULT)
+
+                        try:
+                            base_alloc = float(decision.get('trade_alloc_pct') or self.strategy.get('max_trade_alloc_pct', MAX_POSITION_SIZE) or MAX_POSITION_SIZE)
+                        except Exception:
+                            base_alloc = float(MAX_POSITION_SIZE)
+
+                        reduce_pct = max(0.0, min(90.0, float(reduce_pct)))
+                        new_alloc = float(base_alloc) * (1.0 - (reduce_pct / 100.0))
+                        new_alloc = max(1.0, min(float(base_alloc), float(new_alloc)))
+                        decision['trade_alloc_pct'] = float(new_alloc)
+
+                        rs = str(decision.get('reasoning_short') or '').strip()
+                        suffix = f"Macro alloc -{reduce_pct:.0f}%"
+                        decision['reasoning_short'] = (f"{rs}; {suffix}" if rs else suffix)[:250]
+
                 if decision.get('trade_decision') == 'YES':
                     logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)
@@ -3276,7 +3423,7 @@ class TradingBot:
 
         ctx = {"ts": str(datetime.now())}
         ctx["filters"] = dict(self.strategy or {})
-        if bool(self.strategy.get("use_macro", USE_MACRO_DEFAULT)):
+        if bool(self.strategy.get("use_macro", USE_MACRO_DEFAULT)) or bool(self.strategy.get("use_dxy_filter", USE_DXY_FILTER_DEFAULT)) or bool(self.strategy.get("use_macro_score", USE_MACRO_SCORE_DEFAULT)):
             ctx["macro"] = fetch_macro_snapshot()
         if bool(self.strategy.get("use_polymarket", USE_POLYMARKET_DEFAULT)):
             ctx["polymarket"] = fetch_polymarket_snapshot()
