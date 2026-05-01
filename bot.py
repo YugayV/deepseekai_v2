@@ -3487,6 +3487,8 @@ class TradingBot:
 
             current_price = df['close'].iloc[-1]
 
+            ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}
+
             try:
                 if symbol in self.engine.positions and isinstance(self.engine.positions.get(symbol), dict):
                     self.engine.positions[symbol]['last_price'] = float(current_price)
@@ -3532,7 +3534,6 @@ class TradingBot:
                 })
 
                 try:
-                    ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}
                     self._review_and_persist_closed_trade(closed, df, ctx)
                 except Exception as e:
                     logger.error(f"Trade review/persist error: {e}")
