@@ -193,6 +193,11 @@ WAVE_LEVELS = int(os.getenv("WAVE_LEVELS", 4))
 WAVE_TREND_BLOCK_PCT = float(os.getenv("WAVE_TREND_BLOCK_PCT", 0.30))
 USE_WAVE_FILTER_DEFAULT = (os.getenv("USE_WAVE_FILTER_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 
+USE_ORB_DEFAULT = (os.getenv("USE_ORB_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+ORB_MIN_RANGE_PCT_DEFAULT = float(os.getenv("ORB_MIN_RANGE_PCT_DEFAULT", 0.05))
+ORB_MAX_RANGE_PCT_DEFAULT = float(os.getenv("ORB_MAX_RANGE_PCT_DEFAULT", 2.50))
+ORB_ALLOC_REDUCE_PCT_DEFAULT = float(os.getenv("ORB_ALLOC_REDUCE_PCT_DEFAULT", 35.0))
+
 MACRO_SYMBOLS = [s.strip() for s in os.getenv("MACRO_SYMBOLS", "DX-Y.NYB,UUP,GLD,GC=F,CL=F,^TNX,^VIX").split(",") if s.strip()]
 USE_MACRO_DEFAULT = (os.getenv("USE_MACRO_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 USE_MACRO_SCORE_DEFAULT = (os.getenv("USE_MACRO_SCORE_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
@@ -800,6 +805,32 @@ def calculate_indicators(df):
     ], axis=1).max(axis=1)
     df['atr'] = tr.ewm(alpha=1/14, adjust=False).mean()
 
+    # ORB (24h rolling range breakout)
+    try:
+        df['or_high_24'] = df['high'].rolling(24).max()
+        df['or_low_24'] = df['low'].rolling(24).min()
+        df['or_range'] = df['or_high_24'] - df['or_low_24']
+        df['or_range_pct'] = (df['or_range'] / df['close']) * 100.0
+        df['breakout_up'] = (df['close'] > df['or_high_24'].shift(1)).astype(int)
+        df['breakout_down'] = (df['close'] < df['or_low_24'].shift(1)).astype(int)
+    except Exception:
+        df['or_high_24'] = np.nan
+        df['or_low_24'] = np.nan
+        df['or_range'] = np.nan
+        df['or_range_pct'] = np.nan
+        df['breakout_up'] = 0
+        df['breakout_down'] = 0
+
+    # Sessions (FX helpers)
+    try:
+        df['hour'] = pd.to_datetime(df.index).hour
+        df['is_eu_session'] = ((df['hour'] >= 7) & (df['hour'] <= 15)).astype(int)
+        df['is_us_session'] = ((df['hour'] >= 13) & (df['hour'] <= 21)).astype(int)
+    except Exception:
+        df['hour'] = np.nan
+        df['is_eu_session'] = 0
+        df['is_us_session'] = 0
+
     # Bollinger Bands (20, 2)
     bb_mid = df['close'].rolling(20).mean()
     bb_std = df['close'].rolling(20).std()
@@ -884,6 +915,9 @@ class AIAdvisor:
         macd_h = float(latest.get('macd_hist', 0.0) or 0.0)
         ema_fast = float(latest.get('ema_8', 0.0) or 0.0)
         ema_slow = float(latest.get('ema_21', 0.0) or 0.0)
+        or_range_pct = float(latest.get('or_range_pct', 0.0) or 0.0)
+        breakout_up = int(latest.get('breakout_up', 0) or 0)
+        breakout_down = int(latest.get('breakout_down', 0) or 0)
 
         ctx = context or {}
         macro = ctx.get("macro") if isinstance(ctx, dict) else None
@@ -928,6 +962,8 @@ INPUTS:
 - EMA8/EMA21: {ema_fast:.6f} / {ema_slow:.6f}
 - RSI(14): {rsi_v:.2f}
 - MACD hist: {macd_h:.6f}
+- ORB 24h range (%): {or_range_pct:.3f}
+- ORB breakout up/down: {breakout_up}/{breakout_down}
 - Wave trend (Haar, %): {float(latest.get('wave_trend', 0.0)):.3f}
 - Wave energy (Haar): {float(latest.get('wave_energy', 0.0)):.6f}
 - Macro/commodities snapshot: {"; ".join(macro_lines) if macro_lines else "N/A"}
@@ -2426,6 +2462,10 @@ class TradingBot:
             "use_polymarket": bool(USE_POLYMARKET_DEFAULT),
             "use_wave_filter": bool(USE_WAVE_FILTER_DEFAULT),
             "wave_trend_block_pct": float(WAVE_TREND_BLOCK_PCT),
+            "use_orb": bool(USE_ORB_DEFAULT),
+            "orb_min_range_pct": float(ORB_MIN_RANGE_PCT_DEFAULT),
+            "orb_max_range_pct": float(ORB_MAX_RANGE_PCT_DEFAULT),
+            "orb_alloc_reduce_pct": float(ORB_ALLOC_REDUCE_PCT_DEFAULT),
             "use_dxy_filter": bool(USE_DXY_FILTER_DEFAULT),
             "dxy_trend_block_pct": float(DXY_TREND_BLOCK_PCT),
             "risk_guard_enabled": bool(RISK_GUARD_ENABLED_DEFAULT),
@@ -2832,6 +2872,10 @@ class TradingBot:
             self.strategy["use_polymarket"] = _as_bool(cmd_data.get("use_polymarket"), self.strategy.get("use_polymarket", USE_POLYMARKET_DEFAULT))
             self.strategy["use_wave_filter"] = _as_bool(cmd_data.get("use_wave_filter"), self.strategy.get("use_wave_filter", USE_WAVE_FILTER_DEFAULT))
             self.strategy["wave_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("wave_trend_block_pct"), self.strategy.get("wave_trend_block_pct", WAVE_TREND_BLOCK_PCT)))
+            self.strategy["use_orb"] = _as_bool(cmd_data.get("use_orb"), self.strategy.get("use_orb", USE_ORB_DEFAULT))
+            self.strategy["orb_min_range_pct"] = max(0.0, _as_float(cmd_data.get("orb_min_range_pct"), self.strategy.get("orb_min_range_pct", ORB_MIN_RANGE_PCT_DEFAULT)))
+            self.strategy["orb_max_range_pct"] = max(0.0, _as_float(cmd_data.get("orb_max_range_pct"), self.strategy.get("orb_max_range_pct", ORB_MAX_RANGE_PCT_DEFAULT)))
+            self.strategy["orb_alloc_reduce_pct"] = max(0.0, min(90.0, _as_float(cmd_data.get("orb_alloc_reduce_pct"), self.strategy.get("orb_alloc_reduce_pct", ORB_ALLOC_REDUCE_PCT_DEFAULT))))
             self.strategy["use_dxy_filter"] = _as_bool(cmd_data.get("use_dxy_filter"), self.strategy.get("use_dxy_filter", USE_DXY_FILTER_DEFAULT))
             self.strategy["dxy_trend_block_pct"] = max(0.0, _as_float(cmd_data.get("dxy_trend_block_pct"), self.strategy.get("dxy_trend_block_pct", DXY_TREND_BLOCK_PCT)))
 
@@ -3024,6 +3068,18 @@ class TradingBot:
         if rsi_v > 40:
             short_score += 1
 
+        if bool(getattr(self, 'strategy', {}).get('use_orb', USE_ORB_DEFAULT)):
+            try:
+                bup = int(latest.get('breakout_up', 0) or 0)
+                bdn = int(latest.get('breakout_down', 0) or 0)
+            except Exception:
+                bup, bdn = 0, 0
+
+            if bup == 1:
+                long_score += 1
+            if bdn == 1:
+                short_score += 1
+
         best = max(long_score, short_score)
         if best >= 3:
             strength = 'strong'
@@ -3088,8 +3144,11 @@ class TradingBot:
             rsi_v = float(latest.get('rsi', 50.0) or 50.0)
             wave_64 = float(latest.get('wave_trend_64', latest.get('wave_trend', 0.0)) or 0.0)
             wave_128 = float(latest.get('wave_trend_128', 0.0) or 0.0)
+            bup = int(latest.get('breakout_up', 0) or 0)
+            bdn = int(latest.get('breakout_down', 0) or 0)
+            or_range_pct = float(latest.get('or_range_pct', 0.0) or 0.0)
         except Exception:
-            ema_fast, ema_slow, macd_h, rsi_v, wave_64, wave_128 = 0.0, 0.0, 0.0, 50.0, 0.0, 0.0
+            ema_fast, ema_slow, macd_h, rsi_v, wave_64, wave_128, bup, bdn, or_range_pct = 0.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0, 0, 0.0
 
         score = 0
 
@@ -3122,6 +3181,25 @@ class TradingBot:
                 score += 1
             if side == 'short' and wave_128 <= 0:
                 score += 1
+
+        use_orb = bool(self.strategy.get('use_orb', USE_ORB_DEFAULT))
+        if use_orb:
+            if side == 'long' and bup == 1:
+                score += 2
+            if side == 'short' and bdn == 1:
+                score += 2
+
+            try:
+                orb_min = float(self.strategy.get('orb_min_range_pct', ORB_MIN_RANGE_PCT_DEFAULT) or ORB_MIN_RANGE_PCT_DEFAULT)
+                orb_max = float(self.strategy.get('orb_max_range_pct', ORB_MAX_RANGE_PCT_DEFAULT) or ORB_MAX_RANGE_PCT_DEFAULT)
+            except Exception:
+                orb_min, orb_max = float(ORB_MIN_RANGE_PCT_DEFAULT), float(ORB_MAX_RANGE_PCT_DEFAULT)
+
+            if np.isfinite(or_range_pct):
+                if float(or_range_pct) < float(orb_min):
+                    score -= 1
+                if float(or_range_pct) > float(orb_max):
+                    score -= 1
 
         return int(score)
 
@@ -3623,6 +3701,37 @@ class TradingBot:
                             decision['trade_alloc_pct'] = float(self.strategy.get('max_trade_alloc_pct', MAX_POSITION_SIZE) or MAX_POSITION_SIZE)
                         except Exception:
                             decision['trade_alloc_pct'] = float(MAX_POSITION_SIZE)
+
+                    if bool(self.strategy.get('use_orb', USE_ORB_DEFAULT)):
+                        try:
+                            latest = df.iloc[-1]
+                            orp = float(latest.get('or_range_pct', 0.0) or 0.0)
+                        except Exception:
+                            orp = 0.0
+
+                        try:
+                            orb_min = float(self.strategy.get('orb_min_range_pct', ORB_MIN_RANGE_PCT_DEFAULT) or ORB_MIN_RANGE_PCT_DEFAULT)
+                            orb_max = float(self.strategy.get('orb_max_range_pct', ORB_MAX_RANGE_PCT_DEFAULT) or ORB_MAX_RANGE_PCT_DEFAULT)
+                            reduce_pct = float(self.strategy.get('orb_alloc_reduce_pct', ORB_ALLOC_REDUCE_PCT_DEFAULT) or ORB_ALLOC_REDUCE_PCT_DEFAULT)
+                        except Exception:
+                            orb_min, orb_max, reduce_pct = float(ORB_MIN_RANGE_PCT_DEFAULT), float(ORB_MAX_RANGE_PCT_DEFAULT), float(ORB_ALLOC_REDUCE_PCT_DEFAULT)
+
+                        decision['or_range_pct'] = float(orp) if np.isfinite(orp) else 0.0
+
+                        if np.isfinite(orp) and (orp < orb_min or orp > orb_max):
+                            try:
+                                base_alloc = float(decision.get('trade_alloc_pct') or MAX_POSITION_SIZE)
+                            except Exception:
+                                base_alloc = float(MAX_POSITION_SIZE)
+
+                            reduce_pct = max(0.0, min(90.0, float(reduce_pct)))
+                            new_alloc = float(base_alloc) * (1.0 - (reduce_pct / 100.0))
+                            new_alloc = max(1.0, min(float(base_alloc), float(new_alloc)))
+                            decision['trade_alloc_pct'] = float(new_alloc)
+
+                            rs = str(decision.get('reasoning_short') or '').strip()
+                            suffix = f"ORB alloc -{reduce_pct:.0f}% (range {orp:.2f}%)"
+                            decision['reasoning_short'] = (f"{rs}; {suffix}" if rs else suffix)[:250]
 
                     logger.info(f"✅ AI signal: {decision.get('side','long').upper()} {symbol} | TP={decision.get('tp_pct')}% SL={decision.get('sl_pct')}% | strength={decision.get('signal_strength')} | mode={decision.get('strategy_mode')}")
                     position = self.engine.execute_entry(symbol, decision, current_price)

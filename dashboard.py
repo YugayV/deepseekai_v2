@@ -334,6 +334,10 @@ quality_label = st.sidebar.selectbox("Quality mode", ["High (fewer)", "Balanced"
 quality_mode = "high" if quality_label.startswith("High") else "balanced"
 min_setup_score = st.sidebar.slider("Min setup score", 0, 5, 4 if is_real else 3, 1)
 use_session_filter = st.sidebar.checkbox("Session filter (forex)", value=is_real)
+use_orb = st.sidebar.checkbox("Use ORB breakout (24h range)", value=False)
+orb_min_range_pct = st.sidebar.slider("ORB min range (%)", 0.0, 1.0, 0.05, 0.01)
+orb_max_range_pct = st.sidebar.slider("ORB max range (%)", 0.5, 5.0, 2.50, 0.05)
+orb_alloc_reduce_pct = st.sidebar.slider("ORB allocation reduce (%)", 0.0, 90.0, 35.0, 1.0)
 min_atr_pct = st.sidebar.slider("Min ATR%", 0.0, 5.0, 0.05, 0.01)
 max_atr_pct = st.sidebar.slider("Max ATR%", 0.0, 5.0, 1.50, 0.05)
 max_hold_bars = st.sidebar.slider("Max hold (bars)", 0, 48, 6, 1, key="max_hold_bars")
@@ -387,6 +391,10 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
             "quality_mode": str(quality_mode),
             "min_setup_score": int(min_setup_score),
             "use_session_filter": bool(use_session_filter),
+            "use_orb": bool(use_orb),
+            "orb_min_range_pct": float(orb_min_range_pct),
+            "orb_max_range_pct": float(orb_max_range_pct),
+            "orb_alloc_reduce_pct": float(orb_alloc_reduce_pct),
             "min_atr_pct": float(min_atr_pct),
             "max_atr_pct": float(max_atr_pct),
             "risk_per_trade_pct": float(risk_per_trade_pct),
@@ -433,6 +441,10 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
         "quality_mode": str(quality_mode),
         "min_setup_score": int(min_setup_score),
         "use_session_filter": bool(use_session_filter),
+        "use_orb": bool(use_orb),
+        "orb_min_range_pct": float(orb_min_range_pct),
+        "orb_max_range_pct": float(orb_max_range_pct),
+        "orb_alloc_reduce_pct": float(orb_alloc_reduce_pct),
         "min_atr_pct": float(min_atr_pct),
         "max_atr_pct": float(max_atr_pct),
         "risk_per_trade_pct": float(risk_per_trade_pct),
@@ -638,6 +650,66 @@ if portfolio:
     col4.metric("🎯 Active Positions", len(positions))
     col5.metric("💹 Total Trades", len(trades) if not trades.empty else 0)
 
+    realized_pnl = 0.0
+    realized_pnl_pct = 0.0
+    win_rate = 0.0
+    trades_today_pnl = 0.0
+
+    if isinstance(trades, pd.DataFrame) and (not trades.empty) and ('pnl' in trades.columns):
+        t = trades.copy()
+        t['pnl'] = pd.to_numeric(t['pnl'], errors='coerce').fillna(0.0)
+        realized_pnl = float(t['pnl'].sum())
+        realized_pnl_pct = (realized_pnl / start_capital) * 100.0 if start_capital > 0 else 0.0
+
+        if 'exit_date' in t.columns:
+            dt = pd.to_datetime(t['exit_date'], errors='coerce', utc=False)
+            today = datetime.utcnow().date()
+            t_today = t[dt.dt.date == today]
+            trades_today_pnl = float(pd.to_numeric(t_today['pnl'], errors='coerce').fillna(0.0).sum()) if (t_today is not None and not t_today.empty) else 0.0
+
+        if 'win' in t.columns:
+            w = pd.to_numeric(t['win'], errors='coerce')
+            if w.notna().any():
+                win_rate = float((w.fillna(0).astype(int) == 1).mean() * 100.0)
+        else:
+            win_rate = float((t['pnl'] > 0).mean() * 100.0) if len(t) > 0 else 0.0
+
+    try:
+        unreal = float(portfolio.get('unrealized_pnl', 0.0) or 0.0)
+    except Exception:
+        unreal = 0.0
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("✅ Realized PnL", f"${realized_pnl:+.2f}")
+    p2.metric("🟡 Unrealized PnL", f"${unreal:+.2f}")
+    p3.metric("📅 Today PnL", f"${trades_today_pnl:+.2f}")
+    p4.metric("🏆 Win rate", f"{win_rate:.1f}%")
+
+    with st.expander("📈 P&L chart", expanded=False):
+        if isinstance(trades, pd.DataFrame) and (not trades.empty) and ('pnl' in trades.columns):
+            t = trades.copy()
+            t['pnl'] = pd.to_numeric(t['pnl'], errors='coerce').fillna(0.0)
+
+            if 'exit_date' in t.columns:
+                t['exit_dt'] = pd.to_datetime(t['exit_date'], errors='coerce')
+                t = t.sort_values('exit_dt')
+            else:
+                t = t.reset_index(drop=True)
+
+            t['cum_equity'] = float(start_capital) + t['pnl'].cumsum()
+
+            figp = go.Figure()
+            figp.add_trace(go.Scatter(x=list(range(len(t))), y=t['cum_equity'], mode='lines', name='Realized equity'))
+            figp.add_hline(y=float(start_capital), line_dash='dash', line_color='gray')
+            figp.update_layout(height=260, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(figp, use_container_width=True)
+
+            cols = [c for c in ['exit_date', 'asset', 'symbol', 'side', 'exit_reason', 'pnl', 'pnl_percent'] if c in t.columns]
+            if cols:
+                st.dataframe(t[cols].tail(50), use_container_width=True)
+        else:
+            st.info("P&L появится после первых закрытых сделок (trade_history.csv).")
+
     used_margin = portfolio.get('used_margin')
     unrealized_pnl = portfolio.get('unrealized_pnl')
     with st.expander("ℹ️ Balance vs Equity", expanded=False):
@@ -647,6 +719,105 @@ if portfolio:
             st.write(f"Used margin: ${float(used_margin):.2f}")
         if unrealized_pnl is not None:
             st.write(f"Unrealized PnL: ${float(unrealized_pnl):+.2f}")
+
+    st.markdown("### 💰 P&L")
+
+    realized_pnl = 0.0
+    today_pnl = 0.0
+    win_rate = 0.0
+
+    t = None
+    if isinstance(trades, pd.DataFrame) and (not trades.empty) and ('pnl' in trades.columns):
+        t = trades.copy()
+        t['pnl'] = pd.to_numeric(t['pnl'], errors='coerce').fillna(0.0)
+        realized_pnl = float(t['pnl'].sum())
+
+        if 'exit_date' in t.columns:
+            dt = pd.to_datetime(t['exit_date'], errors='coerce')
+            today = datetime.utcnow().date()
+            m = dt.dt.date == today
+            if m is not None:
+                today_pnl = float(t.loc[m, 'pnl'].sum()) if m.any() else 0.0
+
+        if 'win' in t.columns:
+            w = pd.to_numeric(t['win'], errors='coerce')
+            if w.notna().any():
+                win_rate = float((w.fillna(0).astype(int) == 1).mean() * 100.0)
+            else:
+                win_rate = float((t['pnl'] > 0).mean() * 100.0) if len(t) else 0.0
+        else:
+            win_rate = float((t['pnl'] > 0).mean() * 100.0) if len(t) else 0.0
+
+    try:
+        unreal = float(unrealized_pnl or 0.0)
+    except Exception:
+        unreal = 0.0
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("✅ Realized", f"${realized_pnl:+.2f}")
+    p2.metric("🟡 Unrealized", f"${unreal:+.2f}")
+    p3.metric("📅 Today", f"${today_pnl:+.2f}")
+    p4.metric("🏆 Win rate", f"{win_rate:.1f}%")
+
+    with st.expander("📈 P&L analytics", expanded=False):
+        if t is None or t.empty:
+            st.info("P&L появится после первых закрытых сделок (trade_history.csv).")
+        else:
+            if 'exit_date' in t.columns:
+                t['exit_dt'] = pd.to_datetime(t['exit_date'], errors='coerce')
+                t = t.sort_values('exit_dt')
+            else:
+                t = t.reset_index(drop=True)
+
+            t['cum_equity'] = float(start_capital) + t['pnl'].cumsum()
+
+            eq = t['cum_equity'].astype(float)
+            roll_max = eq.cummax()
+            dd = (eq - roll_max)
+            dd_pct = (dd / roll_max.replace(0, np.nan)) * 100.0
+            max_dd = float(dd.min()) if len(dd) else 0.0
+            max_dd_pct = float(dd_pct.min()) if len(dd_pct) else 0.0
+
+            profits = t.loc[t['pnl'] > 0, 'pnl']
+            losses = t.loc[t['pnl'] < 0, 'pnl']
+            gross_profit = float(profits.sum()) if len(profits) else 0.0
+            gross_loss = float(losses.sum()) if len(losses) else 0.0
+            profit_factor = (gross_profit / abs(gross_loss)) if gross_loss < 0 else (float('inf') if gross_profit > 0 else 0.0)
+
+            avg_win = float(profits.mean()) if len(profits) else 0.0
+            avg_loss = float(losses.mean()) if len(losses) else 0.0
+            expectancy = float(t['pnl'].mean()) if len(t) else 0.0
+
+            a1, a2, a3, a4 = st.columns(4)
+            a1.metric("Profit factor", f"{profit_factor:.2f}" if np.isfinite(profit_factor) else "∞")
+            a2.metric("Avg win", f"${avg_win:+.2f}")
+            a3.metric("Avg loss", f"${avg_loss:+.2f}")
+            a4.metric("Expectancy", f"${expectancy:+.2f}/trade")
+
+            d1, d2 = st.columns(2)
+            d1.metric("Max drawdown", f"${max_dd:.2f}")
+            d2.metric("Max drawdown (%)", f"{max_dd_pct:.2f}%")
+
+            figp = go.Figure()
+            figp.add_trace(go.Scatter(x=list(range(len(t))), y=t['cum_equity'], mode='lines', name='Realized equity'))
+            figp.add_hline(y=float(start_capital), line_dash='dash', line_color='gray')
+            figp.update_layout(height=260, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(figp, use_container_width=True)
+
+            figh = go.Figure()
+            figh.add_trace(go.Histogram(x=t['pnl'], nbinsx=30, name='PnL distribution'))
+            figh.update_layout(height=220, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(figh, use_container_width=True)
+
+            if 'exit_reason' in t.columns:
+                rc = t['exit_reason'].astype(str).value_counts().head(10).reset_index()
+                rc.columns = ['reason', 'count']
+                st.markdown("### Exit reasons")
+                st.dataframe(rc, use_container_width=True)
+
+            cols = [c for c in ['exit_date', 'asset', 'symbol', 'side', 'exit_reason', 'pnl', 'pnl_percent', 'is_partial'] if c in t.columns]
+            if cols:
+                st.dataframe(t[cols].tail(80), use_container_width=True)
 
     # Detailed Portfolio View
     st.markdown("### 🎯 Active Positions")
@@ -760,6 +931,11 @@ if chart_view == "Dual (Plotly + TradingView)":
         df = df.copy()
         df['sma_20'] = df['close'].rolling(20).mean()
         df['sma_50'] = df['close'].rolling(50).mean()
+        df['or_high_24'] = df['high'].rolling(24).max().shift(1)
+        df['or_low_24'] = df['low'].rolling(24).min().shift(1)
+        df['or_range_pct'] = ((df['or_high_24'] - df['or_low_24']) / df['close']) * 100.0
+        df['breakout_up'] = (df['close'] > df['or_high_24']).astype(int)
+        df['breakout_down'] = (df['close'] < df['or_low_24']).astype(int)
 
         fig = make_subplots(
             rows=2, cols=1,
@@ -790,6 +966,29 @@ if chart_view == "Dual (Plotly + TradingView)":
             row=1, col=1
         )
 
+        if use_orb:
+            fig.add_trace(
+                go.Scatter(x=df.index, y=df['or_high_24'], name='ORB 24h High', line=dict(color='springgreen', width=1, dash='dash')),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=df['or_low_24'], name='ORB 24h Low', line=dict(color='tomato', width=1, dash='dash')),
+                row=1, col=1
+            )
+
+            bu = df[df['breakout_up'] == 1]
+            bd = df[df['breakout_down'] == 1]
+            if not bu.empty:
+                fig.add_trace(
+                    go.Scatter(x=bu.index, y=bu['close'], mode='markers', name='ORB Breakout Up', marker=dict(color='springgreen', size=7, symbol='triangle-up')),
+                    row=1, col=1
+                )
+            if not bd.empty:
+                fig.add_trace(
+                    go.Scatter(x=bd.index, y=bd['close'], mode='markers', name='ORB Breakout Down', marker=dict(color='tomato', size=7, symbol='triangle-down')),
+                    row=1, col=1
+                )
+
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
@@ -815,6 +1014,14 @@ if chart_view == "Dual (Plotly + TradingView)":
         )
         fig.update_xaxes(title_text="Date", row=2, col=1)
         st.plotly_chart(fig, use_container_width=True)
+
+        if use_orb:
+            f_or = go.Figure()
+            f_or.add_trace(go.Scatter(x=df.index, y=df['or_range_pct'], mode='lines', name='ORB range (%)'))
+            f_or.add_hline(y=float(orb_min_range_pct), line_dash='dash', line_color='gray')
+            f_or.add_hline(y=float(orb_max_range_pct), line_dash='dash', line_color='gray')
+            f_or.update_layout(height=180, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(f_or, use_container_width=True)
 
     st.markdown("---")
 
