@@ -268,7 +268,11 @@ def _get_bot_json(path: str):
 st.sidebar.subheader("📊 Assets")
 assets = st.sidebar.multiselect(
     "Select assets to display",
-    ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD"],
+    [
+        "EURUSD=X", "GBPUSD=X", "USDJPY=X",
+        "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD", "DOGE-USD",
+        "AVAX-USD", "LINK-USD", "DOT-USD", "LTC-USD", "TRX-USD",
+    ],
     default=["EURUSD=X"]
 )
 
@@ -480,6 +484,7 @@ if col_btn1.button("🚀 Start All", width='stretch'):
     st.sidebar.success("All pairs started!")
     _post_bot_command({
         "command": "start_all",
+        "symbols": list(assets or []),
         "tp": float(manual_tp),
         "sl": float(manual_sl),
         "leverage": int(leverage),

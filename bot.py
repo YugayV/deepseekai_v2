@@ -256,7 +256,10 @@ YF_MIN_FETCH_INTERVAL_SECONDS = int(os.getenv("YF_MIN_FETCH_INTERVAL_SECONDS", 1
 YF_CACHE_TTL_SECONDS = int(os.getenv("YF_CACHE_TTL_SECONDS", 3600))
 
 FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
-CRYPTO_SYMBOLS = [s.strip() for s in os.getenv("CRYPTO_SYMBOLS", "").split(",") if s.strip()]
+CRYPTO_SYMBOLS = [s.strip() for s in os.getenv(
+    "CRYPTO_SYMBOLS",
+    "BTC-USD,ETH-USD,SOL-USD,BNB-USD,XRP-USD,ADA-USD,DOGE-USD,AVAX-USD,LINK-USD,DOT-USD,LTC-USD,TRX-USD"
+).split(",") if s.strip()]
 ALL_SYMBOLS = FOREX_SYMBOLS + CRYPTO_SYMBOLS
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -2457,6 +2460,7 @@ class TradingBot:
             "sl_pct": float(STOP_LOSS_PERCENT),
         }
         self.symbol_risk = {s: {"tp_pct": float(self.global_risk["tp_pct"]), "sl_pct": float(self.global_risk["sl_pct"])} for s in ALL_SYMBOLS}
+        self.enabled_symbols = list(ALL_SYMBOLS)
 
         self.strategy_mode = STRATEGY_MODE
         self.strategy = {
@@ -2734,7 +2738,41 @@ class TradingBot:
             return
 
         if cmd == "start_all":
-            logger.info(f"🚀 Command: START ALL (TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
+            raw_symbols = (cmd_data or {}).get('symbols')
+            syms = None
+            if isinstance(raw_symbols, str):
+                parts = [p.strip() for p in raw_symbols.split(',') if p.strip()]
+                syms = parts
+            elif isinstance(raw_symbols, (list, tuple, set)):
+                syms = [str(x).strip() for x in list(raw_symbols) if str(x).strip()]
+
+            def _is_valid_symbol(s: str) -> bool:
+                if not s:
+                    return False
+                if s.endswith('=X') and len(s) == 8 and s[0:6].isalpha() and s[6:] == '=X':
+                    return True
+                if s.endswith('-USD'):
+                    base = s[:-4]
+                    return (2 <= len(base) <= 15) and all((c.isalnum() or c in ('.', '_')) for c in base)
+                if s.endswith('-USDT'):
+                    base = s[:-5]
+                    return (2 <= len(base) <= 15) and all((c.isalnum() or c in ('.', '_')) for c in base)
+                return False
+
+            if syms is not None:
+                cleaned = [s for s in syms if _is_valid_symbol(s)]
+
+                if TRADING_MODE == 'real':
+                    cleaned = [s for s in cleaned if s.endswith('-USD') or s.endswith('-USDT')]
+
+                if cleaned:
+                    self.enabled_symbols = cleaned
+                else:
+                    self.enabled_symbols = [s for s in ALL_SYMBOLS if (TRADING_MODE != 'real') or (s.endswith('-USD') or s.endswith('-USDT'))]
+                    if not self.enabled_symbols:
+                        self.enabled_symbols = list(ALL_SYMBOLS)
+
+            logger.info(f"🚀 Command: START ALL (symbols={len(getattr(self, 'enabled_symbols', ALL_SYMBOLS))}, TP={cmd_data.get('tp', TAKE_PROFIT_PERCENT)}, SL={cmd_data.get('sl', STOP_LOSS_PERCENT)}, Lev={cmd_data.get('leverage', 1)})")
             TAKE_PROFIT_PERCENT = float(cmd_data.get("tp", TAKE_PROFIT_PERCENT))
             STOP_LOSS_PERCENT = float(cmd_data.get("sl", STOP_LOSS_PERCENT))
 
@@ -3763,14 +3801,22 @@ class TradingBot:
             ctx["lessons"] = self._load_lessons(limit=int(LESSONS_LIMIT))
         self.context = ctx
 
-        for symbol in ALL_SYMBOLS:
+        symbols = getattr(self, 'enabled_symbols', None)
+        if not isinstance(symbols, list) or not symbols:
+            symbols = list(ALL_SYMBOLS)
+
+        for symbol in symbols:
             await self.process_symbol(symbol)
 
         # Removed automatic summary notification to prevent spam
         # Summary is now available only via /status command
 
         current_prices = {}
-        for symbol in ALL_SYMBOLS:
+        symbols_for_prices = set(getattr(self, 'enabled_symbols', []) or []) | set(getattr(self.engine, 'positions', {}).keys() if hasattr(self.engine, 'positions') else [])
+        if not symbols_for_prices:
+            symbols_for_prices = set(ALL_SYMBOLS)
+
+        for symbol in sorted(symbols_for_prices):
             df = fetch_data(symbol)
             if df is not None:
                 current_prices[symbol] = df['close'].iloc[-1]
