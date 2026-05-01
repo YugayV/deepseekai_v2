@@ -320,8 +320,8 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_label = st.sidebar.selectbox("Strategy mode", ["Classic", "Pro", "Mix"], index=0)
-strategy_mode = "classic" if strategy_label == "Classic" else "pro" if strategy_label == "Pro" else "mix"
+strategy_mode = "classic"
+st.sidebar.selectbox("Strategy mode", ["Classic"], index=0, disabled=True)
 
 block_weak_signals = st.sidebar.checkbox("Block weak signals", value=False)
 cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 0, 1)
@@ -541,8 +541,8 @@ if st.sidebar.button("🔄 Refresh Data"):
 # ============================================
 # MAIN TITLE
 # ============================================
-st.title("🤖 Multi-Asset AI Trading Bot")
-st.markdown("**Wave Multi-Scale | Ensemble ML | Real-time Signals**")
+st.title("🤖 Multi-Asset Trading Bot")
+st.markdown("**Wave Multi-Scale | Real-time Signals**")
 st.markdown("---")
 
 # ============================================
@@ -831,6 +831,57 @@ if portfolio:
                 c2.write(f"**Size:** {pos['size']:.4f}")
                 c3.write(f"**TP / SL:** {pos.get('take_profit', 0):.5f} / {pos.get('stop_loss', 0):.5f}")
                 c4.write(f"**Date:** {pos.get('entry_date', 'N/A')}")
+
+    st.markdown("### 🕒 Session / Hour analysis (UTC)")
+    if trades is None or trades.empty or 'pnl' not in trades.columns:
+        st.info("No closed trades yet to analyze hours.")
+    else:
+        t = trades.copy()
+        t['pnl'] = pd.to_numeric(t.get('pnl'), errors='coerce').fillna(0.0)
+
+        dt_col = 'entry_date' if 'entry_date' in t.columns else ('exit_date' if 'exit_date' in t.columns else None)
+        if dt_col is None:
+            st.info("Trades are missing entry_date/exit_date.")
+        else:
+            dt = pd.to_datetime(t[dt_col], errors='coerce')
+            t['hour_utc'] = dt.dt.hour
+            t = t.dropna(subset=['hour_utc'])
+            t['hour_utc'] = t['hour_utc'].astype(int)
+
+            min_samples = st.slider("Min trades per hour", 1, 50, 5, 1)
+
+            g = t.groupby('hour_utc').agg(
+                trades=('pnl', 'size'),
+                pnl_sum=('pnl', 'sum'),
+                pnl_avg=('pnl', 'mean'),
+            ).reset_index()
+
+            wins = t.assign(win=(t['pnl'] > 0).astype(int)).groupby('hour_utc')['win'].sum().reset_index()
+            g = g.merge(wins, on='hour_utc', how='left')
+            g['win_rate'] = (g['win'] / g['trades'].replace(0, np.nan) * 100.0).fillna(0.0)
+
+            losing_hours = g[(g['trades'] >= int(min_samples)) & (g['pnl_avg'] < 0)]['hour_utc'].tolist()
+            excluded_hours = st.multiselect("Exclude hours (UTC)", list(range(24)), default=losing_hours)
+
+            if st.button("🚫 Apply excluded hours", width='stretch'):
+                _post_bot_command({
+                    "command": "set_filters",
+                    "excluded_hours": [int(h) for h in excluded_hours],
+                    "time": str(datetime.now()),
+                })
+                st.success(f"Excluded hours applied: {sorted([int(h) for h in excluded_hours])}")
+
+            g = g.sort_values('hour_utc')
+            colors = ['tomato' if float(v) < 0 else 'springgreen' for v in g['pnl_sum'].tolist()]
+
+            fig_h = go.Figure()
+            fig_h.add_trace(go.Bar(x=g['hour_utc'], y=g['pnl_sum'], name='PnL sum', marker_color=colors))
+            fig_h.update_layout(height=240, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10), xaxis_title='UTC hour', yaxis_title='PnL')
+            st.plotly_chart(fig_h, use_container_width=True)
+
+            g_show = g[['hour_utc', 'trades', 'win_rate', 'pnl_sum', 'pnl_avg']].copy()
+            st.dataframe(g_show, use_container_width=True)
+
 else:
     col1.metric("💰 Balance", "$10,000")
     col2.metric("📈 Equity", "$10,000")

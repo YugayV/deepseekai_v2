@@ -157,7 +157,11 @@ try:
     import joblib
     from datetime import datetime
     from dotenv import load_dotenv
-    import openai
+
+    try:
+        import openai
+    except Exception:
+        openai = None
 
     from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -212,6 +216,7 @@ TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
 STRATEGY_VERSION = (os.getenv("STRATEGY_VERSION") or "v2").strip()
 
+USE_AI_DEFAULT = (os.getenv("USE_AI_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", 96))
 AI_MIN_TOKENS_ON_402 = int(os.getenv("AI_MIN_TOKENS_ON_402", 16))
@@ -881,10 +886,13 @@ def calculate_indicators(df):
 # ============================================
 class AIAdvisor:
     def __init__(self, api_key=None):
-        self.client = openai.OpenAI(
-            api_key=(api_key or AI_API_KEY),
-            base_url="https://openrouter.ai/api/v1"
-        ) if (api_key or AI_API_KEY) else None
+        client = None
+        if openai is not None and (api_key or AI_API_KEY):
+            client = openai.OpenAI(
+                api_key=(api_key or AI_API_KEY),
+                base_url="https://openrouter.ai/api/v1"
+            )
+        self.client = client
         self.model = "deepseek/deepseek-chat"
         self.max_tokens = int(AI_MAX_TOKENS)
         self.disabled_until_ts = 0.0
@@ -2427,7 +2435,8 @@ class PaperTradingEngine:
 class TradingBot:
     def __init__(self):
         self.ml_loader = MLModelLoader()
-        self.ai = AIAdvisor()
+        self.use_ai = bool(USE_AI_DEFAULT)
+        self.ai = AIAdvisor() if self.use_ai else None
 
         self.cycle_seconds = DEMO_CYCLE_SECONDS if TRADING_MODE == "demo" else REAL_CYCLE_SECONDS
         
@@ -2451,7 +2460,9 @@ class TradingBot:
 
         self.strategy_mode = STRATEGY_MODE
         self.strategy = {
+            "use_ai": bool(self.use_ai),
             "block_weak_signals": bool(BLOCK_WEAK_SIGNALS),
+            "excluded_hours": [],
             "cooldown_bars": int(COOLDOWN_BARS),
             "use_atr_risk": bool(USE_ATR_RISK),
             "atr_sl_mult": float(ATR_SL_MULT),
@@ -2882,6 +2893,31 @@ class TradingBot:
             self.strategy["quality_mode"] = str((cmd_data.get("quality_mode") if cmd_data.get("quality_mode") is not None else self.strategy.get("quality_mode", QUALITY_MODE_DEFAULT)) or "balanced").strip().lower()
             self.strategy["min_setup_score"] = max(0, _as_int(cmd_data.get("min_setup_score"), self.strategy.get("min_setup_score", MIN_SETUP_SCORE_DEFAULT)))
             self.strategy["use_session_filter"] = _as_bool(cmd_data.get("use_session_filter"), self.strategy.get("use_session_filter", USE_SESSION_FILTER_DEFAULT))
+
+            raw_ex_hours = (cmd_data or {}).get("excluded_hours")
+            ex_hours = None
+            if isinstance(raw_ex_hours, str):
+                parts = [p.strip() for p in raw_ex_hours.split(",") if p.strip()]
+                out = []
+                for p in parts:
+                    try:
+                        out.append(int(p))
+                    except Exception:
+                        pass
+                ex_hours = out
+            elif isinstance(raw_ex_hours, (list, tuple, set)):
+                out = []
+                for v in list(raw_ex_hours):
+                    try:
+                        out.append(int(v))
+                    except Exception:
+                        pass
+                ex_hours = out
+
+            if ex_hours is not None:
+                norm = sorted({h for h in ex_hours if isinstance(h, int) and 0 <= int(h) <= 23})
+                self.strategy["excluded_hours"] = norm
+
             self.strategy["min_atr_pct"] = max(0.0, _as_float(cmd_data.get("min_atr_pct"), self.strategy.get("min_atr_pct", MIN_ATR_PCT_DEFAULT)))
             self.strategy["max_atr_pct"] = max(0.0, _as_float(cmd_data.get("max_atr_pct"), self.strategy.get("max_atr_pct", MAX_ATR_PCT_DEFAULT)))
             self.strategy["risk_per_trade_pct"] = max(0.0, _as_float(cmd_data.get("risk_per_trade_pct"), self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO))))
@@ -3203,11 +3239,7 @@ class TradingBot:
 
         return int(score)
 
-    def _session_ok(self, symbol: str, df) -> bool:
-        sym = str(symbol or '')
-        if not sym.endswith('=X'):
-            return True
-
+    def _current_hour_utc(self, df) -> int:
         try:
             ts = df.index[-1]
             if hasattr(ts, 'to_pydatetime'):
@@ -3215,8 +3247,20 @@ class TradingBot:
             hour = int(getattr(ts, 'hour', None))
             if hour < 0 or hour > 23:
                 hour = int(datetime.utcnow().hour)
+            return hour
         except Exception:
-            hour = int(datetime.utcnow().hour)
+            return int(datetime.utcnow().hour)
+
+    def _session_ok(self, symbol: str, df) -> bool:
+        hour = self._current_hour_utc(df)
+
+        ex = self.strategy.get('excluded_hours')
+        if isinstance(ex, list) and ex and int(hour) in set(int(x) for x in ex if isinstance(x, int) or str(x).isdigit()):
+            return False
+
+        sym = str(symbol or '')
+        if not sym.endswith('=X'):
+            return True
 
         return 6 <= hour <= 20
 
@@ -3493,96 +3537,11 @@ class TradingBot:
                         except Exception:
                             pass
 
-                logger.info(f"🔍 {symbol}: Requesting AI decision...")
-                ctx = self.context if isinstance(getattr(self, "context", None), dict) else {}
-                mode = (getattr(self, "strategy_mode", None) or STRATEGY_MODE or "classic").strip().lower()
-
                 rb = self._rule_based_decision(symbol, df, ml_pred) or {}
 
-                # Backward-compat: "pro" == "reinforse"
-                if mode == "pro":
-                    mode = "reinforse"
-
-                if mode == "mix":
-                    d_classic = self.ai.get_decision(symbol, df, ml_pred, context=ctx) or {}
-                    d_reinf = self.ai.get_reinforse_decision(symbol, df, ml_pred, context=ctx) or {}
-
-                    def _is_yes(d: dict) -> bool:
-                        return str(d.get('trade_decision') or '').upper() == 'YES' and str(d.get('action') or '').lower() == 'entry'
-
-                    yes_c = _is_yes(d_classic)
-                    yes_r = _is_yes(d_reinf)
-                    side_c = str(d_classic.get('side') or 'long').lower()
-                    side_r = str(d_reinf.get('side') or 'long').lower()
-
-                    def _rank(v: str) -> int:
-                        v = str(v or "").lower()
-                        return 3 if v == "strong" else 2 if v == "medium" else 1 if v == "weak" else 0
-
-                    # MIX: (1) open if BOTH agree and same side
-                    if yes_c and yes_r and side_c == side_r:
-                        decision = dict(d_reinf)  # prefer reinforse payload when aligned
-                        decision['side'] = side_r
-                        decision['trade_decision'] = 'YES'
-                        decision['action'] = 'entry'
-                        decision['reasoning_short'] = f"MIX agree: classic={d_classic.get('reasoning_short','')}; reinforse={d_reinf.get('reasoning_short','')}"[:250]
-
-                    # (2) strong override: if exactly one says YES and it's STRONG -> allow
-                    elif yes_c ^ yes_r:
-                        winner = d_reinf if yes_r else d_classic
-                        loser = d_classic if yes_r else d_reinf
-                        if _rank(winner.get('signal_strength')) >= 2:
-                            decision = dict(winner)
-                            decision['trade_decision'] = 'YES'
-                            decision['action'] = 'entry'
-                            decision['reasoning_short'] = f"MIX strong override: yes={winner.get('reasoning_short','')}; no={loser.get('reasoning_short','')}"[:250]
-                        else:
-                            decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'MIX disagree'}
-                    else:
-                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'MIX disagree'}
-
-                    mode = "mix"
-                elif mode == "reinforse":
-                    decision = self.ai.get_reinforse_decision(symbol, df, ml_pred, context=ctx)
-                    if int((decision or {}).get('ai_error_code') or 0) == 402:
-                        decision = self._rule_based_decision(symbol, df, ml_pred)
-                        mode = 'reinforse'
-                else:
-                    mode = "classic"
-                    decision = self.ai.get_decision(symbol, df, ml_pred, context=ctx)
-                    if int((decision or {}).get('ai_error_code') or 0) == 402:
-                        decision = self._rule_based_decision(symbol, df, ml_pred)
-                        mode = 'classic'
-
-                if not isinstance(decision, dict):
-                    decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'invalid_decision'}
-
-                decision_source = "ai"
-
-                if int(decision.get('ai_error_code') or 0) in (401, 402, 500):
-                    decision = dict(rb)
-                    decision_source = "fallback"
-
-                if str(decision.get('trade_decision') or '').upper() != 'YES' and str(rb.get('trade_decision') or '').upper() == 'YES':
-                    rb_side = str(rb.get('side') or 'long').lower()
-                    rb_score = self._setup_score(df, rb_side)
-
-                    quality_mode = str(self.strategy.get('quality_mode') or 'balanced').lower()
-                    min_score = int(self.strategy.get('min_setup_score', MIN_SETUP_SCORE_DEFAULT) or 0)
-
-                    if quality_mode == 'high':
-                        allow_override = (min_score <= 0) or (rb_score >= min_score)
-                    else:
-                        allow_override = rb_score >= max(2, min_score - 1)
-
-                    if allow_override:
-                        ai_reason = str(decision.get('reasoning_short') or '')
-                        decision = dict(rb)
-                        decision['reasoning_short'] = (f"Hybrid: rule-based override (AI NO: {ai_reason})")[:250]
-                        decision_source = "hybrid"
-
-                decision["strategy_mode"] = mode
-                decision["decision_source"] = decision_source
+                decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'rule_based_invalid'}
+                decision["strategy_mode"] = "classic"
+                decision["decision_source"] = "rule"
                 decision["risk_per_trade_pct"] = float(self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)))
 
                 atr = None
@@ -3601,6 +3560,15 @@ class TradingBot:
                 use_sess = bool(self.strategy.get('use_session_filter', USE_SESSION_FILTER_DEFAULT))
                 sess_ok = (not use_sess) or self._session_ok(symbol, df)
 
+                hour_utc = self._current_hour_utc(df)
+                ex = self.strategy.get('excluded_hours')
+                ex_ok = True
+                if isinstance(ex, list) and ex:
+                    try:
+                        ex_ok = int(hour_utc) not in set(int(x) for x in ex if str(x).isdigit() or isinstance(x, int))
+                    except Exception:
+                        ex_ok = True
+
                 min_atr = float(self.strategy.get('min_atr_pct', MIN_ATR_PCT_DEFAULT) or 0.0)
                 max_atr = float(self.strategy.get('max_atr_pct', MAX_ATR_PCT_DEFAULT) or 0.0)
                 atr_ok = True
@@ -3608,7 +3576,12 @@ class TradingBot:
                     atr_ok = (atr_pct >= min_atr) and (atr_pct <= max_atr)
 
                 if str(decision.get('trade_decision') or '').upper() == 'YES':
-                    if not sess_ok:
+                    if not ex_ok:
+                        decision['trade_decision'] = 'NO'
+                        decision['action'] = 'hold'
+                        decision['reasoning_short'] = f"Quality: excluded hour {int(hour_utc)} UTC"
+                        self._record_block(symbol, 'quality_hour')
+                    elif not sess_ok:
                         decision['trade_decision'] = 'NO'
                         decision['action'] = 'hold'
                         decision['reasoning_short'] = 'Quality: session filter'
