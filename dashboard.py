@@ -707,7 +707,7 @@ if portfolio:
             figp.add_trace(go.Scatter(x=list(range(len(t))), y=t['cum_equity'], mode='lines', name='Realized equity'))
             figp.add_hline(y=float(start_capital), line_dash='dash', line_color='gray')
             figp.update_layout(height=260, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(figp, use_container_width=True)
+            st.plotly_chart(figp, use_container_width=True, key="pnl_equity_chart")
 
             cols = [c for c in ['exit_date', 'asset', 'symbol', 'side', 'exit_reason', 'pnl', 'pnl_percent'] if c in t.columns]
             if cols:
@@ -807,12 +807,12 @@ if portfolio:
             figp.add_trace(go.Scatter(x=list(range(len(t))), y=t['cum_equity'], mode='lines', name='Realized equity'))
             figp.add_hline(y=float(start_capital), line_dash='dash', line_color='gray')
             figp.update_layout(height=260, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(figp, use_container_width=True)
+            st.plotly_chart(figp, use_container_width=True, key="pnl_equity_analytics")
 
             figh = go.Figure()
             figh.add_trace(go.Histogram(x=t['pnl'], nbinsx=30, name='PnL distribution'))
             figh.update_layout(height=220, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(figh, use_container_width=True)
+            st.plotly_chart(figh, use_container_width=True, key="pnl_hist")
 
             if 'exit_reason' in t.columns:
                 rc = t['exit_reason'].astype(str).value_counts().head(10).reset_index()
@@ -882,7 +882,7 @@ if portfolio:
             fig_h = go.Figure()
             fig_h.add_trace(go.Bar(x=g['hour_utc'], y=g['pnl_sum'], name='PnL sum', marker_color=colors))
             fig_h.update_layout(height=240, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10), xaxis_title='UTC hour', yaxis_title='PnL')
-            st.plotly_chart(fig_h, use_container_width=True)
+            st.plotly_chart(fig_h, use_container_width=True, key="hour_pnl_bar")
 
             g_show = g[['hour_utc', 'trades', 'win_rate', 'pnl_sum', 'pnl_avg']].copy()
             st.dataframe(g_show, use_container_width=True)
