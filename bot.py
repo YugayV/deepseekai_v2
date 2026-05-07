@@ -217,6 +217,7 @@ STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
 STRATEGY_VERSION = (os.getenv("STRATEGY_VERSION") or "v2").strip()
 
 USE_AI_DEFAULT = (os.getenv("USE_AI_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+USE_ML_DEFAULT = (os.getenv("USE_ML_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", 96))
 AI_MIN_TOKENS_ON_402 = int(os.getenv("AI_MIN_TOKENS_ON_402", 16))
@@ -2912,6 +2913,7 @@ class TradingBot:
                     return v
                 return str(v).strip().lower() in ("1", "true", "yes")
 
+            self.strategy["use_ml"] = _as_bool(cmd_data.get("use_ml"), self.strategy.get("use_ml", USE_ML_DEFAULT))
             self.strategy["block_weak_signals"] = _as_bool(cmd_data.get("block_weak_signals"), self.strategy.get("block_weak_signals", True))
             self.strategy["cooldown_bars"] = max(0, _as_int(cmd_data.get("cooldown_bars"), self.strategy.get("cooldown_bars", 3)))
             self.strategy["use_atr_risk"] = _as_bool(cmd_data.get("use_atr_risk"), self.strategy.get("use_atr_risk", True))
@@ -3121,8 +3123,13 @@ class TradingBot:
         except Exception:
             conf = 0.0
 
-        allow_long = not (reg == 'bearish' and conf >= 0.65)
-        allow_short = not (reg == 'bullish' and conf >= 0.65)
+        use_ml = bool(self.strategy.get('use_ml', USE_ML_DEFAULT))
+        if use_ml:
+            allow_long = not (reg == 'bearish' and conf >= 0.65)
+            allow_short = not (reg == 'bullish' and conf >= 0.65)
+        else:
+            allow_long = True
+            allow_short = True
 
         long_score = 0
         short_score = 0
@@ -3496,8 +3503,17 @@ class TradingBot:
                 pass
 
             # ML Prediction
-            ml_pred = self.ml_loader.predict(df)
-            if not ml_pred:
+            use_ml = bool(self.strategy.get('use_ml', USE_ML_DEFAULT))
+            if use_ml:
+                ml_pred = self.ml_loader.predict(df)
+                if not ml_pred:
+                    ml_pred = {
+                        'regime': 1,
+                        'regime_name': 'flat',
+                        'confidence': 0.34,
+                        'probabilities': {'bearish': 0.33, 'flat': 0.34, 'bullish': 0.33},
+                    }
+            else:
                 ml_pred = {
                     'regime': 1,
                     'regime_name': 'flat',

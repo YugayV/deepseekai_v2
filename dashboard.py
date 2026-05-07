@@ -327,6 +327,7 @@ st.sidebar.subheader("🧠 Strategy Filters")
 strategy_mode = "classic"
 st.sidebar.selectbox("Strategy mode", ["Classic"], index=0, disabled=True)
 
+use_ml = st.sidebar.checkbox("Use ML regime filter (unstable)", value=False)
 block_weak_signals = st.sidebar.checkbox("Block weak signals", value=False)
 cooldown_bars = st.sidebar.slider("Cooldown (bars)", 0, 12, 0, 1)
 use_atr_risk = st.sidebar.checkbox("Use ATR-based TP/SL", value=True)
@@ -387,6 +388,7 @@ if isinstance(res, dict) and isinstance(res.get('best'), dict):
         _post_bot_command({
             "command": "set_filters",
             "strategy_mode": str(strategy_mode),
+            "use_ml": bool(use_ml),
             "block_weak_signals": bool(block_weak_signals),
             "cooldown_bars": int(cooldown_bars),
             "use_atr_risk": True,
@@ -437,6 +439,7 @@ if st.sidebar.button("✅ Apply Filters", width='stretch'):
     _post_bot_command({
         "command": "set_filters",
         "strategy_mode": str(strategy_mode),
+        "use_ml": bool(use_ml),
         "block_weak_signals": bool(block_weak_signals),
         "cooldown_bars": int(cooldown_bars),
         "use_atr_risk": bool(use_atr_risk),
