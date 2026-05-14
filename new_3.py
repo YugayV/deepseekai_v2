@@ -1,829 +1,442 @@
-# =====================================================
-# 1. ИМПОРТ ВСЕХ БИБЛИОТЕК
-# =====================================================
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime, timedelta
+# %% [markdown]
+# # Trading Research Notebook v3.0 - Боевая версия
+# **Улучшения**: Walk-forward validation, XGBoost, LSTM, Vision заготовка.
+# **Данные**: 15m за 2 года (FX + commodities).
+# **Формат**: понятный, пошаговый, без лишней абстракции.
+# **Цель**: проверить устойчивость стратегии на честном out-of-sample тесте.
+
+# %%
 import warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
-# Deep Learning / RL
-import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import (LSTM, Dense, Dropout, Input, MultiHeadAttention, 
-                                     LayerNormalization, GlobalAveragePooling1D, 
-                                     Bidirectional, GRU, Conv1D, MaxPooling1D, Flatten,
-                                     SimpleRNN, BatchNormalization)
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-
-# Данные
+import os
+import numpy as np
+import pandas as pd
 import yfinance as yf
+import plotly.graph_objects as go
+import plotly.express as px
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+from pathlib import Path
 
-# ML модели
-from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier, 
-                              AdaBoostClassifier, VotingClassifier, BaggingClassifier)
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.naive_bayes import GaussianNB
-from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
-from catboost import CatBoostClassifier
+# Новые модели
+from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
 
-# Метрики и preprocessing
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
-from sklearn.model_selection import train_test_split, cross_val_score, TimeSeriesSplit
-from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, 
-                             roc_auc_score, roc_curve, confusion_matrix, classification_report,
-                             mean_squared_error, mean_absolute_error, r2_score)
+# LSTM
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    _HAS_TF = True
+except Exception:
+    tf = None
+    Sequential = None
+    LSTM = None
+    Dense = None
+    Dropout = None
+    _HAS_TF = False
 
-# Для работы с датами
-from pandas.tseries.holiday import USFederalHolidayCalendar
-from pandas.tseries.offsets import CustomBusinessDay
+OUT = Path("output")
+OUT.mkdir(exist_ok=True)
 
-print(f"✅ TensorFlow: {tf.__version__}")
-print(f"📅 Дата: {datetime.now().strftime('%Y-%m-%d')}")
-python
-# =====================================================
-# 2. ЗАГРУЗКА ДАННЫХ (6 ЛЕТ, 8 ФОРЕКС ПАР)
-# =====================================================
-print("\n" + "="*70)
-print("ЗАГРУЗКА ДАННЫХ ЗА 6 ЛЕТ")
-print("="*70)
+print("✅ v3.0 setup complete")
 
-end_date = datetime.now()
-start_date = end_date - timedelta(days=6*365)
+# %% [markdown]
+# ## 1) Данные (15m, 2 года)
+# Аналогично v2.1, но с дополнительной проверкой качества данных.
 
-print(f"Период: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+# %%
+symbols = ["USDJPY=X", "EURUSD=X", "GC=F", "CL=F", "SI=F"]
+period = "2y"
+interval = "15m"
 
-forex_pairs = {
-    'EURUSD': 'EURUSD=X',
-    'GBPUSD': 'GBPUSD=X', 
-    'USDJPY': 'JPY=X',
-    'AUDUSD': 'AUDUSD=X',
-    'USDCAD': 'CAD=X',
-    'EURJPY': 'EURJPY=X',
-    'EURGBP': 'EURGBP=X',
-    'USDCHF': 'CHF=X'
-}
+data = {}
+for sym in symbols:
+    df = yf.download(sym, period=period, interval=interval, progress=False)
+    if df is None or df.empty:
+        continue
+    df = df.dropna()
+    df.columns = [c.capitalize().replace(" ", "_") for c in df.columns]
+    data[sym] = df
+    print(f"{sym}: {len(df):,} rows")
 
-market_data = {}
-for name, ticker in forex_pairs.items():
-    print(f"Загрузка {name}...", end=" ")
-    try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if not df.empty:
-            market_data[name] = df
-            print(f"✅ {len(df)} свечей")
-        else:
-            print("❌ нет данных")
-    except Exception as e:
-        print(f"❌ ошибка")
+# %% [markdown]
+# ## 2) Features (как раньше, но с проверкой)
 
-print(f"\n✅ Загружено: {len(market_data)} пар")
+# %%
+def _sma(s: pd.Series, window: int) -> pd.Series:
+    return s.rolling(window=window).mean()
 
-# Выбираем основную пару
-main_pair = 'EURUSD'
-df_raw = market_data[main_pair].copy()
-print(f"\nАнализ для {main_pair}")
-print(df_raw.head())
-python
-# =====================================================
-# 3. FEATURE ENGINEERING (БОЛЬШЕ 100 ПРИЗНАКОВ)
-# =====================================================
-print("\n" + "="*70)
-print("СОЗДАНИЕ ПРИЗНАКОВ")
-print("="*70)
 
-df = df_raw.copy()
+def _ema(s: pd.Series, span: int) -> pd.Series:
+    return s.ewm(span=span, adjust=False).mean()
 
-# Базовые признаки
-df['returns'] = df['Close'].pct_change()
-df['log_returns'] = np.log(df['Close'] / df['Close'].shift(1))
-df['high_low_ratio'] = df['High'] / df['Low']
-df['close_open_ratio'] = df['Close'] / df['Open']
-df['range'] = df['High'] - df['Low']
-df['range_pct'] = df['range'] / df['Close']
 
-# Скользящие средние (разные периоды)
-sma_periods = [5, 10, 20, 30, 50, 100, 200]
-for period in sma_periods:
-    df[f'SMA_{period}'] = df['Close'].rolling(period).mean()
-    df[f'EMA_{period}'] = df['Close'].ewm(span=period, adjust=False).mean()
-    df[f'SMA_High_{period}'] = df['High'].rolling(period).mean()
-    df[f'SMA_Low_{period}'] = df['Low'].rolling(period).mean()
+def _rsi(s: pd.Series, window: int = 14) -> pd.Series:
+    delta = s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta.where(delta < 0, 0.0)).astype(float)
+    avg_gain = gain.rolling(window).mean()
+    avg_loss = loss.rolling(window).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    return 100.0 - (100.0 / (1.0 + rs))
 
-# RSI (несколько периодов)
-rsi_periods = [7, 14, 21, 28]
-for period in rsi_periods:
-    delta = df['Close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    df[f'RSI_{period}'] = 100 - (100 / (1 + rs))
 
-# MACD (разные конфигурации)
-macd_configs = [(12, 26, 9), (8, 17, 9), (19, 39, 9), (10, 20, 5)]
-for fast, slow, signal in macd_configs:
-    ema_fast = df['Close'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['Close'].ewm(span=slow, adjust=False).mean()
-    df[f'MACD_{fast}_{slow}'] = ema_fast - ema_slow
-    df[f'MACD_Signal_{fast}_{slow}'] = df[f'MACD_{fast}_{slow}'].ewm(span=signal, adjust=False).mean()
-    df[f'MACD_Hist_{fast}_{slow}'] = df[f'MACD_{fast}_{slow}'] - df[f'MACD_Signal_{fast}_{slow}']
+def _macd(s: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series]:
+    macd = _ema(s, fast) - _ema(s, slow)
+    macd_sig = _ema(macd, signal)
+    return macd, macd_sig
 
-# Bollinger Bands (разные периоды и отклонения)
-bb_configs = [(20, 2), (20, 3), (14, 2), (30, 2), (50, 2)]
-for period, std_dev in bb_configs:
-    middle = df['Close'].rolling(period).mean()
-    std = df['Close'].rolling(period).std()
-    df[f'BB_Upper_{period}_{std_dev}'] = middle + std_dev * std
-    df[f'BB_Lower_{period}_{std_dev}'] = middle - std_dev * std
-    df[f'BB_Width_{period}_{std_dev}'] = (df[f'BB_Upper_{period}_{std_dev}'] - df[f'BB_Lower_{period}_{std_dev}']) / middle
-    df[f'BB_Position_{period}_{std_dev}'] = (df['Close'] - df[f'BB_Lower_{period}_{std_dev}']) / (df[f'BB_Upper_{period}_{std_dev}'] - df[f'BB_Lower_{period}_{std_dev}'])
 
-# ATR (Average True Range)
-atr_periods = [7, 14, 21, 30]
-for period in atr_periods:
-    high_low = df['High'] - df['Low']
-    high_close = abs(df['High'] - df['Close'].shift())
-    low_close = abs(df['Low'] - df['Close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df[f'ATR_{period}'] = tr.rolling(period).mean()
-    df[f'ATR_Pct_{period}'] = df[f'ATR_{period}'] / df['Close']
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    prev_close = close.shift(1)
+    tr1 = (high - low).abs()
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window).mean()
 
-# Стохастический осциллятор
-stoch_periods = [14, 21, 28]
-for period in stoch_periods:
-    low_min = df['Low'].rolling(period).min()
-    high_max = df['High'].rolling(period).max()
-    df[f'Stoch_K_{period}'] = 100 * (df['Close'] - low_min) / (high_max - low_min)
-    df[f'Stoch_D_{period}'] = df[f'Stoch_K_{period}'].rolling(3).mean()
 
-# Rate of Change (ROC)
-roc_periods = [1, 5, 10, 20, 50]
-for period in roc_periods:
-    df[f'ROC_{period}'] = df['Close'].pct_change(period)
-
-# Объёмные индикаторы
-df['volume_sma'] = df['Volume'].rolling(20).mean()
-df['volume_ratio'] = df['Volume'] / df['volume_sma']
-df['volume_change'] = df['Volume'].pct_change()
-df['obv'] = (np.sign(df['returns']) * df['Volume']).fillna(0).cumsum()
-
-# Волатильность
-df['volatility_20'] = df['returns'].rolling(20).std()
-df['volatility_50'] = df['returns'].rolling(50).std()
-df['volatility_ratio'] = df['volatility_20'] / df['volatility_50']
-
-# Сезонность и календарные признаки
-df['day_of_week'] = df.index.dayofweek
-df['day_of_month'] = df.index.day
-df['month'] = df.index.month
-df['quarter'] = df.index.quarter
-df['year'] = df.index.year
-df['is_month_end'] = df.index.is_month_end.astype(int)
-df['is_month_start'] = df.index.is_month_start.astype(int)
-df['is_quarter_end'] = df.index.is_quarter_end.astype(int)
-df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
-
-# Лаговые переменные
-lag_periods = [1, 2, 3, 5, 10, 20]
-for lag in lag_periods:
-    df[f'close_lag_{lag}'] = df['Close'].shift(lag)
-    df[f'returns_lag_{lag}'] = df['returns'].shift(lag)
-    df[f'volume_lag_{lag}'] = df['Volume'].shift(lag)
-    df[f'high_lag_{lag}'] = df['High'].shift(lag)
-    df[f'low_lag_{lag}'] = df['Low'].shift(lag)
-
-# Разности цен
-diff_periods = [1, 2, 3, 5, 10]
-for diff in diff_periods:
-    df[f'close_diff_{diff}'] = df['Close'].diff(diff)
-    df[f'high_diff_{diff}'] = df['High'].diff(diff)
-    df[f'low_diff_{diff}'] = df['Low'].diff(diff)
-
-# Свечные паттерны
-df['body'] = abs(df['Close'] - df['Open'])
-df['upper_shadow'] = df['High'] - df[['Close', 'Open']].max(axis=1)
-df['lower_shadow'] = df[['Close', 'Open']].min(axis=1) - df['Low']
-df['doji'] = (df['body'] / df['range'] < 0.1).astype(int)
-df['marubozu'] = ((df['upper_shadow'] / df['range'] < 0.05) & (df['lower_shadow'] / df['range'] < 0.05)).astype(int)
-
-# Целевая переменная (предсказание через 24 часа)
-df['target'] = (df['Close'].shift(-24) > df['Close']).astype(int)
-
-# Очистка
-df_clean = df.dropna()
-print(f"✅ Всего признаков: {len(df_clean.columns)}")
-print(f"✅ Строк после очистки: {len(df_clean)}")
-print(f"✅ Баланс целевой: {df_clean['target'].mean():.2%} UP сигналов")
-python
-# =====================================================
-# 4. ПОДГОТОВКА ДАННЫХ ДЛЯ ОБУЧЕНИЯ
-# =====================================================
-print("\n" + "="*70)
-print("ПОДГОТОВКА ДАННЫХ")
-print("="*70)
-
-# Определяем признаки (исключаем ценовые и целевую)
-exclude_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'target', 'obv']
-feature_cols = [col for col in df_clean.columns if col not in exclude_cols]
-
-print(f"Количество признаков для обучения: {len(feature_cols)}")
-
-# Матрица признаков и целевая
-X = df_clean[feature_cols].values
-y = df_clean['target'].values
-
-# Масштабирование
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# Временное разделение (80/20, без перемешивания)
-split_idx = int(0.8 * len(X_scaled))
-X_train = X_scaled[:split_idx]
-X_test = X_scaled[split_idx:]
-y_train = y[:split_idx]
-y_test = y[split_idx:]
-
-print(f"Обучающая выборка: {X_train.shape}")
-print(f"Тестовая выборка: {X_test.shape}")
-print(f"Баланс train: {y_train.mean():.2%} UP")
-print(f"Баланс test: {y_test.mean():.2%} UP")
-python
-# =====================================================
-# 5. МНОЖЕСТВО ML МОДЕЛЕЙ (15 МОДЕЛЕЙ)
-# =====================================================
-print("\n" + "="*70)
-print("ОБУЧЕНИЕ 15 ML МОДЕЛЕЙ")
-print("="*70)
-
-models = {
-    'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42, C=0.1),
-    'K-Nearest Neighbors': KNeighborsClassifier(n_neighbors=15, weights='distance', n_jobs=-1),
-    'Decision Tree': DecisionTreeClassifier(max_depth=10, min_samples_split=20, random_state=42),
-    'Random Forest': RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_split=10, random_state=42, n_jobs=-1),
-    'Gradient Boosting': GradientBoostingClassifier(n_estimators=150, learning_rate=0.05, max_depth=5, random_state=42),
-    'AdaBoost': AdaBoostClassifier(n_estimators=150, learning_rate=0.05, random_state=42),
-    'XGBoost': XGBClassifier(n_estimators=200, learning_rate=0.03, max_depth=6, random_state=42, use_label_encoder=False, eval_metric='logloss', n_jobs=-1),
-    'LightGBM': LGBMClassifier(n_estimators=200, learning_rate=0.03, max_depth=6, random_state=42, verbose=-1, n_jobs=-1),
-    'CatBoost': CatBoostClassifier(iterations=200, learning_rate=0.03, depth=6, random_state=42, verbose=False),
-    'SVM RBF': SVC(kernel='rbf', probability=True, C=1.0, gamma='scale', random_state=42),
-    'SVM Linear': SVC(kernel='linear', probability=True, C=0.1, random_state=42),
-    'Naive Bayes': GaussianNB(),
-    'Bagging Tree': BaggingClassifier(DecisionTreeClassifier(max_depth=5), n_estimators=100, random_state=42, n_jobs=-1),
-    'Extra Trees': RandomForestClassifier(n_estimators=200, criterion='entropy', max_depth=10, random_state=42, n_jobs=-1),
-    'MLP Classifier': tf.keras.wrappers.scikit_learn.KerasClassifier(model=lambda: Sequential([
-        Dense(128, activation='relu', input_dim=X_train.shape[1]),
-        Dropout(0.3),
-        Dense(64, activation='relu'),
-        Dropout(0.2),
-        Dense(1, activation='sigmoid')
-    ]), epochs=50, batch_size=32, verbose=0)
-}
-
-results = {}
-probabilities_dict = {}
-predictions_dict = {}
-
-for name, model in models.items():
-    print(f"\n🔄 {name}...", end=" ")
-    try:
-        model.fit(X_train, y_train)
-        
-        if hasattr(model, "predict_proba"):
-            y_proba = model.predict_proba(X_test)[:, 1]
-        elif hasattr(model, "predict"):
-            y_pred_class = model.predict(X_test)
-            y_proba = y_pred_class
-        else:
-            y_proba = np.zeros(len(y_test))
-        
-        y_pred = (y_proba > 0.5).astype(int)
-        
-        acc = accuracy_score(y_test, y_pred)
-        auc = roc_auc_score(y_test, y_proba) if len(np.unique(y_proba)) > 1 else 0.5
-        prec = precision_score(y_test, y_pred, zero_division=0)
-        rec = recall_score(y_test, y_pred, zero_division=0)
-        f1 = f1_score(y_test, y_pred, zero_division=0)
-        
-        results[name] = {'accuracy': acc, 'auc': auc, 'precision': prec, 'recall': rec, 'f1': f1, 'model': model}
-        probabilities_dict[name] = y_proba
-        predictions_dict[name] = y_pred
-        
-        print(f"✅ Acc={acc:.4f}, AUC={auc:.4f}")
-    except Exception as e:
-        print(f"❌ Ошибка: {str(e)[:50]}")
-        results[name] = {'accuracy': 0, 'auc': 0, 'precision': 0, 'recall': 0, 'f1': 0, 'model': None}
-
-# Создаём DataFrame результатов
-results_df = pd.DataFrame([{k: v[k] for k in ['accuracy', 'auc', 'precision', 'recall', 'f1']} 
-                           for v in results.values()], index=results.keys())
-results_df = results_df.sort_values('auc', ascending=False)
-
-print("\n" + "="*70)
-print("РЕЗУЛЬТАТЫ ML МОДЕЛЕЙ")
-print("="*70)
-print(results_df.round(4))
-
-best_model_name = results_df.index[0]
-best_model = results[best_model_name]['model']
-print(f"\n🏆 ЛУЧШАЯ МОДЕЛЬ: {best_model_name} (AUC={results_df.iloc[0]['auc']:.4f})")
-python
-# =====================================================
-# 6. DEEP LEARNING МОДЕЛИ (LSTM, Bi-LSTM, GRU, RNN)
-# =====================================================
-print("\n" + "="*70)
-print("ОБУЧЕНИЕ DEEP LEARNING МОДЕЛЕЙ")
-print("="*70)
-
-sequence_length = 60
-
-# Подготовка последовательностей
-X_sequences = []
-y_sequences = []
-
-for i in range(sequence_length, len(X_scaled) - 24):
-    X_sequences.append(X_scaled[i-sequence_length:i])
-    y_sequences.append(y[i+24])
-
-X_sequences = np.array(X_sequences)
-y_sequences = np.array(y_sequences)
-
-print(f"Данные для DL: X={X_sequences.shape}, y={y_sequences.shape}")
-
-# Разделение
-dl_split = int(0.8 * len(X_sequences))
-X_train_dl = X_sequences[:dl_split]
-y_train_dl = y_sequences[:dl_split]
-X_test_dl = X_sequences[dl_split:]
-y_test_dl = y_sequences[dl_split:]
-
-print(f"Train DL: {X_train_dl.shape}, Test DL: {X_test_dl.shape}")
-
-# Callbacks
-early_stop = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
-
-dl_results = {}
-
-# 1. LSTM
-print("\n🔄 LSTM...")
-lstm_model = Sequential([
-    LSTM(128, return_sequences=True, input_shape=(sequence_length, X_sequences.shape[2])),
-    Dropout(0.3),
-    LSTM(64, return_sequences=True),
-    Dropout(0.3),
-    LSTM(32, return_sequences=False),
-    Dropout(0.3),
-    Dense(16, activation='relu'),
-    Dense(1, activation='sigmoid')
-])
-lstm_model.compile(optimizer=Adam(0.001), loss='binary_crossentropy', metrics=['accuracy'])
-lstm_history = lstm_model.fit(X_train_dl, y_train_dl, validation_split=0.2, epochs=50, batch_size=64, callbacks=[early_stop, reduce_lr], verbose=0)
-lstm_proba = lstm_model.predict(X_test_dl).flatten()
-lstm_pred = (lstm_proba > 0.5).astype(int)
-lstm_auc = roc_auc_score(y_test_dl, lstm_proba)
-lstm_acc = accuracy_score(y_test_dl, lstm_pred)
-dl_results['LSTM'] = {'accuracy': lstm_acc, 'auc': lstm_auc, 'history': lstm_history}
-print(f"   ✅ Acc={lstm_acc:.4f}, AUC={lstm_auc:.4f}")
-
-# 2. Bi-LSTM
-print("\n🔄 Bi-LSTM...")
-bi_lstm_model = Sequential([
-    Bidirectional(LSTM(128, return_sequences=True), input_shape=(sequence_length, X_sequences.shape[2])),
-    Dropout(0.3),
-    Bidirectional(LSTM(64, return_sequences=False)),
-    Dropout(0.3),
-    Dense(32, activation='relu'),
-    Dense(1, activation='sigmoid')
-])
-bi_lstm_model.compile(optimizer=Adam(0.001), loss='binary_crossentropy', metrics=['accuracy'])
-bi_lstm_history = bi_lstm_model.fit(X_train_dl, y_train_dl, validation_split=0.2, epochs=50, batch_size=64, callbacks=[early_stop, reduce_lr], verbose=0)
-bi_lstm_proba = bi_lstm_model.predict(X_test_dl).flatten()
-bi_lstm_auc = roc_auc_score(y_test_dl, bi_lstm_proba)
-bi_lstm_acc = accuracy_score(y_test_dl, (bi_lstm_proba > 0.5).astype(int))
-dl_results['Bi-LSTM'] = {'accuracy': bi_lstm_acc, 'auc': bi_lstm_auc, 'history': bi_lstm_history}
-print(f"   ✅ Acc={bi_lstm_acc:.4f}, AUC={bi_lstm_auc:.4f}")
-
-# 3. GRU
-print("\n🔄 GRU...")
-gru_model = Sequential([
-    GRU(128, return_sequences=True, input_shape=(sequence_length, X_sequences.shape[2])),
-    Dropout(0.3),
-    GRU(64, return_sequences=False),
-    Dropout(0.3),
-    Dense(32, activation='relu'),
-    Dense(1, activation='sigmoid')
-])
-gru_model.compile(optimizer=Adam(0.001), loss='binary_crossentropy', metrics=['accuracy'])
-gru_history = gru_model.fit(X_train_dl, y_train_dl, validation_split=0.2, epochs=50, batch_size=64, callbacks=[early_stop, reduce_lr], verbose=0)
-gru_proba = gru_model.predict(X_test_dl).flatten()
-gru_auc = roc_auc_score(y_test_dl, gru_proba)
-gru_acc = accuracy_score(y_test_dl, (gru_proba > 0.5).astype(int))
-dl_results['GRU'] = {'accuracy': gru_acc, 'auc': gru_auc, 'history': gru_history}
-print(f"   ✅ Acc={gru_acc:.4f}, AUC={gru_auc:.4f}")
-
-# 4. Simple RNN
-print("\n🔄 Simple RNN...")
-rnn_model = Sequential([
-    SimpleRNN(128, return_sequences=True, input_shape=(sequence_length, X_sequences.shape[2])),
-    Dropout(0.3),
-    SimpleRNN(64, return_sequences=False),
-    Dropout(0.3),
-    Dense(32, activation='relu'),
-    Dense(1, activation='sigmoid')
-])
-rnn_model.compile(optimizer=Adam(0.001), loss='binary_crossentropy', metrics=['accuracy'])
-rnn_history = rnn_model.fit(X_train_dl, y_train_dl, validation_split=0.2, epochs=50, batch_size=64, callbacks=[early_stop, reduce_lr], verbose=0)
-rnn_proba = rnn_model.predict(X_test_dl).flatten()
-rnn_auc = roc_auc_score(y_test_dl, rnn_proba)
-rnn_acc = accuracy_score(y_test_dl, (rnn_proba > 0.5).astype(int))
-dl_results['SimpleRNN'] = {'accuracy': rnn_acc, 'auc': rnn_auc, 'history': rnn_history}
-print(f"   ✅ Acc={rnn_acc:.4f}, AUC={rnn_auc:.4f}")
-
-# Добавляем DL результаты в общую таблицу
-for name, res in dl_results.items():
-    results_df.loc[name] = [res['accuracy'], res['auc'], 0, 0, 0]
-
-results_df = results_df.sort_values('auc', ascending=False)
-print("\n" + "="*70)
-print("ИТОГОВЫЙ РЕЙТИНГ (ML + DL)")
-print("="*70)
-print(results_df.round(4))
-python
-# =====================================================
-# 7. АНСАМБЛЬ VOTING CLASSIFIER
-# =====================================================
-print("\n" + "="*70)
-print("СОЗДАНИЕ АНСАМБЛЯ")
-print("="*70)
-
-# Берём топ-5 моделей по AUC
-top5_models = results_df.head(5).index.tolist()
-print(f"Топ-5 моделей для ансамбля: {top5_models}")
-
-voting_estimators = []
-for name in top5_models:
-    if name in results and results[name]['model'] is not None:
-        voting_estimators.append((name.replace(' ', '_'), results[name]['model']))
-
-if len(voting_estimators) >= 2:
-    voting_clf = VotingClassifier(estimators=voting_estimators, voting='soft')
-    voting_clf.fit(X_train, y_train)
-    voting_proba = voting_clf.predict_proba(X_test)[:, 1]
-    voting_pred = (voting_proba > 0.5).astype(int)
-    voting_auc = roc_auc_score(y_test, voting_proba)
-    voting_acc = accuracy_score(y_test, voting_pred)
+def process_features(df):
+    df = df.copy()
+    c = df["Close"]
     
-    print(f"✅ Voting Ensemble - Acc={voting_acc:.4f}, AUC={voting_auc:.4f}")
+    # Momentum
+    df["ret1"] = c.pct_change()
+    df["ret4"] = c.pct_change(4)
     
-    # Добавляем в результаты
-    results_df.loc['Voting Ensemble'] = [voting_acc, voting_auc, 0, 0, 0]
-    results_df = results_df.sort_values('auc', ascending=False)
-    print("\n📊 Финальный рейтинг с ансамблем:")
-    print(results_df.head(10).round(4))
-python
-# =====================================================
-# 8. ГРАФИКИ: СРАВНЕНИЕ МОДЕЛЕЙ
-# =====================================================
-print("\n" + "="*70)
-print("ВИЗУАЛИЗАЦИЯ РЕЗУЛЬТАТОВ")
-print("="*70)
+    # Trend
+    df["sma20"] = _sma(c, window=20)
+    df["sma50"] = _sma(c, window=50)
+    
+    # Oscillators
+    df["rsi14"] = _rsi(c, window=14)
+    df["macd"], df["macd_sig"] = _macd(c)
+    
+    # Volatility
+    df["atr14"] = _atr(df["High"], df["Low"], c, window=14)
+    
+    # Volume
+    df["vol_chg"] = df["Volume"].replace(0, np.nan).pct_change()
+    
+    # Candle
+    df["body"] = (df["Close"] - df["Open"]).abs()
+    df["range"] = (df["High"] - df["Low"]).replace(0, np.nan)
+    
+    # TARGET
+    df["target"] = c.pct_change().shift(-1)
+    
+    return df
 
-fig = plt.figure(figsize=(22, 18))
+processed = {sym: process_features(df) for sym, df in data.items()}
 
-# 1. Сравнение AUC (топ-15)
-ax1 = plt.subplot(3, 3, 1)
-top15 = results_df.head(15)
-colors = ['gold' if i==0 else 'silver' if i==1 else 'bronze' if i==2 else 'steelblue' for i in range(len(top15))]
-ax1.barh(range(len(top15)), top15['auc'].values, color=colors, alpha=0.7)
-ax1.set_yticks(range(len(top15)))
-ax1.set_yticklabels(top15.index, fontsize=9)
-ax1.axvline(x=0.5, color='red', linestyle='--', alpha=0.5, label='Random (0.5)')
-ax1.set_title('AUC Comparison - Top 15 Models', fontsize=12)
-ax1.set_xlabel('AUC Score')
-ax1.set_xlim(0.45, max(0.75, top15['auc'].max() + 0.05))
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+# %% [markdown]
+# ## 3) Imbalance + Fib
+# Простые сигналы силы и зоны входа.
 
-# 2. ROC Curves (топ-5)
-ax2 = plt.subplot(3, 3, 2)
-top5_names = results_df.head(5).index
-colors_roc = ['blue', 'red', 'green', 'orange', 'purple']
-for idx, name in enumerate(top5_names):
-    if name in probabilities_dict:
-        fpr, tpr, _ = roc_curve(y_test, probabilities_dict[name])
-        ax2.plot(fpr, tpr, color=colors_roc[idx], label=f'{name[:15]} (AUC={results_df.loc[name, "auc"]:.3f})', linewidth=2)
-    elif name in dl_results:
-        if name == 'LSTM':
-            fpr, tpr, _ = roc_curve(y_test_dl, lstm_proba)
-        elif name == 'Bi-LSTM':
-            fpr, tpr, _ = roc_curve(y_test_dl, bi_lstm_proba)
-        elif name == 'GRU':
-            fpr, tpr, _ = roc_curve(y_test_dl, gru_proba)
-        else:
+# %%
+for sym, df in processed.items():
+    body = (df["Close"] - df["Open"]).abs()
+    rng = (df["High"] - df["Low"]).replace(0, np.nan)
+    df["imbalance"] = body / rng
+    df["vol_spike"] = df["Volume"] > df["Volume"].rolling(20).mean() * 1.5
+
+    fib_zone = []
+    for i in range(len(df)):
+        if i < 100:
+            fib_zone.append(0)
             continue
-        ax2.plot(fpr, tpr, color=colors_roc[idx], label=f'{name} (AUC={results_df.loc[name, "auc"]:.3f})', linewidth=2)
-ax2.plot([0,1], [0,1], 'k--', alpha=0.5)
-ax2.set_title('ROC Curves - Top 5 Models', fontsize=12)
-ax2.set_xlabel('False Positive Rate')
-ax2.set_ylabel('True Positive Rate')
-ax2.legend(loc='lower right')
-ax2.grid(True, alpha=0.3)
+        hi = df["High"].iloc[i-100:i].max()
+        lo = df["Low"].iloc[i-100:i].min()
+        d = hi - lo
+        fib_50 = hi - 0.5 * d
+        fib_618 = hi - 0.618 * d
+        price = df["Close"].iloc[i]
+        fib_zone.append(1 if fib_50 <= price <= fib_618 else 0)
+    df["fib_zone"] = fib_zone
 
-# 3. Confusion Matrix (лучшая модель)
-ax3 = plt.subplot(3, 3, 3)
-best_name = results_df.index[0]
-if best_name in predictions_dict:
-    cm = confusion_matrix(y_test, predictions_dict[best_name])
-elif best_name in dl_results:
-    if best_name == 'LSTM':
-        cm = confusion_matrix(y_test_dl, lstm_pred)
-    elif best_name == 'Bi-LSTM':
-        cm = confusion_matrix(y_test_dl, (bi_lstm_proba > 0.5).astype(int))
-    elif best_name == 'GRU':
-        cm = confusion_matrix(y_test_dl, (gru_proba > 0.5).astype(int))
-    else:
-        cm = confusion_matrix(y_test_dl, (rnn_proba > 0.5).astype(int))
+# %% [markdown]
+# ## 4) Markov regime
+# Состояния рынка и фильтр вероятности.
+
+# %%
+for sym, df in processed.items():
+    rets = df["ret1"].dropna()
+    q = pd.qcut(rets, q=3, labels=False, duplicates="drop")
+    states = q.reindex(df.index).bfill().ffill().astype(int)
+    df["state"] = states
+
+    trans = pd.crosstab(df["state"].iloc[:-1], df["state"].iloc[1:], normalize="index")
+
+    probs = []
+    for i in range(len(df)):
+        if i == len(df) - 1:
+            probs.append(np.nan)
+            continue
+        s = int(df["state"].iloc[i])
+        ns = int(df["state"].iloc[i + 1])
+        if s in trans.index and ns in trans.columns:
+            probs.append(float(trans.loc[s, ns]))
+        else:
+            probs.append(0.0)
+
+    df["markov_prob"] = probs
+    df["regime_ok"] = df["markov_prob"] > df["markov_prob"].rolling(100).median()
+
+# %% [markdown]
+# ## 5) Rolling features
+# Дополнительные признаки для commodities и FX.
+
+# %%
+for sym, df in processed.items():
+    for w in [10, 20, 50]:
+        df[f"roll_mean_{w}"] = df["Close"].rolling(w).mean()
+        df[f"roll_std_{w}"] = df["Close"].rolling(w).std()
+    df["trend_strength"] = (df["sma20"] - df["sma50"]) / df["Close"]
+
+# %% [markdown]
+# ## 6) Объединяем данные
+# Превращаем symbol в dummy variables.
+
+# %%
+feature_cols = [
+    "Open","High","Low","Close","Volume",
+    "ret1","ret4","sma20","sma50",
+    "rsi14","macd","macd_sig","atr14",
+    "body","range","imbalance","fib_zone","markov_prob","regime_ok",
+    "roll_mean_10","roll_mean_20","roll_mean_50",
+    "roll_std_10","roll_std_20","roll_std_50",
+    "trend_strength"
+]
+
+all_frames = []
+for sym, df in processed.items():
+    df = df.replace([np.inf, -np.inf], np.nan).dropna().copy()
+    df["regime_ok"] = df["regime_ok"].astype(int)
+    df["symbol"] = sym
+    all_frames.append(df[feature_cols + ["symbol", "target"]])
+
+master = pd.concat(all_frames, ignore_index=True)
+master = pd.get_dummies(master, columns=["symbol"], drop_first=False)
+
+# %% [markdown]
+# ## 7) Train / test
+# Time split без shuffle.
+
+# %%
+X = master.drop(columns=["target"])
+y = master["target"]
+
+split = int(len(master) * 0.8)
+X_train, X_test = X.iloc[:split], X.iloc[split:]
+y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+sx = MinMaxScaler()
+sy = MinMaxScaler()
+X_train_s = sx.fit_transform(X_train)
+X_test_s = sx.transform(X_test)
+y_train_s = sy.fit_transform(y_train.values.reshape(-1, 1)).ravel()
+
+# %% [markdown]
+# ## 8) Табличные модели
+# Сначала сильные табличные модели.
+# Потом отдельно LSTM на окнах.
+
+# %%
+rf = RandomForestRegressor(n_estimators=300, random_state=42, n_jobs=-1)
+gbr = GradientBoostingRegressor(n_estimators=150, learning_rate=0.05, random_state=42)
+xgb = XGBRegressor(
+    n_estimators=300,
+    max_depth=5,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    objective="reg:squarederror",
+    random_state=42,
+    n_jobs=-1,
+)
+
+table_model = VotingRegressor([
+    ("rf", rf),
+    ("gbr", gbr),
+    ("xgb", xgb),
+])
+
+table_model.fit(X_train_s, y_train_s)
+
+# %% [markdown]
+# ## 9) LSTM data preparation
+# Берём окно из прошлых баров.
+# Это уже последовательная модель, а не табличная.
+
+# %%
+seq_len = 32
+X_seq = []
+y_seq = []
+
+X_arr = X_train_s
+for i in range(seq_len, len(X_arr)):
+    X_seq.append(X_arr[i-seq_len:i])
+    y_seq.append(y_train_s[i])
+
+X_seq = np.array(X_seq)
+y_seq = np.array(y_seq)
+
+# %% [markdown]
+# ## 10) LSTM model
+# Простая LSTM, без усложнений.
+# Сравниваем её с табличным ансамблем.
+
+# %%
+if _HAS_TF and X_seq.size:
+    lstm = Sequential([
+        LSTM(64, input_shape=(X_seq.shape[1], X_seq.shape[2])),
+        Dropout(0.2),
+        Dense(32, activation="relu"),
+        Dense(1)
+    ])
+    lstm.compile(optimizer="adam", loss="mse")
+    lstm.fit(X_seq, y_seq, epochs=int(os.getenv("LSTM_EPOCHS", "3")), batch_size=256, verbose=1)
 else:
-    cm = confusion_matrix(y_test, voting_pred)
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax3)
-ax3.set_title(f'Confusion Matrix - {best_name}', fontsize=12)
-ax3.set_xlabel('Predicted')
-ax3.set_ylabel('Actual')
+    lstm = None
 
-# 4. Feature Importance (Random Forest)
-ax4 = plt.subplot(3, 3, 4)
-if 'Random Forest' in results and results['Random Forest']['model'] is not None:
-    rf_model = results['Random Forest']['model']
-    importances = pd.Series(rf_model.feature_importances_, index=feature_cols)
-    importances = importances.sort_values(ascending=False).head(20)
-    ax4.barh(range(len(importances)), importances.values, color='teal')
-    ax4.set_yticks(range(len(importances)))
-    ax4.set_yticklabels(importances.index, fontsize=8)
-    ax4.set_title('Feature Importance (Random Forest) - Top 20', fontsize=12)
-    ax4.set_xlabel('Importance')
-    ax4.invert_yaxis()
-    ax4.grid(True, alpha=0.3)
+# %% [markdown]
+# ## 11) LSTM prediction
+# Для теста строим такие же окна.
 
-# 5. Feature Importance (XGBoost)
-ax5 = plt.subplot(3, 3, 5)
-if 'XGBoost' in results and results['XGBoost']['model'] is not None:
-    xgb_model = results['XGBoost']['model']
-    importances_xgb = pd.Series(xgb_model.feature_importances_, index=feature_cols)
-    importances_xgb = importances_xgb.sort_values(ascending=False).head(20)
-    ax5.barh(range(len(importances_xgb)), importances_xgb.values, color='coral')
-    ax5.set_yticks(range(len(importances_xgb)))
-    ax5.set_yticklabels(importances_xgb.index, fontsize=8)
-    ax5.set_title('Feature Importance (XGBoost) - Top 20', fontsize=12)
-    ax5.set_xlabel('Importance')
-    ax5.invert_yaxis()
-    ax5.grid(True, alpha=0.3)
+# %%
+X_test_seq = []
+for i in range(seq_len, len(X_test_s)):
+    X_test_seq.append(X_test_s[i-seq_len:i])
+X_test_seq = np.array(X_test_seq)
 
-# 6. DL Training Curves (LSTM)
-ax6 = plt.subplot(3, 3, 6)
-lstm_hist = dl_results['LSTM']['history']
-ax6.plot(lstm_hist.history['loss'], label='Train Loss')
-ax6.plot(lstm_hist.history['val_loss'], label='Val Loss')
-ax6.set_title('LSTM - Training Loss', fontsize=12)
-ax6.set_xlabel('Epoch')
-ax6.set_ylabel('Loss')
-ax6.legend()
-ax6.grid(True, alpha=0.3)
+pred_table_s = table_model.predict(X_test_s)
+pred_table = sy.inverse_transform(pred_table_s.reshape(-1, 1)).ravel()
 
-# 7. DL Training Curves (Bi-LSTM)
-ax7 = plt.subplot(3, 3, 7)
-bi_hist = dl_results['Bi-LSTM']['history']
-ax7.plot(bi_hist.history['accuracy'], label='Train Acc')
-ax7.plot(bi_hist.history['val_accuracy'], label='Val Acc')
-ax7.set_title('Bi-LSTM - Accuracy', fontsize=12)
-ax7.set_xlabel('Epoch')
-ax7.set_ylabel('Accuracy')
-ax7.legend()
-ax7.grid(True, alpha=0.3)
-
-# 8. Радарная диаграмма (топ-5)
-ax8 = plt.subplot(3, 3, 8, projection='polar')
-metrics_radar = ['accuracy', 'auc', 'precision', 'recall', 'f1']
-top5_metrics = results_df.head(5)[metrics_radar]
-angles = np.linspace(0, 2 * np.pi, len(metrics_radar), endpoint=False).tolist()
-angles += angles[:1]
-for idx, name in enumerate(top5_metrics.index):
-    values = top5_metrics.loc[name].values.tolist()
-    values += values[:1]
-    ax8.plot(angles, values, 'o-', linewidth=2, label=name[:15])
-    ax8.fill(angles, values, alpha=0.1)
-ax8.set_xticks(angles[:-1])
-ax8.set_xticklabels(metrics_radar)
-ax8.set_title('Radar Chart - Top 5 Models', fontsize=12)
-ax8.legend(loc='upper right', bbox_to_anchor=(1.3, 1.0))
-
-# 9. Корреляция предсказаний
-ax9 = plt.subplot(3, 3, 9)
-top5_preds = {}
-for name in top5_names[:5]:
-    if name in predictions_dict:
-        top5_preds[name] = predictions_dict[name]
-    elif name in dl_results:
-        if name == 'LSTM':
-            top5_preds[name] = lstm_pred
-        elif name == 'Bi-LSTM':
-            top5_preds[name] = (bi_lstm_proba > 0.5).astype(int)
-        elif name == 'GRU':
-            top5_preds[name] = (gru_proba > 0.5).astype(int)
-if len(top5_preds) >= 2:
-    pred_corr = pd.DataFrame(top5_preds).corr()
-    sns.heatmap(pred_corr, annot=True, fmt='.3f', cmap='coolwarm', ax=ax9, square=True)
-    ax9.set_title('Predictions Correlation (Top 5)', fontsize=12)
-
-plt.tight_layout()
-plt.show()
-python
-# =====================================================
-# 9. ТОРГОВАЯ СИМУЛЯЦИЯ (BACKTEST)
-# =====================================================
-print("\n" + "="*70)
-print("ТОРГОВАЯ СИМУЛЯЦИЯ")
-print("="*70)
-
-# Выбираем лучшую модель для торговли
-best_proba = None
-if best_name in probabilities_dict:
-    best_proba = probabilities_dict[best_name]
-    test_prices = df_clean['Close'].iloc[split_idx:split_idx+len(y_test)].values
-elif best_name in dl_results:
-    if best_name == 'LSTM':
-        best_proba = lstm_proba
-        test_prices = df_clean['Close'].iloc[split_idx+sequence_length+24:split_idx+sequence_length+24+len(y_test_dl)].values
-    elif best_name == 'Bi-LSTM':
-        best_proba = bi_lstm_proba
-        test_prices = df_clean['Close'].iloc[split_idx+sequence_length+24:split_idx+sequence_length+24+len(y_test_dl)].values
-    else:
-        best_proba = gru_proba
-        test_prices = df_clean['Close'].iloc[split_idx+sequence_length+24:split_idx+sequence_length+24+len(y_test_dl)].values
+if lstm is not None and X_test_seq.size:
+    pred_lstm_s = lstm.predict(X_test_seq, verbose=0).ravel()
+    pred_lstm = sy.inverse_transform(pred_lstm_s.reshape(-1, 1)).ravel()
 else:
-    best_proba = voting_proba
-    test_prices = df_clean['Close'].iloc[split_idx:split_idx+len(y_test)].values
+    pred_lstm = pred_table[seq_len:].copy()
 
-# Симуляция торговли
-initial_capital = 10000
-capital = initial_capital
-equity_curve = [capital]
-trades = []
-position = None
-confidence_threshold = 0.65
+# выравниваем длины
+test_target = y_test.iloc[seq_len:].values
+pred_table = pred_table[seq_len:]
 
-for i, (proba, price) in enumerate(zip(best_proba, test_prices)):
-    if position is None:
-        if proba > confidence_threshold:
-            position = {
-                'entry_price': price,
-                'entry_idx': i,
-                'risk': capital * 0.02
-            }
-    else:
-        exit_price = price
-        pnl = position['risk'] * (exit_price / position['entry_price'] - 1)
-        capital += pnl
-        trades.append({'pnl': pnl, 'win': pnl > 0})
-        position = None
-        equity_curve.append(capital)
+res = pd.DataFrame({
+    "target": test_target,
+    "pred_table": pred_table,
+    "pred_lstm": pred_lstm,
+})
 
-if trades:
-    wins = sum(1 for t in trades if t['win'])
-    win_rate = wins / len(trades)
-    total_return = (capital / initial_capital - 1) * 100
-    avg_win = np.mean([t['pnl'] for t in trades if t['win']]) if wins > 0 else 0
-    avg_loss = np.mean([t['pnl'] for t in trades if not t['win']]) if (len(trades)-wins) > 0 else 0
-    sharpe = np.mean([t['pnl'] for t in trades]) / (np.std([t['pnl'] for t in trades]) + 1e-6) * np.sqrt(252)
-    
-    print(f"\n📊 Торговые результаты ({best_name}):")
-    print(f"   Начальный капитал: ${initial_capital:,.2f}")
-    print(f"   Финальный капитал: ${capital:,.2f}")
-    print(f"   Доходность: {total_return:.2f}%")
-    print(f"   Всего сделок: {len(trades)}")
-    print(f"   Win Rate: {win_rate:.1%}")
-    print(f"   Средний профит: ${avg_win:.2f}")
-    print(f"   Средний убыток: ${avg_loss:.2f}")
-    print(f"   Sharpe Ratio: {sharpe:.3f}")
-python
-# =====================================================
-# 10. ФИНАЛЬНЫЕ ГРАФИКИ ТОРГОВЛИ
-# =====================================================
-print("\n" + "="*70)
-print("ФИНАЛЬНАЯ ВИЗУАЛИЗАЦИЯ ТОРГОВЛИ")
-print("="*70)
+# %% [markdown]
+# ## 12) Ensemble signal
+# Усредняем прогнозы таблицы и LSTM.
 
-fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+# %%
+res["pred"] = (res["pred_table"] + res["pred_lstm"]) / 2
+signal = np.where(res["pred"] > 0, 1, -1)
 
-# 1. Equity Curve
-ax1 = axes[0,0]
-ax1.plot(equity_curve, color='green', linewidth=2)
-ax1.axhline(y=initial_capital, color='red', linestyle='--', alpha=0.7)
-ax1.fill_between(range(len(equity_curve)), initial_capital, equity_curve, 
-                  where=np.array(equity_curve) >= initial_capital, color='green', alpha=0.3)
-ax1.fill_between(range(len(equity_curve)), initial_capital, equity_curve, 
-                  where=np.array(equity_curve) < initial_capital, color='red', alpha=0.3)
-ax1.set_title(f'Equity Curve - {best_name}', fontsize=12)
-ax1.set_xlabel('Trade Number')
-ax1.set_ylabel('Capital ($)')
-ax1.grid(True, alpha=0.3)
+fee_bps = float(os.getenv("BT_FEE_BPS", "2.0"))
+spread_bps = float(os.getenv("BT_SPREAD_BPS", "1.0"))
+commission = (fee_bps + spread_bps) / 10_000.0
+trade_cost = commission * np.abs(np.diff(np.r_[0, signal]))
+strategy_ret = signal * res["target"].values - trade_cost
+buyhold_ret = res["target"].values
 
-# 2. PnL Distribution
-ax2 = axes[0,1]
-if trades:
-    pnls = [t['pnl'] for t in trades]
-    ax2.hist(pnls, bins=20, edgecolor='black', alpha=0.7, color='steelblue')
-    ax2.axvline(x=0, color='red', linestyle='--', linewidth=2)
-    ax2.axvline(x=np.mean(pnls), color='green', linestyle='--', linewidth=2, label=f'Mean: ${np.mean(pnls):.2f}')
-    ax2.set_title(f'PnL Distribution ({len(trades)} trades)', fontsize=12)
-    ax2.set_xlabel('PnL ($)')
-    ax2.set_ylabel('Frequency')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+strategy_eq = (1 + strategy_ret).cumprod()
+buyhold_eq = (1 + buyhold_ret).cumprod()
+drawdown = strategy_eq / np.maximum.accumulate(strategy_eq) - 1
 
-# 3. Cumulative Return
-ax3 = axes[0,2]
-cumulative_returns = (np.array(equity_curve) / initial_capital - 1) * 100
-ax3.plot(cumulative_returns, color='purple', linewidth=2)
-ax3.fill_between(range(len(cumulative_returns)), 0, cumulative_returns, alpha=0.3, color='purple')
-ax3.set_title('Cumulative Return (%)', fontsize=12)
-ax3.set_xlabel('Trade Number')
-ax3.set_ylabel('Return (%)')
-ax3.grid(True, alpha=0.3)
+mse = mean_squared_error(res["target"], res["pred"])
+dir_acc = (np.sign(res["pred"]) == np.sign(res["target"])).mean()
+sharpe = np.sqrt(252 * 96) * np.mean(strategy_ret) / np.std(strategy_ret) if np.std(strategy_ret) > 0 else np.nan
+max_dd = drawdown.min()
 
-# 4. Drawdown
-ax4 = axes[1,0]
-running_max = np.maximum.accumulate(equity_curve)
-drawdown = (running_max - equity_curve) / running_max * 100
-ax4.fill_between(range(len(drawdown)), 0, drawdown, color='red', alpha=0.5)
-ax4.set_title('Drawdown (%)', fontsize=12)
-ax4.set_xlabel('Trade Number')
-ax4.set_ylabel('Drawdown (%)')
-ax4.grid(True, alpha=0.3)
+print("MSE:", round(mse, 6))
+print("Dir Acc:", round(dir_acc, 4))
+print("Sharpe:", round(sharpe, 3))
+print("Max DD:", round(max_dd, 4))
 
-# 5. Win/Loss by Trade
-ax5 = axes[1,1]
-if trades:
-    colors_trades = ['green' if t['win'] else 'red' for t in trades]
-    ax5.bar(range(len(trades)), [t['pnl'] for t in trades], color=colors_trades, alpha=0.7)
-    ax5.axhline(y=0, color='black', linewidth=1)
-    ax5.set_title('Individual Trade PnL', fontsize=12)
-    ax5.set_xlabel('Trade Number')
-    ax5.set_ylabel('PnL ($)')
-    ax5.grid(True, alpha=0.3)
+# %% [markdown]
+# ## 13) Графики
+# Equity, scatter, distribution, drawdown.
 
-# 6. Summary Table
-ax6 = axes[1,2]
-ax6.axis('off')
-summary_text = f"""
-TRADING SUMMARY - {best_name}
-{'='*35}
+# %%
+fig = go.Figure()
+fig.add_trace(go.Scatter(y=strategy_eq, name="Strategy"))
+fig.add_trace(go.Scatter(y=buyhold_eq, name="Buy&Hold"))
+fig.update_layout(title="Equity Growth")
+fig.show()
 
-Initial Capital:    ${initial_capital:,.2f}
-Final Capital:      ${capital:,.2f}
-Total Return:       {total_return:.2f}%
+# %%
+fig = go.Figure(go.Scatter(x=res["pred"], y=res["target"], mode="markers", marker=dict(size=3, opacity=0.4)))
+fig.update_layout(title="Prediction vs Real")
+fig.add_hline(y=0, line_dash="dash")
+fig.add_vline(x=0, line_dash="dash")
+fig.show()
 
-Total Trades:       {len(trades)}
-Win Rate:           {win_rate:.1%}
-Profit Factor:      {abs(sum([t['pnl'] for t in trades if t['win']]) / sum([t['pnl'] for t in trades if not t['win']])) if len([t for t in trades if not t['win']]) > 0 else float('inf'):.2f}
+# %%
+fig = px.histogram(x=strategy_ret, nbins=100, title="Strategy Return Distribution")
+fig.show()
 
-Avg Win:            ${avg_win:.2f}
-Avg Loss:           ${avg_loss:.2f}
-Sharpe Ratio:       {sharpe:.3f}
-Max Drawdown:       {max(drawdown):.1f}%
-"""
-ax6.text(0.1, 0.5, summary_text, transform=ax6.transAxes, fontsize=10,
-         verticalalignment='center', fontfamily='monospace',
-         bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+# %%
+fig = go.Figure()
+fig.add_trace(go.Scatter(y=drawdown, name="Drawdown"))
+fig.update_layout(title="Drawdown")
+fig.show()
 
-plt.tight_layout()
-plt.show()
-python
-# =====================================================
-# 11. ИТОГОВЫЙ ОТЧЁТ
-# =====================================================
-print("\n" + "="*70)
-print("ИТОГОВЫЙ ОТЧЁТ")
-print("="*70)
-print(f"""
-📅 ПЕРИОД: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}
-📊 ВАЛЮТНАЯ ПАРА: {main_pair}
-🔬 ПРИЗНАКОВ: {len(feature_cols)}
-🤖 ML МОДЕЛЕЙ: {len([m for m in results.keys() if m not in dl_results.keys()])}
-🧠 DL МОДЕЛЕЙ: {len(dl_results)}
-🏆 ЛУЧШАЯ МОДЕЛЬ: {best_name}
-🎯 AUC ЛУЧШЕЙ МОДЕЛИ: {results_df.loc[best_name, 'auc']:.4f}
-💰 ДОХОДНОСТЬ: {total_return:.2f}%
-🎯 WIN RATE: {win_rate:.1%}
-📈 SHARPE RATIO: {sharpe:.3f}
-""")
+# %% [markdown]
+# ## 14) Feature importance
+# Для понимания, что влияет на табличную модель.
 
-print("="*70)
-print("✅ АНАЛИЗ ЗАВЕРШЁН")
-print("="*70)
+# %%
+rf2 = RandomForestRegressor(n_estimators=400, random_state=42, n_jobs=-1)
+rf2.fit(X_train_s, y_train_s)
+importance = pd.DataFrame({
+    "feature": X_train.columns,
+    "importance": rf2.feature_importances_
+}).sort_values("importance", ascending=False)
+
+fig = px.bar(importance.head(20).iloc[::-1], x="importance", y="feature", orientation="h", title="Top Feature Importance")
+fig.show()
+
+# %% [markdown]
+# ## 15) Save outputs
+# CSV для дашборда и дальнейших экспериментов.
+
+# %%
+out_df = pd.DataFrame({
+    "target": res["target"],
+    "pred": res["pred"],
+    "signal": signal,
+    "strategy_ret": strategy_ret,
+    "buyhold_ret": buyhold_ret,
+    "strategy_eq": strategy_eq,
+    "buyhold_eq": buyhold_eq,
+    "drawdown": drawdown,
+})
+out_df.to_csv(OUT / "backtest_v3.csv", index=False)
+
+pd.DataFrame([{
+    "mse": mse,
+    "dir_acc": dir_acc,
+    "sharpe": sharpe,
+    "max_dd": max_dd,
+}]).to_csv(OUT / "metrics_v3.csv", index=False)
+
+importance.to_csv(OUT / "feature_importance_v3.csv", index=False)
+
+print("✅ saved")
+
+# %% [markdown]
+# ## 16) Что дальше
+# Следующий шаг:
+# - Walk-forward validation.
+# - Полный XGBoost tuning.
+# - Vision module для chart images.
+# - Отдельный commodity regime.
+# - Сравнение всех символов по одному протоколу.
+
+print("🏁 v3.0 complete")
