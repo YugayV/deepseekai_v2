@@ -52,6 +52,7 @@ except Exception:
 load_dotenv()
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or "").strip()
 try:
     import psycopg2
 except Exception:
@@ -84,7 +85,25 @@ def load_trade_lessons(limit: int = 100) -> pd.DataFrame:
         except Exception:
             pass
 
-st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="Multi-Asset AI Trader", layout="wide")
+
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 1.2rem; padding-bottom: 1.6rem; max-width: 1280px; }
+      [data-testid="stSidebar"] { width: 360px; }
+      header { visibility: hidden; height: 0px; }
+      footer { visibility: hidden; height: 0px; }
+      #MainMenu { visibility: hidden; }
+      div[data-testid="stMetric"] { background: rgba(255,255,255,0.03); padding: 12px 12px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.06); }
+      div[data-testid="stMetricLabel"] > div { font-size: 0.95rem; opacity: 0.85; }
+      div[data-testid="stMetricValue"] > div { font-size: 1.45rem; }
+      .stTabs [data-baseweb="tab-list"] { gap: 6px; }
+      .stTabs [data-baseweb="tab"] { padding-top: 10px; padding-bottom: 10px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 RUN_BOT_IN_PROCESS = (os.getenv("RUN_BOT_IN_PROCESS") or "true").strip().lower() == "true"
 
@@ -550,8 +569,8 @@ if st.sidebar.button("🔄 Refresh Data"):
 # ============================================
 # MAIN TITLE
 # ============================================
-st.title("🤖 Multi-Asset Trading Bot")
-st.markdown("**Wave Multi-Scale | Real-time Signals**")
+st.title("Multi-Asset AI Trader")
+st.markdown("Wave multi-scale • Real-time signals")
 st.markdown("---")
 
 # ============================================
@@ -658,66 +677,6 @@ if portfolio:
     col3.metric("📊 Total PnL", f"{pnl_pct:+.2f}%")
     col4.metric("🎯 Active Positions", len(positions))
     col5.metric("💹 Total Trades", len(trades) if not trades.empty else 0)
-
-    realized_pnl = 0.0
-    realized_pnl_pct = 0.0
-    win_rate = 0.0
-    trades_today_pnl = 0.0
-
-    if isinstance(trades, pd.DataFrame) and (not trades.empty) and ('pnl' in trades.columns):
-        t = trades.copy()
-        t['pnl'] = pd.to_numeric(t['pnl'], errors='coerce').fillna(0.0)
-        realized_pnl = float(t['pnl'].sum())
-        realized_pnl_pct = (realized_pnl / start_capital) * 100.0 if start_capital > 0 else 0.0
-
-        if 'exit_date' in t.columns:
-            dt = pd.to_datetime(t['exit_date'], errors='coerce', utc=False)
-            today = datetime.utcnow().date()
-            t_today = t[dt.dt.date == today]
-            trades_today_pnl = float(pd.to_numeric(t_today['pnl'], errors='coerce').fillna(0.0).sum()) if (t_today is not None and not t_today.empty) else 0.0
-
-        if 'win' in t.columns:
-            w = pd.to_numeric(t['win'], errors='coerce')
-            if w.notna().any():
-                win_rate = float((w.fillna(0).astype(int) == 1).mean() * 100.0)
-        else:
-            win_rate = float((t['pnl'] > 0).mean() * 100.0) if len(t) > 0 else 0.0
-
-    try:
-        unreal = float(portfolio.get('unrealized_pnl', 0.0) or 0.0)
-    except Exception:
-        unreal = 0.0
-
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("✅ Realized PnL", f"${realized_pnl:+.2f}")
-    p2.metric("🟡 Unrealized PnL", f"${unreal:+.2f}")
-    p3.metric("📅 Today PnL", f"${trades_today_pnl:+.2f}")
-    p4.metric("🏆 Win rate", f"{win_rate:.1f}%")
-
-    with st.expander("📈 P&L chart", expanded=False):
-        if isinstance(trades, pd.DataFrame) and (not trades.empty) and ('pnl' in trades.columns):
-            t = trades.copy()
-            t['pnl'] = pd.to_numeric(t['pnl'], errors='coerce').fillna(0.0)
-
-            if 'exit_date' in t.columns:
-                t['exit_dt'] = pd.to_datetime(t['exit_date'], errors='coerce')
-                t = t.sort_values('exit_dt')
-            else:
-                t = t.reset_index(drop=True)
-
-            t['cum_equity'] = float(start_capital) + t['pnl'].cumsum()
-
-            figp = go.Figure()
-            figp.add_trace(go.Scatter(x=list(range(len(t))), y=t['cum_equity'], mode='lines', name='Realized equity'))
-            figp.add_hline(y=float(start_capital), line_dash='dash', line_color='gray')
-            figp.update_layout(height=260, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(figp, use_container_width=True, key="pnl_equity_chart")
-
-            cols = [c for c in ['exit_date', 'asset', 'symbol', 'side', 'exit_reason', 'pnl', 'pnl_percent'] if c in t.columns]
-            if cols:
-                st.dataframe(t[cols].tail(50), use_container_width=True)
-        else:
-            st.info("P&L появится после первых закрытых сделок (trade_history.csv).")
 
     used_margin = portfolio.get('used_margin')
     unrealized_pnl = portfolio.get('unrealized_pnl')
@@ -834,7 +793,7 @@ if portfolio:
         st.info("No active positions.")
     else:
         for symbol, pos in positions.items():
-            with st.expander(f"📍 {symbol} - {pos['side'].upper()}", expanded=True):
+            with st.expander(f"📍 {symbol} - {pos['side'].upper()}", expanded=False):
                 c1, c2, c3, c4 = st.columns(4)
                 c1.write(f"**Entry Price:** {pos['entry_price']:.5f}")
                 c2.write(f"**Size:** {pos['size']:.4f}")
@@ -1216,7 +1175,7 @@ else:
 st.markdown("---")
 
 st.subheader("📷 CVision (Chart Screenshot)")
-api_key = os.getenv("OPENROUTER_API_KEY")
+api_key = OPENROUTER_API_KEY
 uploaded = st.file_uploader("Upload a chart screenshot (PNG/JPG)", type=["png", "jpg", "jpeg"])
 vision_model = st.text_input("Vision model (OpenRouter)", value=os.getenv("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini"))
 vision_prompt = st.text_area(
