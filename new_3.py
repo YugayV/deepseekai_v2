@@ -9,33 +9,27 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import ta
 import plotly.graph_objects as go
 import plotly.express as px
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_squared_error
 from pathlib import Path
 
 # Новые модели
+import lightgbm as lgb
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
 
 # LSTM
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    _HAS_TF = True
-except Exception:
-    tf = None
-    Sequential = None
-    LSTM = None
-    Dense = None
-    Dropout = None
-    _HAS_TF = False
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 
 OUT = Path("output")
 OUT.mkdir(exist_ok=True)
@@ -65,39 +59,6 @@ for sym in symbols:
 # ## 2) Features (как раньше, но с проверкой)
 
 # %%
-def _sma(s: pd.Series, window: int) -> pd.Series:
-    return s.rolling(window=window).mean()
-
-
-def _ema(s: pd.Series, span: int) -> pd.Series:
-    return s.ewm(span=span, adjust=False).mean()
-
-
-def _rsi(s: pd.Series, window: int = 14) -> pd.Series:
-    delta = s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta.where(delta < 0, 0.0)).astype(float)
-    avg_gain = gain.rolling(window).mean()
-    avg_loss = loss.rolling(window).mean()
-    rs = avg_gain / avg_loss.replace(0.0, np.nan)
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def _macd(s: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series]:
-    macd = _ema(s, fast) - _ema(s, slow)
-    macd_sig = _ema(macd, signal)
-    return macd, macd_sig
-
-
-def _atr(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
-    prev_close = close.shift(1)
-    tr1 = (high - low).abs()
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(window).mean()
-
-
 def process_features(df):
     df = df.copy()
     c = df["Close"]
@@ -107,15 +68,17 @@ def process_features(df):
     df["ret4"] = c.pct_change(4)
     
     # Trend
-    df["sma20"] = _sma(c, window=20)
-    df["sma50"] = _sma(c, window=50)
+    df["sma20"] = ta.trend.sma_indicator(c, window=20)
+    df["sma50"] = ta.trend.sma_indicator(c, window=50)
     
     # Oscillators
-    df["rsi14"] = _rsi(c, window=14)
-    df["macd"], df["macd_sig"] = _macd(c)
+    df["rsi14"] = ta.momentum.rsi(c, window=14)
+    macd = ta.trend.MACD(c)
+    df["macd"] = macd.macd()
+    df["macd_sig"] = macd.macd_signal()
     
     # Volatility
-    df["atr14"] = _atr(df["High"], df["Low"], c, window=14)
+    df["atr14"] = ta.volatility.average_true_range(df["High"], df["Low"], c, window=14)
     
     # Volume
     df["vol_chg"] = df["Volume"].replace(0, np.nan).pct_change()
@@ -256,11 +219,21 @@ xgb = XGBRegressor(
     random_state=42,
     n_jobs=-1,
 )
+lgbm = lgb.LGBMRegressor(
+    n_estimators=300,
+    learning_rate=0.05,
+    max_depth=-1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    random_state=42,
+    n_jobs=-1,
+)
 
 table_model = VotingRegressor([
     ("rf", rf),
     ("gbr", gbr),
     ("xgb", xgb),
+    ("lgbm", lgbm),
 ])
 
 table_model.fit(X_train_s, y_train_s)
@@ -289,17 +262,14 @@ y_seq = np.array(y_seq)
 # Сравниваем её с табличным ансамблем.
 
 # %%
-if _HAS_TF and X_seq.size:
-    lstm = Sequential([
-        LSTM(64, input_shape=(X_seq.shape[1], X_seq.shape[2])),
-        Dropout(0.2),
-        Dense(32, activation="relu"),
-        Dense(1)
-    ])
-    lstm.compile(optimizer="adam", loss="mse")
-    lstm.fit(X_seq, y_seq, epochs=int(os.getenv("LSTM_EPOCHS", "3")), batch_size=256, verbose=1)
-else:
-    lstm = None
+lstm = Sequential([
+    LSTM(64, input_shape=(X_seq.shape[1], X_seq.shape[2])),
+    Dropout(0.2),
+    Dense(32, activation="relu"),
+    Dense(1)
+])
+lstm.compile(optimizer="adam", loss="mse")
+lstm.fit(X_seq, y_seq, epochs=3, batch_size=256, verbose=1)
 
 # %% [markdown]
 # ## 11) LSTM prediction
@@ -314,11 +284,8 @@ X_test_seq = np.array(X_test_seq)
 pred_table_s = table_model.predict(X_test_s)
 pred_table = sy.inverse_transform(pred_table_s.reshape(-1, 1)).ravel()
 
-if lstm is not None and X_test_seq.size:
-    pred_lstm_s = lstm.predict(X_test_seq, verbose=0).ravel()
-    pred_lstm = sy.inverse_transform(pred_lstm_s.reshape(-1, 1)).ravel()
-else:
-    pred_lstm = pred_table[seq_len:].copy()
+pred_lstm_s = lstm.predict(X_test_seq, verbose=0).ravel()
+pred_lstm = sy.inverse_transform(pred_lstm_s.reshape(-1, 1)).ravel()
 
 # выравниваем длины
 test_target = y_test.iloc[seq_len:].values
@@ -338,9 +305,6 @@ res = pd.DataFrame({
 res["pred"] = (res["pred_table"] + res["pred_lstm"]) / 2
 signal = np.where(res["pred"] > 0, 1, -1)
 
-fee_bps = float(os.getenv("BT_FEE_BPS", "2.0"))
-spread_bps = float(os.getenv("BT_SPREAD_BPS", "1.0"))
-commission = (fee_bps + spread_bps) / 10_000.0
 trade_cost = commission * np.abs(np.diff(np.r_[0, signal]))
 strategy_ret = signal * res["target"].values - trade_cost
 buyhold_ret = res["target"].values
@@ -382,10 +346,11 @@ fig = px.histogram(x=strategy_ret, nbins=100, title="Strategy Return Distributio
 fig.show()
 
 # %%
-fig = go.Figure()
-fig.add_trace(go.Scatter(y=drawdown, name="Drawdown"))
-fig.update_layout(title="Drawdown")
-fig.show()
+plt.figure(figsize=(12, 4))
+plt.plot(drawdown)
+plt.title("Drawdown")
+plt.grid(True)
+plt.show()
 
 # %% [markdown]
 # ## 14) Feature importance
@@ -399,8 +364,11 @@ importance = pd.DataFrame({
     "importance": rf2.feature_importances_
 }).sort_values("importance", ascending=False)
 
-fig = px.bar(importance.head(20).iloc[::-1], x="importance", y="feature", orientation="h", title="Top Feature Importance")
-fig.show()
+plt.figure(figsize=(10, 8))
+sns.barplot(data=importance.head(20), x="importance", y="feature")
+plt.title("Top Feature Importance")
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## 15) Save outputs
