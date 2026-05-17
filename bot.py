@@ -3374,6 +3374,36 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error saving bot meta: {e}")
 
+    def _append_last_decision(self, row: dict):
+        if not isinstance(self.engine, PaperTradingEngine):
+            return
+        if not isinstance(row, dict):
+            return
+
+        try:
+            data = {}
+            if os.path.exists(PORTFOLIO_PATH):
+                with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+
+            meta = dict((data.get("meta") or {}))
+            buf = meta.get("last_decisions")
+            if not isinstance(buf, list):
+                buf = []
+
+            buf.append(row)
+            if len(buf) > 200:
+                buf = buf[-200:]
+
+            meta["last_decisions"] = buf
+            data["meta"] = meta
+            data["last_update"] = str(datetime.now())
+
+            with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            logger.error(f"Error appending last_decision: {e}")
+
     def _record_block(self, symbol: str, reason: str):
         try:
             rsn = str(reason or "unknown")
@@ -3722,6 +3752,30 @@ class TradingBot:
                         rs = str(decision.get('reasoning_short') or '').strip()
                         suffix = f"Macro alloc -{reduce_pct:.0f}%"
                         decision['reasoning_short'] = (f"{rs}; {suffix}" if rs else suffix)[:250]
+
+                try:
+                    self._append_last_decision({
+                        "ts": str(datetime.now()),
+                        "symbol": str(symbol),
+                        "price": float(current_price),
+                        "trade_decision": str(decision.get("trade_decision") or "NO"),
+                        "side": str(decision.get("side") or "long"),
+                        "signal_strength": str(decision.get("signal_strength") or ""),
+                        "reasoning_short": str(decision.get("reasoning_short") or "")[:250],
+                        "setup_score": int(setup_score),
+                        "min_setup_score": int(min_score),
+                        "quality_mode": str(quality_mode),
+                        "atr_pct": float(atr_pct) if atr_pct is not None else None,
+                        "min_atr_pct": float(min_atr),
+                        "max_atr_pct": float(max_atr),
+                        "hour_utc": int(hour_utc),
+                        "excluded_hour_ok": bool(ex_ok),
+                        "session_ok": bool(sess_ok),
+                        "macro_align": float(decision.get("macro_align")) if decision.get("macro_align") is not None else None,
+                        "usd_strength_24h": float(decision.get("usd_strength_24h")) if decision.get("usd_strength_24h") is not None else None,
+                    })
+                except Exception:
+                    pass
 
                 if decision.get('trade_decision') == 'YES':
                     if decision.get('trade_alloc_pct') is None:

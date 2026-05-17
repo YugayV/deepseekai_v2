@@ -53,6 +53,8 @@ load_dotenv()
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+OPENROUTER_SITE_URL = (os.getenv("OPENROUTER_SITE_URL") or "").strip()
+OPENROUTER_APP_NAME = (os.getenv("OPENROUTER_APP_NAME") or "").strip()
 try:
     import psycopg2
 except Exception:
@@ -104,6 +106,25 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+def _get_openrouter_api_key() -> str:
+    v = st.session_state.get("openrouter_api_key_override")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return OPENROUTER_API_KEY
+
+def _openrouter_client(api_key: str):
+    import openai
+    headers = {}
+    if OPENROUTER_SITE_URL:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+    if OPENROUTER_APP_NAME:
+        headers["X-Title"] = OPENROUTER_APP_NAME
+    return openai.OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers=(headers or None),
+    )
 
 RUN_BOT_IN_PROCESS = (os.getenv("RUN_BOT_IN_PROCESS") or "true").strip().lower() == "true"
 
@@ -245,6 +266,17 @@ CMD_PATH = os.path.join(DATA_DIR, "bot_command.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 BOT_API_URL = (os.getenv("BOT_API_URL") or "").rstrip("/")
+
+with st.sidebar.expander("🔑 OpenRouter", expanded=False):
+    st.text_input("API key (session)", type="password", key="openrouter_api_key_override")
+    k = _get_openrouter_api_key()
+    if not k:
+        st.error("OPENROUTER_API_KEY is missing.")
+    else:
+        st.success("API key is set.")
+    if st.button("Clear session key", width='stretch'):
+        st.session_state["openrouter_api_key_override"] = ""
+        st.rerun()
 
 def _post_bot_command(payload: dict):
     if RUN_BOT_IN_PROCESS:
@@ -454,6 +486,52 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             tbl = res.get('table')
             if tbl is not None:
                 st.dataframe(tbl, width='stretch')
+
+    if st.button("⚡ More trades preset", width='stretch'):
+        _post_bot_command({
+            "command": "set_filters",
+            "strategy_mode": str(strategy_mode),
+            "use_ml": False,
+            "block_weak_signals": False,
+            "cooldown_bars": 0,
+            "use_atr_risk": bool(use_atr_risk),
+            "atr_sl_mult": float(atr_sl_mult),
+            "atr_tp_mult": float(atr_tp_mult),
+            "quality_mode": "balanced",
+            "min_setup_score": 1,
+            "use_session_filter": False,
+            "use_orb": False,
+            "orb_min_range_pct": float(orb_min_range_pct),
+            "orb_max_range_pct": float(orb_max_range_pct),
+            "orb_alloc_reduce_pct": float(orb_alloc_reduce_pct),
+            "min_atr_pct": 0.0,
+            "max_atr_pct": 5.0,
+            "risk_per_trade_pct": float(risk_per_trade_pct),
+            "paper_fee_bps": float(paper_fee_bps),
+            "paper_spread_bps": float(paper_spread_bps),
+            "max_trade_alloc_pct": float(trade_alloc_pct),
+            "max_hold_bars": int(max_hold_bars),
+            "use_partial_take": bool(use_partial_take),
+            "partial_take_fraction": float(partial_take_fraction),
+            "partial_take_r": float(partial_take_r),
+            "spread_alloc_reduce_threshold_bps": float(spread_alloc_reduce_threshold_bps),
+            "spread_alloc_reduce_pct": float(spread_alloc_reduce_pct),
+            "risk_guard_enabled": False,
+            "max_open_positions": int(max_open_positions),
+            "max_daily_drawdown_pct": float(max_daily_drawdown_pct),
+            "max_loss_streak": int(max_loss_streak),
+            "guard_pause_seconds": int(guard_pause_seconds),
+            "use_wave_filter": False,
+            "wave_trend_block_pct": float(wave_trend_block_pct),
+            "use_macro": bool(use_macro),
+            "use_dxy_filter": False,
+            "dxy_trend_block_pct": float(dxy_trend_block_pct),
+            "use_polymarket": bool(use_polymarket),
+            "use_macro_score": bool(use_macro_score),
+            "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
+            "time": str(datetime.now()),
+        })
+        st.success("More-trades preset applied")
 
     if st.button("✅ Apply Filters", width='stretch'):
         _post_bot_command({
@@ -860,46 +938,33 @@ else:
 
 st.markdown("---")
 
-st.subheader("🌍 Macro (USD strength)")
+st.subheader("🧾 Why no trades?")
 if isinstance(portfolio, dict):
     meta = portfolio.get('meta') if isinstance(portfolio.get('meta'), dict) else {}
+    blocked = meta.get("blocked") if isinstance(meta.get("blocked"), dict) else {}
+    reasons = blocked.get("reasons") if isinstance(blocked.get("reasons"), dict) else {}
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total blocks", int(blocked.get("total") or 0))
+    c2.metric("Cooldown blocks", int(reasons.get("cooldown") or 0))
+    c3.metric("Weak blocks", int(reasons.get("weak") or 0))
+
+    if reasons:
+        r = pd.DataFrame([{"reason": str(k), "count": int(v)} for k, v in reasons.items()]).sort_values("count", ascending=False)
+        st.dataframe(r, use_container_width=True)
+
     last_decisions = meta.get('last_decisions') if isinstance(meta.get('last_decisions'), list) else []
-
-    mrows = []
-    for d in last_decisions[-80:]:
-        if not isinstance(d, dict):
-            continue
-        sym = str(d.get('symbol') or d.get('asset') or '').strip()
-        if not sym:
-            continue
-        try:
-            usd24 = float(d.get('usd_strength_24h') or 0.0)
-        except Exception:
-            usd24 = 0.0
-        try:
-            align = float(d.get('macro_align') or 0.0)
-        except Exception:
-            align = 0.0
-        mrows.append({'symbol': sym, 'usd_strength_24h': usd24, 'macro_align': align})
-
-    if mrows:
-        mdf = pd.DataFrame(mrows)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("USD strength avg (24h)", f"{mdf['usd_strength_24h'].mean():+.2f}%")
-        c2.metric("Macro align avg", f"{mdf['macro_align'].mean():+.2f}")
-        c3.metric("Samples", int(len(mdf)))
-
-        figm = go.Figure()
-        figm.add_trace(go.Scatter(y=mdf['usd_strength_24h'], mode='lines', name='USD strength 24h (%)'))
-        figm.add_hline(y=0, line_dash='dash', line_color='gray')
-        figm.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(figm, use_container_width=True)
-
-        st.dataframe(mdf.tail(20), width='stretch')
+    if last_decisions:
+        df_d = pd.DataFrame([d for d in last_decisions if isinstance(d, dict)])
+        if not df_d.empty:
+            cols = [c for c in ["ts", "symbol", "price", "trade_decision", "side", "signal_strength", "reasoning_short", "setup_score", "min_setup_score", "quality_mode", "atr_pct", "hour_utc"] if c in df_d.columns]
+            st.dataframe(df_d[cols].tail(80), use_container_width=True)
+        else:
+            st.info("No decision rows yet.")
     else:
-        st.info("Macro data will appear after new decisions. Run the bot for a few cycles.")
+        st.info("No decisions yet. Press Start All (or wait one demo cycle) to generate decision logs.")
 else:
-    st.info("Start the bot to populate macro data.")
+    st.info("Portfolio data not found. Start the bot and press Start All to generate state.")
 
 st.markdown("---")
 
@@ -1175,7 +1240,7 @@ else:
 st.markdown("---")
 
 st.subheader("📷 CVision (Chart Screenshot)")
-api_key = OPENROUTER_API_KEY
+api_key = _get_openrouter_api_key()
 uploaded = st.file_uploader("Upload a chart screenshot (PNG/JPG)", type=["png", "jpg", "jpeg"])
 vision_model = st.text_input("Vision model (OpenRouter)", value=os.getenv("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini"))
 vision_prompt = st.text_area(
@@ -1195,8 +1260,7 @@ if uploaded is not None:
                 b = uploaded.getvalue()
                 mime = uploaded.type or "image/png"
                 data_url = f"data:{mime};base64,{base64.b64encode(b).decode('utf-8')}"
-                import openai
-                client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+                client = _openrouter_client(api_key)
                 resp = client.chat.completions.create(
                     model=str(vision_model).strip(),
                     messages=[
@@ -1214,7 +1278,11 @@ if uploaded is not None:
                 st.success("CVision result:")
                 st.write(resp.choices[0].message.content)
             except Exception as e:
-                st.error(f"CVision error: {e}")
+                msg = str(e)
+                if "401" in msg:
+                    st.error("CVision error: 401 Unauthorized. Check that OPENROUTER_API_KEY is valid (or paste it in sidebar → OpenRouter).")
+                else:
+                    st.error(f"CVision error: {e}")
 else:
     st.caption("Tip: take a screenshot from TradingView and upload it here.")
 
@@ -1428,13 +1496,13 @@ if portfolio and ai_symbol in portfolio.get('positions', {}):
     st.info(f"📍 Active Position: {pos['side'].upper()} | Entry: {pos['entry_price']:.5f}")
 
 if st.button("New Analysis", key="ai_single"):
+    api_key = _get_openrouter_api_key()
     if not api_key:
         st.error("API Key not found!")
     else:
         with st.spinner(f"AI analyzing {ai_symbol}..."):
             try:
-                import openai
-                client = openai.OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+                client = _openrouter_client(api_key)
 
                 df_analysis = fetch_asset_data(ai_symbol, period="1mo", interval=timeframe)
                 if df_analysis is not None:
@@ -1463,7 +1531,11 @@ if st.button("New Analysis", key="ai_single"):
                 else:
                     st.error(f"No data for {ai_symbol}")
             except Exception as e:
-                st.error(f"AI Error: {e}")
+                msg = str(e)
+                if "401" in msg:
+                    st.error("AI Error: 401 Unauthorized. Check that OPENROUTER_API_KEY is valid (or paste it in sidebar → OpenRouter).")
+                else:
+                    st.error(f"AI Error: {e}")
 
 if st.button("🚀 Trade This Asset", key="trade_single"):
     _post_bot_command({
