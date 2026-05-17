@@ -164,7 +164,7 @@ try:
         openai = None
 
     from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-    from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+    from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
     from telegram.request import HTTPXRequest
 except Exception as e:
     print(f"❌ CRITICAL IMPORT ERROR: {e}")
@@ -221,6 +221,10 @@ USE_ML_DEFAULT = (os.getenv("USE_ML_DEFAULT", "false").strip().lower() in ("1", 
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", 96))
 AI_MIN_TOKENS_ON_402 = int(os.getenv("AI_MIN_TOKENS_ON_402", 16))
+OPENROUTER_SITE_URL = (os.getenv("OPENROUTER_SITE_URL") or "").strip()
+OPENROUTER_APP_NAME = (os.getenv("OPENROUTER_APP_NAME") or "").strip()
+OPENROUTER_TEXT_MODEL = (os.getenv("OPENROUTER_TEXT_MODEL") or "deepseek/deepseek-chat").strip()
+OPENROUTER_VISION_MODEL = (os.getenv("OPENROUTER_VISION_MODEL") or "openai/gpt-4o-mini").strip()
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
@@ -311,6 +315,8 @@ class MultiChannelNotifier:
                 self.application.add_handler(CommandHandler("start", self._cmd_start))
                 self.application.add_handler(CommandHandler("menu", self._cmd_start))
                 self.application.add_handler(CallbackQueryHandler(self._handle_callbacks))
+                self.application.add_handler(MessageHandler(filters.PHOTO, self._handle_chart_image))
+                self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_chart_image))
                 self.application.add_error_handler(self._on_error)
 
                 await self.application.initialize()
@@ -320,6 +326,63 @@ class MultiChannelNotifier:
                 logger.info("✅ Telegram bot initialized with Main Menu")
             except Exception as e:
                 logger.error(f"Telegram init error: {e}")
+
+    async def _handle_chart_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            msg = update.message
+            if msg is None:
+                return
+
+            caption = (msg.caption or "").strip()
+            prompt = caption if caption else "Проанализируй скриншот графика: тренд, ключевые уровни, сценарий входа, TP/SL и риски. Отвечай на русском. Коротко и по пунктам."
+
+            file_id = None
+            mime = None
+            if msg.photo:
+                file_id = msg.photo[-1].file_id
+                mime = "image/jpeg"
+            elif msg.document:
+                mt = (msg.document.mime_type or "").strip()
+                if not mt.startswith("image/"):
+                    return
+                file_id = msg.document.file_id
+                mime = mt
+
+            if not file_id:
+                await msg.reply_text("Не вижу картинку. Пришли фото/скриншот графика.")
+                return
+
+            await msg.reply_text("⏳ Анализирую картинку...")
+
+            f = await context.bot.get_file(file_id)
+            import io
+            buf = io.BytesIO()
+            try:
+                await f.download_to_memory(out=buf)
+            except Exception:
+                try:
+                    await f.download_to_memory(buf)
+                except Exception:
+                    data = await f.download_as_bytearray()
+                    buf.write(bytes(data))
+
+            image_bytes = buf.getvalue()
+            if not image_bytes:
+                await msg.reply_text("Не удалось скачать изображение из Telegram.")
+                return
+            if len(image_bytes) > 8 * 1024 * 1024:
+                await msg.reply_text("Картинка слишком большая. Пришли скриншот поменьше (до ~8MB).")
+                return
+
+            advisor = AIAdvisor()
+            out = advisor.analyze_image(image_bytes=image_bytes, mime=mime or "image/jpeg", prompt_ru=prompt, model=OPENROUTER_VISION_MODEL)
+            await msg.reply_text(out or "Не удалось получить ответ от модели.")
+        except Exception as e:
+            err = str(e)
+            if "401" in err:
+                await update.message.reply_text("Ошибка 401 (Unauthorized). Проверь OPENROUTER_API_KEY.")
+            else:
+                await update.message.reply_text(f"Ошибка анализа картинки: {e}")
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -892,12 +955,18 @@ class AIAdvisor:
     def __init__(self, api_key=None):
         client = None
         if openai is not None and (api_key or AI_API_KEY):
+            headers = {}
+            if OPENROUTER_SITE_URL:
+                headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+            if OPENROUTER_APP_NAME:
+                headers["X-Title"] = OPENROUTER_APP_NAME
             client = openai.OpenAI(
                 api_key=(api_key or AI_API_KEY),
-                base_url="https://openrouter.ai/api/v1"
+                base_url="https://openrouter.ai/api/v1",
+                default_headers=(headers or None),
             )
         self.client = client
-        self.model = "deepseek/deepseek-chat"
+        self.model = OPENROUTER_TEXT_MODEL
         self.max_tokens = int(AI_MAX_TOKENS)
         self.disabled_until_ts = 0.0
         self.last_auth_error_log_ts = 0.0
@@ -1081,6 +1150,51 @@ Rules:
                 'reasoning_short': 'AI API error',
                 'ai_error_code': 500
             }
+
+    def analyze_image(self, image_bytes: bytes, mime: str, prompt_ru: str, model: str | None = None) -> str:
+        if not self.client or self._is_disabled():
+            return "AI недоступен (ключ/доступ). Проверь OPENROUTER_API_KEY."
+
+        try:
+            import base64
+            data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+            m = (model or OPENROUTER_VISION_MODEL).strip() if (model or OPENROUTER_VISION_MODEL) else "openai/gpt-4o-mini"
+
+            system = (
+                "Ты — аналитик по скриншотам графиков (технический анализ). "
+                "Отвечай ТОЛЬКО на русском, кратко и структурированно, без воды."
+            )
+            user_text = (
+                f"{prompt_ru}\n\n"
+                "Формат ответа:\n"
+                "1) Тренд/контекст\n"
+                "2) Уровни (S/R)\n"
+                "3) Сценарий (вход/отмена)\n"
+                "4) TP/SL (как идея)\n"
+                "5) Риски/что может сломать сетап\n"
+            )
+
+            resp = self.client.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    },
+                ],
+                temperature=0.2,
+                max_tokens=500,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            msg = str(e)
+            if "401" in msg or "403" in msg or "Unauthorized" in msg:
+                return "Ошибка доступа (401/403). Проверь OPENROUTER_API_KEY."
+            return f"Ошибка анализа: {e}"
 
     def review_trade(self, trade: dict, context: dict | None = None) -> dict:
         if not self.client:
