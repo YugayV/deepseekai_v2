@@ -899,12 +899,16 @@ def _sweep_events(df: pd.DataFrame, pivot_len: int):
 def _signals_from_smc(df_low: pd.DataFrame, sweep_high: pd.DataFrame, imb: pd.DataFrame, engulf_bull: pd.Series, engulf_bear: pd.Series, *, side: str, max_bars_after_sweep: int, max_bars_after_imbalance: int):
     if df_low is None or df_low.empty:
         return pd.Series(False, index=pd.Index([]))
+    try:
+        df_low = df_low.sort_index()
+    except Exception:
+        pass
     out = pd.Series(False, index=df_low.index)
     if sweep_high is None or sweep_high.empty or imb is None or imb.empty:
         return out
 
-    dfp = df_low.reset_index().rename(columns={"index": "ts"})
-    dfp["pos"] = np.arange(len(dfp), dtype=int)
+    dfp = pd.DataFrame({"ts": pd.to_datetime(df_low.index)})
+    dfp["pos"] = np.arange(len(df_low), dtype=int)
 
     if side == "long":
         sweeps = sweep_high[sweep_high["dir"] == "down"][["ts"]].copy()
@@ -1326,19 +1330,29 @@ else:
             ny_2h_mask = pd.Series(ny_2h_mask, index=df15.index)
 
         ldn_ok = pd.Series(True, index=df15.index)
+        last_london_sweep_by_day = {}
+        last_london_sweep_ts_today = None
         if pine_require_london_sweep and (not sweeps_15.empty):
             in_ldn = sweeps_15["ts"].map(lambda x: _in_range_utc(x, 7 * 60, 16 * 60))
             ldn_sweeps = sweeps_15.loc[in_ldn]
-            last_by_day = {}
             for t in ldn_sweeps["ts"].tolist():
                 d = pd.Timestamp(t).date()
-                prev = last_by_day.get(d)
+                prev = last_london_sweep_by_day.get(d)
                 if prev is None or pd.Timestamp(t) > pd.Timestamp(prev):
-                    last_by_day[d] = t
-            ldn_ok = df15.index.map(lambda x: (x.date() in last_by_day) and (pd.Timestamp(x) >= pd.Timestamp(last_by_day.get(x.date()))))
+                    last_london_sweep_by_day[d] = t
+            try:
+                last_london_sweep_ts_today = last_london_sweep_by_day.get(df15.index[-1].date())
+            except Exception:
+                last_london_sweep_ts_today = None
+
+            ldn_ok = df15.index.map(lambda x: (x.date() in last_london_sweep_by_day) and (pd.Timestamp(x) >= pd.Timestamp(last_london_sweep_by_day.get(x.date()))))
             ldn_ok = pd.Series(ldn_ok, index=df15.index)
 
         allow = ny_mask & ny_2h_mask & ldn_ok
+        s1_long_raw = s1_long.copy()
+        s1_short_raw = s1_short.copy()
+        s2_long_raw = s2_long_15.copy()
+        s2_short_raw = s2_short_15.copy()
         s1_long = s1_long & allow
         s1_short = s1_short & allow
         s2_long_15 = s2_long_15 & allow
@@ -1469,6 +1483,96 @@ else:
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
         st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("🧪 Проверка стратегии NY SMC (Pine)", expanded=False):
+            now_ts = df15.index[-1]
+            now_utc = pd.Timestamp(now_ts)
+            if now_utc.tzinfo is not None:
+                now_utc = now_utc.tz_convert("UTC").tz_localize(None)
+
+            g_ny = bool(allow.iloc[-1]) if len(allow) else False
+            g_ny_sess = bool(ny_mask.iloc[-1]) if len(ny_mask) else True
+            g_ny_2h = bool(ny_2h_mask.iloc[-1]) if len(ny_2h_mask) else True
+            g_ldn = bool(ldn_ok.iloc[-1]) if len(ldn_ok) else True
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Текущее время (UTC)", now_utc.strftime("%Y-%m-%d %H:%M"))
+            c2.metric("NY-сессия", "OK" if g_ny_sess else "NO")
+            c3.metric("Первые 2 часа NY", "OK" if g_ny_2h else "NO")
+            c4.metric("Свип Лондона", "OK" if g_ldn else "NO")
+            c5.metric("Вход сейчас", "YES" if g_ny else "NO")
+
+            gate_from = None
+            day0 = now_utc.normalize()
+            candidates = []
+            if pine_ny_session_only or pine_ny_first_2h_only:
+                candidates.append(day0 + pd.Timedelta(hours=12))
+            if pine_require_london_sweep:
+                if last_london_sweep_ts_today is not None:
+                    lt = pd.Timestamp(last_london_sweep_ts_today)
+                    if lt.tzinfo is not None:
+                        lt = lt.tz_convert("UTC").tz_localize(None)
+                    candidates.append(lt)
+                else:
+                    candidates = []
+
+            if candidates:
+                try:
+                    gate_from = max(candidates)
+                except Exception:
+                    gate_from = None
+
+            if last_london_sweep_ts_today is not None:
+                st.write(f"Последний свип в Лондоне (сегодня): {pd.Timestamp(last_london_sweep_ts_today)}")
+            elif pine_require_london_sweep:
+                st.write("Последний свип в Лондоне (сегодня): нет")
+
+            if gate_from is not None:
+                st.write(f"Гейт активен с (UTC): {pd.Timestamp(gate_from)}")
+            else:
+                st.write("Гейт активен с (UTC): —")
+
+            st.write(f"Окно NY (UTC): 12:00–21:00, первые 2 часа: 12:00–14:00")
+
+            def _last_time(mask: pd.Series):
+                try:
+                    if mask is None or mask.empty or (not bool(mask.any())):
+                        return None
+                    return pd.Timestamp(mask[mask].index[-1])
+                except Exception:
+                    return None
+
+            rows = []
+            t_s1l = _last_time(s1_long_raw)
+            t_s1s = _last_time(s1_short_raw)
+            t_s2l = _last_time(s2_long_raw)
+            t_s2s = _last_time(s2_short_raw)
+            rows.append({"сигнал": "S1 Long (raw)", "время": str(t_s1l) if t_s1l is not None else ""})
+            rows.append({"сигнал": "S1 Short (raw)", "время": str(t_s1s) if t_s1s is not None else ""})
+            rows.append({"сигнал": "S2 Long (raw)", "время": str(t_s2l) if t_s2l is not None else ""})
+            rows.append({"сигнал": "S2 Short (raw)", "время": str(t_s2s) if t_s2s is not None else ""})
+
+            t_s1l_a = _last_time(s1_long)
+            t_s1s_a = _last_time(s1_short)
+            t_s2l_a = _last_time(s2_long_15)
+            t_s2s_a = _last_time(s2_short_15)
+            rows.append({"сигнал": "S1 Long (после фильтров)", "время": str(t_s1l_a) if t_s1l_a is not None else ""})
+            rows.append({"сигнал": "S1 Short (после фильтров)", "время": str(t_s1s_a) if t_s1s_a is not None else ""})
+            rows.append({"сигнал": "S2 Long (после фильтров)", "время": str(t_s2l_a) if t_s2l_a is not None else ""})
+            rows.append({"сигнал": "S2 Short (после фильтров)", "время": str(t_s2s_a) if t_s2s_a is not None else ""})
+
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+            if not g_ny:
+                parts = []
+                if pine_ny_session_only and (not g_ny_sess):
+                    parts.append("вне NY-сессии")
+                if pine_ny_first_2h_only and (not g_ny_2h):
+                    parts.append("не первые 2 часа NY")
+                if pine_require_london_sweep and (not g_ldn):
+                    parts.append("нет свипа Лондона сегодня / ещё не наступил")
+                if parts:
+                    st.info("Фильтр блокирует вход: " + ", ".join(parts))
 
         last = []
         if s1_long.any():
