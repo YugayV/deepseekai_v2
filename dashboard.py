@@ -909,6 +909,14 @@ def _signals_from_smc(df_low: pd.DataFrame, sweep_high: pd.DataFrame, imb: pd.Da
 
     dfp = pd.DataFrame({"ts": pd.to_datetime(df_low.index)})
     dfp["pos"] = np.arange(len(df_low), dtype=int)
+    if "ts" not in dfp.columns:
+        dfp["ts"] = pd.to_datetime(df_low.index)
+    if "pos" not in dfp.columns:
+        dfp["pos"] = np.arange(len(df_low), dtype=int)
+    try:
+        dfp = dfp.sort_values("ts").reset_index(drop=True)
+    except Exception:
+        pass
 
     if side == "long":
         sweeps = sweep_high[sweep_high["dir"] == "down"][["ts"]].copy()
