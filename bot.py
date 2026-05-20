@@ -3340,6 +3340,8 @@ class TradingBot:
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("pine", "ny_smc"):
                 self.strategy_mode = "ny_smc"
+            elif mode in ("combo", "hybrid", "ny_combo"):
+                self.strategy_mode = "combo"
             elif mode in ("classic", "reinforse", "pro", "mix"):
                 self.strategy_mode = "reinforse" if mode == "pro" else mode
 
@@ -4104,11 +4106,40 @@ class TradingBot:
                         except Exception:
                             pass
 
-                if str(getattr(self, "strategy_mode", "classic") or "classic").lower() == "ny_smc":
+                mode_now = str(getattr(self, "strategy_mode", "classic") or "classic").lower()
+                if mode_now == "ny_smc":
                     rb = self._pine_smc_decision(symbol, df) or {}
                     decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'pine_invalid'}
                     decision["strategy_mode"] = "ny_smc"
                     decision["decision_source"] = "pine"
+                elif mode_now == "combo":
+                    pine = self._pine_smc_decision(symbol, df) or {}
+                    pine_ok = isinstance(pine, dict)
+                    pine_dec = str((pine or {}).get("trade_decision") or "NO").upper() == "YES"
+                    pine_side = str((pine or {}).get("side") or "").lower()
+
+                    classic = self._rule_based_decision(symbol, df, ml_pred) or {}
+                    classic_ok = isinstance(classic, dict)
+                    classic_dec = str((classic or {}).get("trade_decision") or "NO").upper() == "YES"
+                    classic_side = str((classic or {}).get("side") or "").lower()
+
+                    if (not pine_ok) or (not classic_ok):
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'combo_invalid'}
+                    elif pine_dec and (not pine_side):
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'combo_pine_no_side'}
+                    elif pine_dec and classic_dec and pine_side and classic_side and (pine_side != classic_side):
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'combo_conflict_sides'}
+                    elif pine_dec:
+                        decision = dict(pine)
+                        decision["signal_strength"] = str((classic or {}).get("signal_strength") or decision.get("signal_strength") or "medium")
+                        decision["tp_pct"] = (classic or {}).get("tp_pct", decision.get("tp_pct"))
+                        decision["sl_pct"] = (classic or {}).get("sl_pct", decision.get("sl_pct"))
+                        decision["reasoning_short"] = f"Pine gate: {(pine or {}).get('reasoning_short') or 'signal'} | Classic: {(classic or {}).get('reasoning_short') or 'ok'}"
+                    else:
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"Pine gate: {(pine or {}).get('reasoning_short') or 'no'}"}
+
+                    decision["strategy_mode"] = "combo"
+                    decision["decision_source"] = "combo"
                 else:
                     rb = self._rule_based_decision(symbol, df, ml_pred) or {}
                     decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'rule_based_invalid'}

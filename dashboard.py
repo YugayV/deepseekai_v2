@@ -375,8 +375,13 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)"], index=0)
-strategy_mode = "classic" if strategy_mode_label == "Classic" else "ny_smc"
+strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)"], index=1)
+if strategy_mode_label == "Classic":
+    strategy_mode = "classic"
+elif strategy_mode_label == "NY SMC (Pine)":
+    strategy_mode = "ny_smc"
+else:
+    strategy_mode = "combo"
 
 with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     use_ml = st.checkbox("Use ML regime filter (unstable)", value=False)
@@ -671,6 +676,20 @@ chart_view = st.sidebar.radio(
     ["NY SMC (Indicator)", "TradingView (Interactive)"],
     index=0,
 )
+
+with st.sidebar.expander("🎛 Индикатор NY SMC", expanded=False):
+    show_sessions_asia = st.checkbox("Сессия Азия (UTC 00:00-09:00)", value=True)
+    show_sessions_london = st.checkbox("Сессия Лондон (UTC 07:00-16:00)", value=True)
+    show_sessions_ny = st.checkbox("Сессия Нью-Йорк (UTC 12:00-21:00)", value=True)
+    show_imbalance_zones = st.checkbox("Имбаланс-зоны", value=True)
+    show_zone_levels = st.checkbox("Уровни зоны (верх/низ)", value=True)
+    show_zone_labels = st.checkbox("Подписи уровней", value=False)
+    show_sweeps = st.checkbox("Свипы (liquidity sweeps)", value=True)
+    show_sweep_level_labels = st.checkbox("Подписи уровней свипа", value=False)
+    show_s1 = st.checkbox("Сигналы S1", value=True)
+    show_s2 = st.checkbox("Сигналы S2", value=True)
+    session_days = st.slider("Сколько дней подсветки сессий", 1, 30, 7, 1)
+    zones_per_side = st.slider("Сколько зон на сторону", 1, 10, 3, 1)
 
 # Update interval
 st.sidebar.caption(f"Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1337,14 +1356,17 @@ else:
             )
         )
 
-        _session_vrects(fig, df15.index, 0, 9 * 60, fillcolor="#5b3fd6", opacity=0.06, limit_days=7)
-        _session_vrects(fig, df15.index, 7 * 60, 16 * 60, fillcolor="#1f6feb", opacity=0.06, limit_days=7)
-        _session_vrects(fig, df15.index, 12 * 60, 21 * 60, fillcolor="#ffb100", opacity=0.06, limit_days=7)
+        if show_sessions_asia:
+            _session_vrects(fig, df15.index, 0, 9 * 60, fillcolor="#5b3fd6", opacity=0.06, limit_days=int(session_days))
+        if show_sessions_london:
+            _session_vrects(fig, df15.index, 7 * 60, 16 * 60, fillcolor="#1f6feb", opacity=0.06, limit_days=int(session_days))
+        if show_sessions_ny:
+            _session_vrects(fig, df15.index, 12 * 60, 21 * 60, fillcolor="#ffb100", opacity=0.06, limit_days=int(session_days))
 
         zones_to_draw = []
-        if not imb15.empty:
-            bull_z = imb15[imb15["side"] == "bull"].tail(3).to_dict("records")
-            bear_z = imb15[imb15["side"] == "bear"].tail(3).to_dict("records")
+        if show_imbalance_zones and (not imb15.empty):
+            bull_z = imb15[imb15["side"] == "bull"].tail(int(zones_per_side)).to_dict("records")
+            bear_z = imb15[imb15["side"] == "bear"].tail(int(zones_per_side)).to_dict("records")
             zones_to_draw = bull_z + bear_z
 
         x_end = df15.index[-1]
@@ -1352,54 +1374,89 @@ else:
             x0 = pd.Timestamp(z["ts"])
             if x0 > x_end:
                 continue
-            color = "rgba(46,204,113,0.10)" if z["side"] == "bull" else "rgba(231,76,60,0.10)"
+            is_bull = (z.get("side") == "bull")
+            color_fill = "rgba(46,204,113,0.10)" if is_bull else "rgba(231,76,60,0.10)"
+            color_line = "rgba(46,204,113,0.35)" if is_bull else "rgba(231,76,60,0.35)"
+            y_low = float(z["lower"])
+            y_up = float(z["upper"])
             fig.add_shape(
                 type="rect",
                 xref="x",
                 yref="y",
                 x0=x0,
                 x1=x_end,
-                y0=float(z["lower"]),
-                y1=float(z["upper"]),
-                fillcolor=color,
+                y0=y_low,
+                y1=y_up,
+                fillcolor=color_fill,
                 line=dict(width=0),
                 layer="below",
             )
+            if show_zone_levels:
+                fig.add_shape(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=x0,
+                    x1=x_end,
+                    y0=y_up,
+                    y1=y_up,
+                    line=dict(color=color_line, width=1, dash="dot"),
+                    layer="below",
+                )
+                fig.add_shape(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=x0,
+                    x1=x_end,
+                    y0=y_low,
+                    y1=y_low,
+                    line=dict(color=color_line, width=1, dash="dot"),
+                    layer="below",
+                )
+            if show_zone_labels:
+                tag = "BULL" if is_bull else "BEAR"
+                fig.add_annotation(x=x_end, y=y_up, text=f"{tag} U", showarrow=False, xanchor="left", font=dict(size=10, color=color_line))
+                fig.add_annotation(x=x_end, y=y_low, text=f"{tag} L", showarrow=False, xanchor="left", font=dict(size=10, color=color_line))
 
-        if not sweeps_15.empty:
+        if show_sweeps and (not sweeps_15.empty):
             up = sweeps_15[sweeps_15["dir"] == "up"]
             dn = sweeps_15[sweeps_15["dir"] == "down"]
             if not up.empty:
+                y_up = df15.reindex(pd.to_datetime(up["ts"]).values, method="ffill")["high"].values
                 fig.add_trace(
                     go.Scatter(
                         x=up["ts"],
-                        y=df15.reindex(pd.to_datetime(up["ts"]).values, method="ffill")["high"].values,
+                        y=y_up,
                         mode="markers",
                         name="Sweep Up (15m)",
+                        text=(up["level"].round(5).astype(str).tolist() if (show_sweep_level_labels and ("level" in up.columns)) else None),
                         marker=dict(color="tomato", size=9, symbol="triangle-up"),
                     )
                 )
             if not dn.empty:
+                y_dn = df15.reindex(pd.to_datetime(dn["ts"]).values, method="ffill")["low"].values
                 fig.add_trace(
                     go.Scatter(
                         x=dn["ts"],
-                        y=df15.reindex(pd.to_datetime(dn["ts"]).values, method="ffill")["low"].values,
+                        y=y_dn,
                         mode="markers",
                         name="Sweep Down (15m)",
+                        text=(dn["level"].round(5).astype(str).tolist() if (show_sweep_level_labels and ("level" in dn.columns)) else None),
                         marker=dict(color="springgreen", size=9, symbol="triangle-down"),
                     )
                 )
 
-        if (s1_long is not None) and s1_long.any():
+        if show_s1 and (s1_long is not None) and s1_long.any():
             pts = df15.loc[s1_long]
             fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S1 Long", marker=dict(color="#2ecc71", size=9, symbol="circle")))
-        if (s1_short is not None) and s1_short.any():
+        if show_s1 and (s1_short is not None) and s1_short.any():
             pts = df15.loc[s1_short]
             fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S1 Short", marker=dict(color="#e74c3c", size=9, symbol="circle")))
-        if (s2_long_15 is not None) and s2_long_15.any():
+        if show_s2 and (s2_long_15 is not None) and s2_long_15.any():
             pts = df15.loc[s2_long_15]
             fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S2 Long", marker=dict(color="#27ae60", size=7, symbol="diamond")))
-        if (s2_short_15 is not None) and s2_short_15.any():
+        if show_s2 and (s2_short_15 is not None) and s2_short_15.any():
             pts = df15.loc[s2_short_15]
             fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S2 Short", marker=dict(color="#c0392b", size=7, symbol="diamond")))
 
