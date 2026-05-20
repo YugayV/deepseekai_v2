@@ -668,7 +668,7 @@ chart_symbol = st.sidebar.selectbox("Chart asset", assets if assets else ["EURUS
 # Chart Type
 chart_view = st.sidebar.radio(
     "Chart View",
-    ["Dual (Plotly + TradingView)", "Standard (Plotly)", "TradingView (Interactive)"],
+    ["NY SMC (Indicator)", "TradingView (Interactive)"],
     index=0,
 )
 
@@ -762,6 +762,165 @@ def fetch_asset_data(symbol, period="3mo", interval="1d"):
         if isinstance(cache, dict) and key in cache:
             return cache[key]
         return None
+
+
+def _to_utc_index_df(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        idx = pd.to_datetime(df.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        out = df.copy()
+        out.index = idx
+        return out
+    except Exception:
+        return df
+
+
+def _pivot_points(series: pd.Series, length: int, kind: str) -> pd.Series:
+    n = int(length)
+    if n <= 0:
+        return pd.Series(index=series.index, dtype=float)
+    win = int(2 * n + 1)
+    if win <= 1:
+        return pd.Series(index=series.index, dtype=float)
+    if kind == "high":
+        r = series.rolling(win, center=True).max()
+    else:
+        r = series.rolling(win, center=True).min()
+    return series.where(series == r)
+
+
+def _engulf_events(df: pd.DataFrame):
+    o = df["open"]
+    c = df["close"]
+    bull = (c > o) & (c.shift(1) < o.shift(1)) & (c >= o.shift(1)) & (o <= c.shift(1))
+    bear = (c < o) & (c.shift(1) > o.shift(1)) & (c <= o.shift(1)) & (o >= c.shift(1))
+    bull_ev = bull & (~bull.shift(1).fillna(False))
+    bear_ev = bear & (~bear.shift(1).fillna(False))
+    return bull_ev, bear_ev
+
+
+def _imbalance_events(df: pd.DataFrame):
+    low = df["low"]
+    high = df["high"]
+    bull = low > high.shift(2)
+    bear = high < low.shift(2)
+    bull_idx = bull[bull].index
+    bear_idx = bear[bear].index
+    bull_rows = []
+    bear_rows = []
+    for i in bull_idx:
+        top = float(low.loc[i])
+        bot = float(high.shift(2).loc[i])
+        bull_rows.append({"ts": i, "upper": max(top, bot), "lower": min(top, bot), "side": "bull"})
+    for i in bear_idx:
+        top = float(low.shift(2).loc[i])
+        bot = float(high.loc[i])
+        bear_rows.append({"ts": i, "upper": max(top, bot), "lower": min(top, bot), "side": "bear"})
+    bull_df = pd.DataFrame(bull_rows)
+    bear_df = pd.DataFrame(bear_rows)
+    return bull_df, bear_df
+
+
+def _minutes_utc(ts) -> int:
+    t = pd.Timestamp(ts)
+    if t.tzinfo is not None:
+        t = t.tz_convert("UTC")
+    return int(t.hour) * 60 + int(t.minute)
+
+
+def _in_range_utc(ts, start_min: int, end_min: int) -> bool:
+    try:
+        m = _minutes_utc(ts)
+        return int(start_min) <= m <= int(end_min)
+    except Exception:
+        return False
+
+
+def _session_vrects(fig, idx, start_min: int, end_min: int, fillcolor: str, opacity: float, limit_days: int = 7):
+    try:
+        t0 = pd.Timestamp(idx.min())
+        t1 = pd.Timestamp(idx.max())
+        dates = pd.date_range(t0.normalize(), t1.normalize(), freq="D")
+        if len(dates) > int(limit_days):
+            dates = dates[-int(limit_days):]
+        for d in dates:
+            x0 = d + pd.Timedelta(minutes=int(start_min))
+            x1 = d + pd.Timedelta(minutes=int(end_min))
+            if x1 < t0 or x0 > t1:
+                continue
+            fig.add_vrect(x0=x0, x1=x1, fillcolor=fillcolor, opacity=float(opacity), line_width=0)
+    except Exception:
+        return
+
+
+def _sweep_events(df: pd.DataFrame, pivot_len: int):
+    ph = _pivot_points(df["high"], pivot_len, "high")
+    pl = _pivot_points(df["low"], pivot_len, "low")
+    last_ph = ph.ffill()
+    last_pl = pl.ffill()
+    sweep_up = (df["high"] > last_ph) & (df["close"] < last_ph)
+    sweep_dn = (df["low"] < last_pl) & (df["close"] > last_pl)
+    sweep_up_ev = sweep_up & (~sweep_up.shift(1).fillna(False))
+    sweep_dn_ev = sweep_dn & (~sweep_dn.shift(1).fillna(False))
+    up_ts = sweep_up_ev[sweep_up_ev].index
+    dn_ts = sweep_dn_ev[sweep_dn_ev].index
+    rows = []
+    for t in up_ts:
+        rows.append({"ts": t, "dir": "up", "level": float(last_ph.loc[t]) if pd.notna(last_ph.loc[t]) else np.nan})
+    for t in dn_ts:
+        rows.append({"ts": t, "dir": "down", "level": float(last_pl.loc[t]) if pd.notna(last_pl.loc[t]) else np.nan})
+    ev = pd.DataFrame(rows)
+    if ev.empty:
+        return ev
+    ev = ev.sort_values("ts").reset_index(drop=True)
+    return ev
+
+
+def _signals_from_smc(df_low: pd.DataFrame, sweep_high: pd.DataFrame, imb: pd.DataFrame, engulf_bull: pd.Series, engulf_bear: pd.Series, *, side: str, max_bars_after_sweep: int, max_bars_after_imbalance: int):
+    if df_low is None or df_low.empty:
+        return pd.Series(False, index=pd.Index([]))
+    out = pd.Series(False, index=df_low.index)
+    if sweep_high is None or sweep_high.empty or imb is None or imb.empty:
+        return out
+
+    dfp = df_low.reset_index().rename(columns={"index": "ts"})
+    dfp["pos"] = np.arange(len(dfp), dtype=int)
+
+    if side == "long":
+        sweeps = sweep_high[sweep_high["dir"] == "down"][["ts"]].copy()
+        zones = imb[imb["side"] == "bull"][["ts", "upper", "lower"]].copy()
+        inv = engulf_bull.reindex(df_low.index).fillna(False).values
+    else:
+        sweeps = sweep_high[sweep_high["dir"] == "up"][["ts"]].copy()
+        zones = imb[imb["side"] == "bear"][["ts", "upper", "lower"]].copy()
+        inv = engulf_bear.reindex(df_low.index).fillna(False).values
+
+    if sweeps.empty or zones.empty:
+        return out
+
+    sweeps = sweeps.sort_values("ts").reset_index(drop=True).rename(columns={"ts": "sweep_ts"})
+    zones = zones.sort_values("ts").reset_index(drop=True).rename(columns={"ts": "zone_ts"})
+
+    sw = pd.merge_asof(dfp[["ts", "pos"]], sweeps, left_on="ts", right_on="sweep_ts", direction="backward")
+    zn = pd.merge_asof(dfp[["ts", "pos"]], zones, left_on="ts", right_on="zone_ts", direction="backward")
+
+    pos_map = pd.Series(dfp["pos"].values, index=dfp["ts"].values)
+    sw_pos = sw["sweep_ts"].map(pos_map).astype("float")
+    zn_pos = zn["zone_ts"].map(pos_map).astype("float")
+
+    bars_since_sw = (dfp["pos"] - sw_pos).fillna(10**9).astype(int)
+    bars_since_zn = (dfp["pos"] - zn_pos).fillna(10**9).astype(int)
+
+    upper = zn["upper"].astype(float).values
+    lower = zn["lower"].astype(float).values
+    lo = df_low["low"].astype(float).values
+    hi = df_low["high"].astype(float).values
+    in_zone = (lo <= upper) & (hi >= lower)
+
+    ok = (bars_since_sw <= int(max_bars_after_sweep)) & (bars_since_zn <= int(max_bars_after_imbalance)) & in_zone & inv
+    out.loc[df_low.index] = ok
+    return out
 
 
 
@@ -1041,138 +1200,7 @@ def _tv_symbol(sym: str) -> str:
 
 _tv_interval = "60" if timeframe == "1h" else "15" if timeframe == "15m" else "D"
 
-if chart_view == "Dual (Plotly + TradingView)":
-    df = fetch_asset_data(chart_symbol, period="3mo", interval=timeframe)
-    if df is None:
-        st.warning(f"No data for {chart_symbol}")
-    else:
-        df = df.copy()
-        df['sma_20'] = df['close'].rolling(20).mean()
-        df['sma_50'] = df['close'].rolling(50).mean()
-        df['or_high_24'] = df['high'].rolling(24).max().shift(1)
-        df['or_low_24'] = df['low'].rolling(24).min().shift(1)
-        df['or_range_pct'] = ((df['or_high_24'] - df['or_low_24']) / df['close']) * 100.0
-        df['breakout_up'] = (df['close'] > df['or_high_24']).astype(int)
-        df['breakout_down'] = (df['close'] < df['or_low_24']).astype(int)
-
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.72, 0.28],
-            subplot_titles=(f"{chart_symbol} - Price", "RSI (14)")
-        )
-
-        fig.add_trace(
-            go.Candlestick(
-                x=df.index,
-                open=df['open'],
-                high=df['high'],
-                low=df['low'],
-                close=df['close'],
-                name=chart_symbol
-            ),
-            row=1, col=1
-        )
-
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='deepskyblue', width=1)),
-            row=1, col=1
-        )
-
-        if use_orb:
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df['or_high_24'], name='ORB 24h High', line=dict(color='springgreen', width=1, dash='dash')),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df['or_low_24'], name='ORB 24h Low', line=dict(color='tomato', width=1, dash='dash')),
-                row=1, col=1
-            )
-
-            bu = df[df['breakout_up'] == 1]
-            bd = df[df['breakout_down'] == 1]
-            if not bu.empty:
-                fig.add_trace(
-                    go.Scatter(x=bu.index, y=bu['close'], mode='markers', name='ORB Breakout Up', marker=dict(color='springgreen', size=7, symbol='triangle-up')),
-                    row=1, col=1
-                )
-            if not bd.empty:
-                fig.add_trace(
-                    go.Scatter(x=bd.index, y=bd['close'], mode='markers', name='ORB Breakout Down', marker=dict(color='tomato', size=7, symbol='triangle-down')),
-                    row=1, col=1
-                )
-
-        delta = df['close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / avg_loss
-        df['rsi'] = 100 - (100 / (1 + rs))
-
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='violet', width=1)),
-            row=2, col=1
-        )
-        fig.add_hline(y=70, line_dash="dash", line_color="tomato", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="springgreen", row=2, col=1)
-
-        fig.update_layout(
-            height=820,
-            template="plotly_dark",
-            showlegend=True,
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=10, r=10, t=40, b=10),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        fig.update_xaxes(title_text="Date", row=2, col=1)
-        st.plotly_chart(fig, use_container_width=True)
-
-        if use_orb:
-            f_or = go.Figure()
-            f_or.add_trace(go.Scatter(x=df.index, y=df['or_range_pct'], mode='lines', name='ORB range (%)'))
-            f_or.add_hline(y=float(orb_min_range_pct), line_dash='dash', line_color='gray')
-            f_or.add_hline(y=float(orb_max_range_pct), line_dash='dash', line_color='gray')
-            f_or.update_layout(height=180, template='plotly_dark', margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(f_or, use_container_width=True)
-
-    st.markdown("---")
-
-    tv = _tv_symbol(chart_symbol)
-    tradingview_html = f"""
-    <div class=\"tradingview-widget-container\" style=\"height:860px;width:100%;\">
-      <div id=\"tradingview_dual\" style=\"height:860px;width:100%;\"></div>
-      <script type=\"text/javascript\" src=\"https://s3.tradingview.com/tv.js\"></script>
-      <script type=\"text/javascript\">
-      new TradingView.widget({{
-        \"autosize\": true,
-        \"symbol\": \"{tv}\",
-        \"interval\": \"{_tv_interval}\",
-        \"timezone\": \"Etc/UTC\",
-        \"theme\": \"dark\",
-        \"style\": \"1\",
-        \"locale\": \"en\",
-        \"toolbar_bg\": \"#0e1117\",
-        \"enable_publishing\": false,
-        \"withdateranges\": true,
-        \"hide_side_toolbar\": false,
-        \"allow_symbol_change\": true,
-        \"details\": true,
-        \"hotlist\": true,
-        \"calendar\": true,
-        \"container_id\": \"tradingview_dual\"
-      }});
-      </script>
-    </div>
-    """
-    components.html(tradingview_html, height=900)
-
-elif chart_view == "TradingView (Interactive)":
+if chart_view == "TradingView (Interactive)":
     symbol = chart_symbol
     st.markdown(f"### 📊 {symbol} Interactive Chart")
 
@@ -1207,68 +1235,197 @@ elif chart_view == "TradingView (Interactive)":
 
 else:
     symbol = chart_symbol
-    df = fetch_asset_data(symbol, period="3mo", interval=timeframe)
-    if df is None:
-        st.warning(f"No data for {symbol}")
+    df15 = fetch_asset_data(symbol, period="60d", interval="15m")
+    df1h = fetch_asset_data(symbol, period="6mo", interval="1h")
+    df5 = fetch_asset_data(symbol, period="30d", interval="5m")
+
+    if df15 is None or df15.empty:
+        st.warning(f"No 15m data for {symbol}")
     else:
-        df = df.copy()
-        df['sma_20'] = df['close'].rolling(20).mean()
-        df['sma_50'] = df['close'].rolling(50).mean()
+        df15 = _to_utc_index_df(df15)
+        if df1h is not None and not df1h.empty:
+            df1h = _to_utc_index_df(df1h)
+        else:
+            df1h = None
+        if df5 is not None and not df5.empty:
+            df5 = _to_utc_index_df(df5)
+        else:
+            df5 = None
 
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.72, 0.28],
-            subplot_titles=(f"{symbol} - Price", "RSI (14)")
-        )
+        sweeps_15 = _sweep_events(df15, int(pine_pivot_len))
+        sweeps_1h = _sweep_events(df1h, int(pine_pivot_len)) if df1h is not None else pd.DataFrame()
 
+        bull15, bear15 = _imbalance_events(df15)
+        imb15 = pd.concat([bull15, bear15], ignore_index=True) if (bull15 is not None and bear15 is not None) else pd.DataFrame()
+        bull_ev_15, bear_ev_15 = _engulf_events(df15)
+
+        s1_long = pd.Series(False, index=df15.index)
+        s1_short = pd.Series(False, index=df15.index)
+        if pine_s1_enabled and (df1h is not None) and (not sweeps_1h.empty) and (not imb15.empty):
+            s1_long = _signals_from_smc(
+                df15, sweeps_1h, imb15, bull_ev_15, bear_ev_15,
+                side="long",
+                max_bars_after_sweep=int(pine_max_bars_after_sweep),
+                max_bars_after_imbalance=int(pine_max_bars_after_imbalance),
+            )
+            s1_short = _signals_from_smc(
+                df15, sweeps_1h, imb15, bull_ev_15, bear_ev_15,
+                side="short",
+                max_bars_after_sweep=int(pine_max_bars_after_sweep),
+                max_bars_after_imbalance=int(pine_max_bars_after_imbalance),
+            )
+
+        s2_long_15 = pd.Series(False, index=df15.index)
+        s2_short_15 = pd.Series(False, index=df15.index)
+        if pine_s2_enabled and (df5 is not None) and (not df5.empty) and (not sweeps_15.empty):
+            bull5, bear5 = _imbalance_events(df5)
+            imb5 = pd.concat([bull5, bear5], ignore_index=True) if (bull5 is not None and bear5 is not None) else pd.DataFrame()
+            bull_ev_5, bear_ev_5 = _engulf_events(df5)
+            s2_long = _signals_from_smc(
+                df5, sweeps_15, imb5, bull_ev_5, bear_ev_5,
+                side="long",
+                max_bars_after_sweep=int(pine_max_bars_after_sweep),
+                max_bars_after_imbalance=int(pine_max_bars_after_imbalance),
+            )
+            s2_short = _signals_from_smc(
+                df5, sweeps_15, imb5, bull_ev_5, bear_ev_5,
+                side="short",
+                max_bars_after_sweep=int(pine_max_bars_after_sweep),
+                max_bars_after_imbalance=int(pine_max_bars_after_imbalance),
+            )
+            s2_long_15 = s2_long.groupby(s2_long.index.floor("15min")).max().reindex(df15.index, fill_value=False)
+            s2_short_15 = s2_short.groupby(s2_short.index.floor("15min")).max().reindex(df15.index, fill_value=False)
+
+        ny_mask = pd.Series(True, index=df15.index)
+        if pine_ny_session_only:
+            ny_mask = df15.index.map(lambda x: _in_range_utc(x, 12 * 60, 21 * 60))
+            ny_mask = pd.Series(ny_mask, index=df15.index)
+
+        ny_2h_mask = pd.Series(True, index=df15.index)
+        if pine_ny_first_2h_only:
+            ny_2h_mask = df15.index.map(lambda x: _in_range_utc(x, 12 * 60, 14 * 60))
+            ny_2h_mask = pd.Series(ny_2h_mask, index=df15.index)
+
+        ldn_ok = pd.Series(True, index=df15.index)
+        if pine_require_london_sweep and (not sweeps_15.empty):
+            in_ldn = sweeps_15["ts"].map(lambda x: _in_range_utc(x, 7 * 60, 16 * 60))
+            ldn_sweeps = sweeps_15.loc[in_ldn]
+            last_by_day = {}
+            for t in ldn_sweeps["ts"].tolist():
+                d = pd.Timestamp(t).date()
+                prev = last_by_day.get(d)
+                if prev is None or pd.Timestamp(t) > pd.Timestamp(prev):
+                    last_by_day[d] = t
+            ldn_ok = df15.index.map(lambda x: (x.date() in last_by_day) and (pd.Timestamp(x) >= pd.Timestamp(last_by_day.get(x.date()))))
+            ldn_ok = pd.Series(ldn_ok, index=df15.index)
+
+        allow = ny_mask & ny_2h_mask & ldn_ok
+        s1_long = s1_long & allow
+        s1_short = s1_short & allow
+        s2_long_15 = s2_long_15 & allow
+        s2_short_15 = s2_short_15 & allow
+
+        fig = go.Figure()
         fig.add_trace(
             go.Candlestick(
-                x=df.index,
-                open=df['open'],
-                high=df['high'],
-                low=df['low'],
-                close=df['close'],
-                name=symbol
-            ),
-            row=1, col=1
+                x=df15.index,
+                open=df15["open"],
+                high=df15["high"],
+                low=df15["low"],
+                close=df15["close"],
+                name=f"{symbol} 15m",
+            )
         )
 
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df['sma_20'], name='SMA 20', line=dict(color='orange', width=1)),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df['sma_50'], name='SMA 50', line=dict(color='deepskyblue', width=1)),
-            row=1, col=1
-        )
+        _session_vrects(fig, df15.index, 0, 9 * 60, fillcolor="#5b3fd6", opacity=0.06, limit_days=7)
+        _session_vrects(fig, df15.index, 7 * 60, 16 * 60, fillcolor="#1f6feb", opacity=0.06, limit_days=7)
+        _session_vrects(fig, df15.index, 12 * 60, 21 * 60, fillcolor="#ffb100", opacity=0.06, limit_days=7)
 
-        delta = df['close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / avg_loss
-        df['rsi'] = 100 - (100 / (1 + rs))
+        zones_to_draw = []
+        if not imb15.empty:
+            bull_z = imb15[imb15["side"] == "bull"].tail(3).to_dict("records")
+            bear_z = imb15[imb15["side"] == "bear"].tail(3).to_dict("records")
+            zones_to_draw = bull_z + bear_z
 
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df['rsi'], name='RSI', line=dict(color='violet', width=1)),
-            row=2, col=1
-        )
-        fig.add_hline(y=70, line_dash="dash", line_color="tomato", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="springgreen", row=2, col=1)
+        x_end = df15.index[-1]
+        for z in zones_to_draw:
+            x0 = pd.Timestamp(z["ts"])
+            if x0 > x_end:
+                continue
+            color = "rgba(46,204,113,0.10)" if z["side"] == "bull" else "rgba(231,76,60,0.10)"
+            fig.add_shape(
+                type="rect",
+                xref="x",
+                yref="y",
+                x0=x0,
+                x1=x_end,
+                y0=float(z["lower"]),
+                y1=float(z["upper"]),
+                fillcolor=color,
+                line=dict(width=0),
+                layer="below",
+            )
+
+        if not sweeps_15.empty:
+            up = sweeps_15[sweeps_15["dir"] == "up"]
+            dn = sweeps_15[sweeps_15["dir"] == "down"]
+            if not up.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=up["ts"],
+                        y=df15.reindex(pd.to_datetime(up["ts"]).values, method="ffill")["high"].values,
+                        mode="markers",
+                        name="Sweep Up (15m)",
+                        marker=dict(color="tomato", size=9, symbol="triangle-up"),
+                    )
+                )
+            if not dn.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=dn["ts"],
+                        y=df15.reindex(pd.to_datetime(dn["ts"]).values, method="ffill")["low"].values,
+                        mode="markers",
+                        name="Sweep Down (15m)",
+                        marker=dict(color="springgreen", size=9, symbol="triangle-down"),
+                    )
+                )
+
+        if (s1_long is not None) and s1_long.any():
+            pts = df15.loc[s1_long]
+            fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S1 Long", marker=dict(color="#2ecc71", size=9, symbol="circle")))
+        if (s1_short is not None) and s1_short.any():
+            pts = df15.loc[s1_short]
+            fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S1 Short", marker=dict(color="#e74c3c", size=9, symbol="circle")))
+        if (s2_long_15 is not None) and s2_long_15.any():
+            pts = df15.loc[s2_long_15]
+            fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S2 Long", marker=dict(color="#27ae60", size=7, symbol="diamond")))
+        if (s2_short_15 is not None) and s2_short_15.any():
+            pts = df15.loc[s2_short_15]
+            fig.add_trace(go.Scatter(x=pts.index, y=pts["close"], mode="markers", name="S2 Short", marker=dict(color="#c0392b", size=7, symbol="diamond")))
 
         fig.update_layout(
-            height=780,
+            height=820,
             template="plotly_dark",
             showlegend=True,
             xaxis_rangeslider_visible=False,
             margin=dict(l=10, r=10, t=40, b=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        fig.update_xaxes(title_text="Date", row=2, col=1)
         st.plotly_chart(fig, use_container_width=True)
+
+        last = []
+        if s1_long.any():
+            last.append({"сигнал": "S1 Long", "время": str(s1_long[s1_long].index[-1])})
+        if s1_short.any():
+            last.append({"сигнал": "S1 Short", "время": str(s1_short[s1_short].index[-1])})
+        if s2_long_15.any():
+            last.append({"сигнал": "S2 Long", "время": str(s2_long_15[s2_long_15].index[-1])})
+        if s2_short_15.any():
+            last.append({"сигнал": "S2 Short", "время": str(s2_short_15[s2_short_15].index[-1])})
+        if last:
+            st.dataframe(pd.DataFrame(last), width='stretch')
+        else:
+            st.info("Сигналов по NY SMC (Pine) на текущем отрезке не найдено (с учётом фильтров).")
 
 
 st.markdown("---")
