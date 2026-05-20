@@ -375,8 +375,8 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_mode = "classic"
-st.sidebar.selectbox("Strategy mode", ["Classic"], index=0, disabled=True)
+strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)"], index=0)
+strategy_mode = "classic" if strategy_mode_label == "Classic" else "ny_smc"
 
 with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     use_ml = st.checkbox("Use ML regime filter (unstable)", value=False)
@@ -385,6 +385,16 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     use_atr_risk = st.checkbox("Use ATR-based TP/SL", value=True)
     atr_sl_mult = st.slider("ATR SL multiple", 0.5, 3.0, 1.5, 0.1)
     atr_tp_mult = st.slider("ATR TP multiple", 1.0, 6.0, 2.5, 0.1)
+
+    st.subheader("🗽 Pine (NY_AllTimezones)")
+    pine_ny_session_only = st.checkbox("NY session only (UTC 12:00-21:00)", value=True)
+    pine_ny_first_2h_only = st.checkbox("NY first 2 hours only (UTC 12:00-14:00)", value=True)
+    pine_require_london_sweep = st.checkbox("Require London sweep first (UTC 07:00-16:00)", value=True)
+    pine_s1_enabled = st.checkbox("Enable S1 (H1 sweep + M15 imbalance/inversion)", value=True)
+    pine_s2_enabled = st.checkbox("Enable S2 (M15 sweep + M5 imbalance/inversion)", value=False)
+    pine_pivot_len = st.slider("Pine pivot len", 1, 50, 5, 1)
+    pine_max_bars_after_sweep = st.slider("Max bars after sweep", 1, 5000, 500, 10)
+    pine_max_bars_after_imbalance = st.slider("Max bars after imbalance", 1, 5000, 500, 10)
 
     st.subheader("🎯 Quality (Fewer trades)")
     quality_label = st.selectbox("Quality mode", ["High (fewer)", "Balanced"], index=0 if is_real else 1)
@@ -478,6 +488,14 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
                 "use_polymarket": bool(use_polymarket),
                 "use_macro_score": bool(use_macro_score),
                 "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
+                "pine_ny_session_only": bool(pine_ny_session_only),
+                "pine_ny_first_2h_only": bool(pine_ny_first_2h_only),
+                "pine_require_london_sweep": bool(pine_require_london_sweep),
+                "pine_s1_enabled": bool(pine_s1_enabled),
+                "pine_s2_enabled": bool(pine_s2_enabled),
+                "pine_pivot_len": int(pine_pivot_len),
+                "pine_max_bars_after_sweep": int(pine_max_bars_after_sweep),
+                "pine_max_bars_after_imbalance": int(pine_max_bars_after_imbalance),
                 "time": str(datetime.now()),
             })
             st.success("Best ATR applied")
@@ -529,6 +547,14 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "use_polymarket": bool(use_polymarket),
             "use_macro_score": bool(use_macro_score),
             "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
+            "pine_ny_session_only": bool(pine_ny_session_only),
+            "pine_ny_first_2h_only": bool(pine_ny_first_2h_only),
+            "pine_require_london_sweep": bool(pine_require_london_sweep),
+            "pine_s1_enabled": bool(pine_s1_enabled),
+            "pine_s2_enabled": bool(pine_s2_enabled),
+            "pine_pivot_len": int(pine_pivot_len),
+            "pine_max_bars_after_sweep": int(pine_max_bars_after_sweep),
+            "pine_max_bars_after_imbalance": int(pine_max_bars_after_imbalance),
             "time": str(datetime.now()),
         })
         st.success("More-trades preset applied")
@@ -575,6 +601,14 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "use_polymarket": bool(use_polymarket),
             "use_macro_score": bool(use_macro_score),
             "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
+            "pine_ny_session_only": bool(pine_ny_session_only),
+            "pine_ny_first_2h_only": bool(pine_ny_first_2h_only),
+            "pine_require_london_sweep": bool(pine_require_london_sweep),
+            "pine_s1_enabled": bool(pine_s1_enabled),
+            "pine_s2_enabled": bool(pine_s2_enabled),
+            "pine_pivot_len": int(pine_pivot_len),
+            "pine_max_bars_after_sweep": int(pine_max_bars_after_sweep),
+            "pine_max_bars_after_imbalance": int(pine_max_bars_after_imbalance),
             "time": str(datetime.now()),
         })
         st.success("Filters applied")

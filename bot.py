@@ -213,7 +213,7 @@ USE_DXY_FILTER_DEFAULT = (os.getenv("USE_DXY_FILTER_DEFAULT", "false").strip().l
 
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
-STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "classic").strip().lower()
+STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "ny_smc").strip().lower()
 STRATEGY_VERSION = (os.getenv("STRATEGY_VERSION") or "v2").strip()
 
 USE_AI_DEFAULT = (os.getenv("USE_AI_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
@@ -225,6 +225,15 @@ OPENROUTER_SITE_URL = (os.getenv("OPENROUTER_SITE_URL") or "").strip()
 OPENROUTER_APP_NAME = (os.getenv("OPENROUTER_APP_NAME") or "").strip()
 OPENROUTER_TEXT_MODEL = (os.getenv("OPENROUTER_TEXT_MODEL") or "deepseek/deepseek-chat").strip()
 OPENROUTER_VISION_MODEL = (os.getenv("OPENROUTER_VISION_MODEL") or "openai/gpt-4o-mini").strip()
+
+PINE_NY_SESSION_ONLY_DEFAULT = (os.getenv("PINE_NY_SESSION_ONLY_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PINE_NY_FIRST_2H_ONLY_DEFAULT = (os.getenv("PINE_NY_FIRST_2H_ONLY_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PINE_REQUIRE_LONDON_SWEEP_DEFAULT = (os.getenv("PINE_REQUIRE_LONDON_SWEEP_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PINE_S1_ENABLED_DEFAULT = (os.getenv("PINE_S1_ENABLED_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PINE_S2_ENABLED_DEFAULT = (os.getenv("PINE_S2_ENABLED_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+PINE_PIVOT_LEN_DEFAULT = int(os.getenv("PINE_PIVOT_LEN_DEFAULT", 5))
+PINE_MAX_BARS_AFTER_SWEEP_DEFAULT = int(os.getenv("PINE_MAX_BARS_AFTER_SWEEP_DEFAULT", 500))
+PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT = int(os.getenv("PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT", 500))
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
@@ -1501,6 +1510,7 @@ Return JSON:
 # DATA FETCHER (multi-timeframe)
 # ============================================
 _YF_DATA_CACHE = {}
+_YF_OHLC_CACHE = {}
 
 
 def fetch_data(symbol):
@@ -1598,6 +1608,64 @@ def fetch_data(symbol):
         raise
 
 
+def _fetch_ohlc(symbol: str, interval: str, period: str):
+    now = time.time()
+    key = f"{symbol}|{interval}|{period}"
+    cached = _YF_OHLC_CACHE.get(key)
+    if cached is not None:
+        age = now - float(cached.get("ts") or 0.0)
+        if age < float(YF_MIN_FETCH_INTERVAL_SECONDS):
+            return cached.get("df")
+
+    try:
+        t = yf.Ticker(symbol)
+        raw = t.history(period=period, interval=interval)
+        if raw is None or raw.empty:
+            return None
+        df = raw
+        if isinstance(df.columns, pd.MultiIndex):
+            def _pick(name: str):
+                if name in df.columns.get_level_values(0):
+                    s = df[name]
+                    return s.iloc[:, 0] if getattr(s, 'ndim', 1) > 1 else s
+                for col in df.columns:
+                    if str(col[0]).lower() == name.lower():
+                        return df[col]
+                return None
+
+            o = _pick("Open")
+            h = _pick("High")
+            l = _pick("Low")
+            c = _pick("Close")
+            v = _pick("Volume")
+            df = pd.DataFrame({
+                "open": pd.to_numeric(o, errors="coerce") if o is not None else np.nan,
+                "high": pd.to_numeric(h, errors="coerce") if h is not None else np.nan,
+                "low": pd.to_numeric(l, errors="coerce") if l is not None else np.nan,
+                "close": pd.to_numeric(c, errors="coerce") if c is not None else np.nan,
+                "volume": pd.to_numeric(v, errors="coerce") if v is not None else 0.0,
+            })
+        else:
+            use = [x for x in ("Open", "High", "Low", "Close") if x in df.columns]
+            if not use:
+                return None
+            out_df = df[use].copy()
+            out_df.columns = [x.lower() for x in use]
+            if "Volume" in df.columns:
+                out_df["volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+            else:
+                out_df["volume"] = 0.0
+            df = out_df
+
+        df = df.dropna(subset=["open", "high", "low", "close"]).copy()
+        if df.empty:
+            return None
+        _YF_OHLC_CACHE[key] = {"ts": now, "df": df}
+        return df
+    except Exception:
+        return None
+
+
 def _safe_fetch_json(url: str, allowed_hosts: set[str]):
     try:
         from urllib.parse import urlparse
@@ -1692,6 +1760,125 @@ def _fx_parts(symbol: str):
     if not base.isalpha() or not quote.isalpha():
         return None
     return base.upper(), quote.upper()
+
+
+def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        idx = pd.to_datetime(df.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_convert("UTC").tz_localize(None)
+        df = df.copy()
+        df.index = idx
+        return df
+    except Exception:
+        return df
+
+
+def _pivot_series(x: pd.Series, length: int, kind: str) -> pd.Series:
+    n = int(length)
+    if n <= 0:
+        return pd.Series(index=x.index, dtype=float)
+    win = int(2 * n + 1)
+    if win <= 1:
+        return pd.Series(index=x.index, dtype=float)
+    if kind == "high":
+        r = x.rolling(win, center=True).max()
+    else:
+        r = x.rolling(win, center=True).min()
+    out = x.where(x == r)
+    return out
+
+
+def _engulf_events(df: pd.DataFrame):
+    o = df["open"]
+    c = df["close"]
+    bull = (c > o) & (c.shift(1) < o.shift(1)) & (c >= o.shift(1)) & (o <= c.shift(1))
+    bear = (c < o) & (c.shift(1) > o.shift(1)) & (c <= o.shift(1)) & (o >= c.shift(1))
+    bull_ev = bull & (~bull.shift(1).fillna(False))
+    bear_ev = bear & (~bear.shift(1).fillna(False))
+    return bull_ev, bear_ev
+
+
+def _last_imbalance_zone(df: pd.DataFrame):
+    low = df["low"]
+    high = df["high"]
+    bull = low > high.shift(2)
+    bear = high < low.shift(2)
+
+    bull_idx = bull[bull].index
+    bear_idx = bear[bear].index
+
+    bull_zone = None
+    bear_zone = None
+
+    if len(bull_idx) > 0:
+        i = bull_idx[-1]
+        top = float(low.loc[i])
+        bot = float(high.shift(2).loc[i])
+        bull_zone = {"upper": max(top, bot), "lower": min(top, bot), "ts": i}
+
+    if len(bear_idx) > 0:
+        i = bear_idx[-1]
+        top = float(low.shift(2).loc[i])
+        bot = float(high.loc[i])
+        bear_zone = {"upper": max(top, bot), "lower": min(top, bot), "ts": i}
+
+    return bull_zone, bear_zone
+
+
+def _bars_since(ts, df: pd.DataFrame) -> int | None:
+    if ts is None:
+        return None
+    try:
+        idx = df.index
+        pos = idx.get_indexer([pd.Timestamp(ts)], method="ffill")[0]
+        if pos < 0:
+            return None
+        return int(len(idx) - 1 - pos)
+    except Exception:
+        try:
+            return int((df.index > ts).sum())
+        except Exception:
+            return None
+
+
+def _in_ny_session_utc(ts) -> bool:
+    try:
+        t = pd.Timestamp(ts)
+        if t.tzinfo is not None:
+            t = t.tz_convert("UTC")
+        hour = int(getattr(t, "hour", datetime.utcnow().hour))
+        minute = int(getattr(t, "minute", 0))
+        hm = hour * 60 + minute
+        return (12 * 60) <= hm <= (21 * 60)
+    except Exception:
+        return False
+
+
+def _in_ny_first_2h_utc(ts) -> bool:
+    try:
+        t = pd.Timestamp(ts)
+        if t.tzinfo is not None:
+            t = t.tz_convert("UTC")
+        hour = int(getattr(t, "hour", datetime.utcnow().hour))
+        minute = int(getattr(t, "minute", 0))
+        hm = hour * 60 + minute
+        return (12 * 60) <= hm <= (14 * 60)
+    except Exception:
+        return False
+
+
+def _in_london_session_utc(ts) -> bool:
+    try:
+        t = pd.Timestamp(ts)
+        if t.tzinfo is not None:
+            t = t.tz_convert("UTC")
+        hour = int(getattr(t, "hour", datetime.utcnow().hour))
+        minute = int(getattr(t, "minute", 0))
+        hm = hour * 60 + minute
+        return (7 * 60) <= hm <= (16 * 60)
+    except Exception:
+        return False
 
 
 def _macro_usd_strength_24h(macro: dict) -> float:
@@ -2618,6 +2805,14 @@ class TradingBot:
             "partial_take_r": float(PARTIAL_TAKE_R_DEFAULT),
             "spread_alloc_reduce_threshold_bps": float(SPREAD_ALLOC_REDUCE_THRESHOLD_BPS_DEFAULT),
             "spread_alloc_reduce_pct": float(SPREAD_ALLOC_REDUCE_PCT_DEFAULT),
+            "pine_ny_session_only": bool(PINE_NY_SESSION_ONLY_DEFAULT),
+            "pine_ny_first_2h_only": bool(PINE_NY_FIRST_2H_ONLY_DEFAULT),
+            "pine_require_london_sweep": bool(PINE_REQUIRE_LONDON_SWEEP_DEFAULT),
+            "pine_s1_enabled": bool(PINE_S1_ENABLED_DEFAULT),
+            "pine_s2_enabled": bool(PINE_S2_ENABLED_DEFAULT),
+            "pine_pivot_len": int(PINE_PIVOT_LEN_DEFAULT),
+            "pine_max_bars_after_sweep": int(PINE_MAX_BARS_AFTER_SWEEP_DEFAULT),
+            "pine_max_bars_after_imbalance": int(PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT),
         }
         self.context = {}
         self.last_action_ts = {}
@@ -3133,8 +3328,19 @@ class TradingBot:
             self.strategy["max_loss_streak"] = max(0, _as_int(cmd_data.get("max_loss_streak"), self.strategy.get("max_loss_streak", MAX_LOSS_STREAK_DEFAULT)))
             self.strategy["guard_pause_seconds"] = max(0, _as_int(cmd_data.get("guard_pause_seconds"), self.strategy.get("guard_pause_seconds", GUARD_PAUSE_SECONDS_DEFAULT)))
 
+            self.strategy["pine_ny_session_only"] = _as_bool(cmd_data.get("pine_ny_session_only"), self.strategy.get("pine_ny_session_only", PINE_NY_SESSION_ONLY_DEFAULT))
+            self.strategy["pine_ny_first_2h_only"] = _as_bool(cmd_data.get("pine_ny_first_2h_only"), self.strategy.get("pine_ny_first_2h_only", PINE_NY_FIRST_2H_ONLY_DEFAULT))
+            self.strategy["pine_require_london_sweep"] = _as_bool(cmd_data.get("pine_require_london_sweep"), self.strategy.get("pine_require_london_sweep", PINE_REQUIRE_LONDON_SWEEP_DEFAULT))
+            self.strategy["pine_s1_enabled"] = _as_bool(cmd_data.get("pine_s1_enabled"), self.strategy.get("pine_s1_enabled", PINE_S1_ENABLED_DEFAULT))
+            self.strategy["pine_s2_enabled"] = _as_bool(cmd_data.get("pine_s2_enabled"), self.strategy.get("pine_s2_enabled", PINE_S2_ENABLED_DEFAULT))
+            self.strategy["pine_pivot_len"] = max(1, _as_int(cmd_data.get("pine_pivot_len"), self.strategy.get("pine_pivot_len", PINE_PIVOT_LEN_DEFAULT)))
+            self.strategy["pine_max_bars_after_sweep"] = max(1, _as_int(cmd_data.get("pine_max_bars_after_sweep"), self.strategy.get("pine_max_bars_after_sweep", PINE_MAX_BARS_AFTER_SWEEP_DEFAULT)))
+            self.strategy["pine_max_bars_after_imbalance"] = max(1, _as_int(cmd_data.get("pine_max_bars_after_imbalance"), self.strategy.get("pine_max_bars_after_imbalance", PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT)))
+
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
-            if mode in ("classic", "reinforse", "pro", "mix"):
+            if mode in ("pine", "ny_smc"):
+                self.strategy_mode = "ny_smc"
+            elif mode in ("classic", "reinforse", "pro", "mix"):
                 self.strategy_mode = "reinforse" if mode == "pro" else mode
 
             logger.info(
@@ -3314,6 +3520,168 @@ class TradingBot:
             'sl_pct': float(STOP_LOSS_PERCENT),
             'reasoning_short': 'Fallback: no clean alignment',
         }
+
+    def _pine_smc_decision(self, symbol: str, df_1h) -> dict:
+        try:
+            pivot_len = int(self.strategy.get("pine_pivot_len", PINE_PIVOT_LEN_DEFAULT))
+        except Exception:
+            pivot_len = int(PINE_PIVOT_LEN_DEFAULT)
+
+        try:
+            max_after_sweep = int(self.strategy.get("pine_max_bars_after_sweep", PINE_MAX_BARS_AFTER_SWEEP_DEFAULT))
+        except Exception:
+            max_after_sweep = int(PINE_MAX_BARS_AFTER_SWEEP_DEFAULT)
+
+        try:
+            max_after_imb = int(self.strategy.get("pine_max_bars_after_imbalance", PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT))
+        except Exception:
+            max_after_imb = int(PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT)
+
+        ny_only = bool(self.strategy.get("pine_ny_session_only", PINE_NY_SESSION_ONLY_DEFAULT))
+        ny_2h_only = bool(self.strategy.get("pine_ny_first_2h_only", PINE_NY_FIRST_2H_ONLY_DEFAULT))
+        req_ldn_sweep = bool(self.strategy.get("pine_require_london_sweep", PINE_REQUIRE_LONDON_SWEEP_DEFAULT))
+        s1_on = bool(self.strategy.get("pine_s1_enabled", PINE_S1_ENABLED_DEFAULT))
+        s2_on = bool(self.strategy.get("pine_s2_enabled", PINE_S2_ENABLED_DEFAULT))
+
+        base = None
+        try:
+            base = df_1h[["open", "high", "low", "close"]].copy()
+        except Exception:
+            base = None
+        if base is None or base.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет данных'}
+
+        base = _to_utc_index(base)
+
+        df15 = _fetch_ohlc(symbol, "15m", "60d")
+        if df15 is None or df15.empty:
+            df15 = _fetch_ohlc(symbol, "30m", "60d")
+        if df15 is None or df15.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет 15m данных'}
+        df15 = _to_utc_index(df15)
+
+        now_ts = df15.index[-1]
+        if ny_only and (not _in_ny_session_utc(now_ts)):
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: вне NY-сессии'}
+        if ny_2h_only and (not _in_ny_first_2h_utc(now_ts)):
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: не первые 2 часа NY'}
+
+        if req_ldn_sweep:
+            if not _in_london_session_utc(now_ts):
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: ждём свип Лондона (вне окна)'}
+            ph_l = _pivot_series(df15["high"], pivot_len, "high")
+            pl_l = _pivot_series(df15["low"], pivot_len, "low")
+            last_ph_l = ph_l.ffill().iloc[-1] if not ph_l.dropna().empty else np.nan
+            last_pl_l = pl_l.ffill().iloc[-1] if not pl_l.dropna().empty else np.nan
+            sweep_up_l = (df15["high"] > last_ph_l) & (df15["close"] < last_ph_l) if np.isfinite(last_ph_l) else pd.Series(False, index=df15.index)
+            sweep_dn_l = (df15["low"] < last_pl_l) & (df15["close"] > last_pl_l) if np.isfinite(last_pl_l) else pd.Series(False, index=df15.index)
+            sweep_up_l_ev = sweep_up_l & (~sweep_up_l.shift(1).fillna(False))
+            sweep_dn_l_ev = sweep_dn_l & (~sweep_dn_l.shift(1).fillna(False))
+            if not (bool(sweep_up_l_ev.any()) or bool(sweep_dn_l_ev.any())):
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет свипа в Лондоне'}
+
+        s1_long = False
+        s1_short = False
+        s2_long = False
+        s2_short = False
+
+        if s1_on:
+            ph = _pivot_series(base["high"], pivot_len, "high")
+            pl = _pivot_series(base["low"], pivot_len, "low")
+            last_ph = ph.ffill().iloc[-1] if not ph.dropna().empty else np.nan
+            last_pl = pl.ffill().iloc[-1] if not pl.dropna().empty else np.nan
+
+            sweep_up = (base["high"] > last_ph) & (base["close"] < last_ph) if np.isfinite(last_ph) else pd.Series(False, index=base.index)
+            sweep_down = (base["low"] < last_pl) & (base["close"] > last_pl) if np.isfinite(last_pl) else pd.Series(False, index=base.index)
+            sweep_up_ev = sweep_up & (~sweep_up.shift(1).fillna(False))
+            sweep_dn_ev = sweep_down & (~sweep_down.shift(1).fillna(False))
+
+            last_sweep_up_ts = sweep_up_ev[sweep_up_ev].index[-1] if sweep_up_ev.any() else None
+            last_sweep_dn_ts = sweep_dn_ev[sweep_dn_ev].index[-1] if sweep_dn_ev.any() else None
+
+            bars_since_sweep_up = _bars_since(last_sweep_up_ts, df15)
+            bars_since_sweep_dn = _bars_since(last_sweep_dn_ts, df15)
+            sweep_up_ok = (bars_since_sweep_up is not None) and (bars_since_sweep_up <= max_after_sweep)
+            sweep_dn_ok = (bars_since_sweep_dn is not None) and (bars_since_sweep_dn <= max_after_sweep)
+
+            bull_zone, bear_zone = _last_imbalance_zone(df15)
+            bars_since_bull = _bars_since((bull_zone or {}).get("ts") if isinstance(bull_zone, dict) else None, df15)
+            bars_since_bear = _bars_since((bear_zone or {}).get("ts") if isinstance(bear_zone, dict) else None, df15)
+            bull_ok = (bull_zone is not None) and (bars_since_bull is not None) and (bars_since_bull <= max_after_imb)
+            bear_ok = (bear_zone is not None) and (bars_since_bear is not None) and (bars_since_bear <= max_after_imb)
+
+            lo = float(df15["low"].iloc[-1])
+            hi = float(df15["high"].iloc[-1])
+            in_bull = bool(bull_ok and (lo <= float(bull_zone["upper"])) and (hi >= float(bull_zone["lower"])))
+            in_bear = bool(bear_ok and (lo <= float(bear_zone["upper"])) and (hi >= float(bear_zone["lower"])))
+
+            inv_bull_ev, inv_bear_ev = _engulf_events(df15)
+            inv_bull_event = bool(inv_bull_ev.iloc[-1]) if not inv_bull_ev.empty else False
+            inv_bear_event = bool(inv_bear_ev.iloc[-1]) if not inv_bear_ev.empty else False
+
+            s1_long = bool(inv_bull_event and sweep_dn_ok and in_bull)
+            s1_short = bool(inv_bear_event and sweep_up_ok and in_bear)
+
+        if s2_on:
+            df5 = _fetch_ohlc(symbol, "5m", "30d")
+            if df5 is None or df5.empty:
+                df5 = _fetch_ohlc(symbol, "15m", "60d")
+            if df5 is not None and not df5.empty:
+                df5 = _to_utc_index(df5)
+
+                ph2 = _pivot_series(df15["high"], pivot_len, "high")
+                pl2 = _pivot_series(df15["low"], pivot_len, "low")
+                last_ph2 = ph2.ffill().iloc[-1] if not ph2.dropna().empty else np.nan
+                last_pl2 = pl2.ffill().iloc[-1] if not pl2.dropna().empty else np.nan
+
+                sweep_up2 = (df15["high"] > last_ph2) & (df15["close"] < last_ph2) if np.isfinite(last_ph2) else pd.Series(False, index=df15.index)
+                sweep_dn2 = (df15["low"] < last_pl2) & (df15["close"] > last_pl2) if np.isfinite(last_pl2) else pd.Series(False, index=df15.index)
+                sweep_up2_ev = sweep_up2 & (~sweep_up2.shift(1).fillna(False))
+                sweep_dn2_ev = sweep_dn2 & (~sweep_dn2.shift(1).fillna(False))
+
+                last_sweep_up2_ts = sweep_up2_ev[sweep_up2_ev].index[-1] if sweep_up2_ev.any() else None
+                last_sweep_dn2_ts = sweep_dn2_ev[sweep_dn2_ev].index[-1] if sweep_dn2_ev.any() else None
+
+                bars_since_sweep_up2 = _bars_since(last_sweep_up2_ts, df5)
+                bars_since_sweep_dn2 = _bars_since(last_sweep_dn2_ts, df5)
+                sweep_up2_ok = (bars_since_sweep_up2 is not None) and (bars_since_sweep_up2 <= max_after_sweep)
+                sweep_dn2_ok = (bars_since_sweep_dn2 is not None) and (bars_since_sweep_dn2 <= max_after_sweep)
+
+                bull_zone2, bear_zone2 = _last_imbalance_zone(df5)
+                bars_since_bull2 = _bars_since((bull_zone2 or {}).get("ts") if isinstance(bull_zone2, dict) else None, df5)
+                bars_since_bear2 = _bars_since((bear_zone2 or {}).get("ts") if isinstance(bear_zone2, dict) else None, df5)
+                bull2_ok = (bull_zone2 is not None) and (bars_since_bull2 is not None) and (bars_since_bull2 <= max_after_imb)
+                bear2_ok = (bear_zone2 is not None) and (bars_since_bear2 is not None) and (bars_since_bear2 <= max_after_imb)
+
+                lo2 = float(df5["low"].iloc[-1])
+                hi2 = float(df5["high"].iloc[-1])
+                in_bull2 = bool(bull2_ok and (lo2 <= float(bull_zone2["upper"])) and (hi2 >= float(bull_zone2["lower"])))
+                in_bear2 = bool(bear2_ok and (lo2 <= float(bear_zone2["upper"])) and (hi2 >= float(bear_zone2["lower"])))
+
+                inv_bull2_ev, inv_bear2_ev = _engulf_events(df5)
+                inv_bull2_event = bool(inv_bull2_ev.iloc[-1]) if not inv_bull2_ev.empty else False
+                inv_bear2_event = bool(inv_bear2_ev.iloc[-1]) if not inv_bear2_ev.empty else False
+
+                s2_long = bool(inv_bull2_event and sweep_dn2_ok and in_bull2)
+                s2_short = bool(inv_bear2_event and sweep_up2_ok and in_bear2)
+
+        if (s1_long and s1_short) or (s2_long and s2_short):
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: конфликт сигналов'}
+
+        if s1_long or s1_short or s2_long or s2_short:
+            side = "long" if (s1_long or s2_long) else "short"
+            both = (s1_long and s2_long) or (s1_short and s2_short)
+            strength = "strong" if both else ("medium" if (s1_long or s1_short) else "weak")
+            src = "S1" if (s1_long or s1_short) else "S2"
+            return {
+                'trade_decision': 'YES',
+                'action': 'entry',
+                'side': side,
+                'signal_strength': strength,
+                'reasoning_short': f'Pine {src}: свип + имбаланс + инверсия',
+            }
+
+        return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет сетапа'}
 
     def _atr_pct(self, df) -> float | None:
         try:
@@ -3736,11 +4104,16 @@ class TradingBot:
                         except Exception:
                             pass
 
-                rb = self._rule_based_decision(symbol, df, ml_pred) or {}
-
-                decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'rule_based_invalid'}
-                decision["strategy_mode"] = "classic"
-                decision["decision_source"] = "rule"
+                if str(getattr(self, "strategy_mode", "classic") or "classic").lower() == "ny_smc":
+                    rb = self._pine_smc_decision(symbol, df) or {}
+                    decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'pine_invalid'}
+                    decision["strategy_mode"] = "ny_smc"
+                    decision["decision_source"] = "pine"
+                else:
+                    rb = self._rule_based_decision(symbol, df, ml_pred) or {}
+                    decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'rule_based_invalid'}
+                    decision["strategy_mode"] = "classic"
+                    decision["decision_source"] = "rule"
                 decision["risk_per_trade_pct"] = float(self.strategy.get("risk_per_trade_pct", (RISK_PER_TRADE_PCT_REAL if TRADING_MODE == "real" else RISK_PER_TRADE_PCT_DEMO)))
 
                 atr = None
