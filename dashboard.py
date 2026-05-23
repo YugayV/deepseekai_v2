@@ -400,6 +400,10 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     pine_pivot_len = st.slider("Pine pivot len", 1, 50, 5, 1)
     pine_max_bars_after_sweep = st.slider("Max bars after sweep", 1, 5000, 500, 10)
     pine_max_bars_after_imbalance = st.slider("Max bars after imbalance", 1, 5000, 500, 10)
+    pine_trend_filter = st.checkbox("Trend filter (H1 EMA21/50)", value=True)
+    pine_allow_countertrend = st.checkbox("Allow countertrend", value=False)
+    pine_ml_confirm = st.checkbox("ML confirm (if ML enabled)", value=True)
+    pine_ml_min_conf = st.slider("ML min confidence", 0.0, 1.0, 0.58, 0.01)
 
     st.subheader("🎯 Quality (Fewer trades)")
     quality_label = st.selectbox("Quality mode", ["High (fewer)", "Balanced"], index=0 if is_real else 1)
@@ -501,6 +505,10 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
                 "pine_pivot_len": int(pine_pivot_len),
                 "pine_max_bars_after_sweep": int(pine_max_bars_after_sweep),
                 "pine_max_bars_after_imbalance": int(pine_max_bars_after_imbalance),
+                "pine_trend_filter": bool(pine_trend_filter),
+                "pine_allow_countertrend": bool(pine_allow_countertrend),
+                "pine_ml_confirm": bool(pine_ml_confirm),
+                "pine_ml_min_conf": float(pine_ml_min_conf),
                 "time": str(datetime.now()),
             })
             st.success("Best ATR applied")
@@ -560,6 +568,10 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "pine_pivot_len": int(pine_pivot_len),
             "pine_max_bars_after_sweep": int(pine_max_bars_after_sweep),
             "pine_max_bars_after_imbalance": int(pine_max_bars_after_imbalance),
+            "pine_trend_filter": bool(pine_trend_filter),
+            "pine_allow_countertrend": bool(pine_allow_countertrend),
+            "pine_ml_confirm": bool(pine_ml_confirm),
+            "pine_ml_min_conf": float(pine_ml_min_conf),
             "time": str(datetime.now()),
         })
         st.success("More-trades preset applied")
@@ -614,6 +626,10 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "pine_pivot_len": int(pine_pivot_len),
             "pine_max_bars_after_sweep": int(pine_max_bars_after_sweep),
             "pine_max_bars_after_imbalance": int(pine_max_bars_after_imbalance),
+            "pine_trend_filter": bool(pine_trend_filter),
+            "pine_allow_countertrend": bool(pine_allow_countertrend),
+            "pine_ml_confirm": bool(pine_ml_confirm),
+            "pine_ml_min_conf": float(pine_ml_min_conf),
             "time": str(datetime.now()),
         })
         st.success("Filters applied")

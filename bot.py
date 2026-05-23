@@ -234,6 +234,10 @@ PINE_S2_ENABLED_DEFAULT = (os.getenv("PINE_S2_ENABLED_DEFAULT", "false").strip()
 PINE_PIVOT_LEN_DEFAULT = int(os.getenv("PINE_PIVOT_LEN_DEFAULT", 5))
 PINE_MAX_BARS_AFTER_SWEEP_DEFAULT = int(os.getenv("PINE_MAX_BARS_AFTER_SWEEP_DEFAULT", 500))
 PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT = int(os.getenv("PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT", 500))
+PINE_TREND_FILTER_DEFAULT = (os.getenv("PINE_TREND_FILTER_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PINE_ALLOW_COUNTERTREND_DEFAULT = (os.getenv("PINE_ALLOW_COUNTERTREND_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+PINE_ML_CONFIRM_DEFAULT = (os.getenv("PINE_ML_CONFIRM_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+PINE_ML_MIN_CONF_DEFAULT = float(os.getenv("PINE_ML_MIN_CONF_DEFAULT", 0.58))
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
@@ -2813,6 +2817,10 @@ class TradingBot:
             "pine_pivot_len": int(PINE_PIVOT_LEN_DEFAULT),
             "pine_max_bars_after_sweep": int(PINE_MAX_BARS_AFTER_SWEEP_DEFAULT),
             "pine_max_bars_after_imbalance": int(PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT),
+            "pine_trend_filter": bool(PINE_TREND_FILTER_DEFAULT),
+            "pine_allow_countertrend": bool(PINE_ALLOW_COUNTERTREND_DEFAULT),
+            "pine_ml_confirm": bool(PINE_ML_CONFIRM_DEFAULT),
+            "pine_ml_min_conf": float(PINE_ML_MIN_CONF_DEFAULT),
         }
         self.context = {}
         self.last_action_ts = {}
@@ -3336,6 +3344,10 @@ class TradingBot:
             self.strategy["pine_pivot_len"] = max(1, _as_int(cmd_data.get("pine_pivot_len"), self.strategy.get("pine_pivot_len", PINE_PIVOT_LEN_DEFAULT)))
             self.strategy["pine_max_bars_after_sweep"] = max(1, _as_int(cmd_data.get("pine_max_bars_after_sweep"), self.strategy.get("pine_max_bars_after_sweep", PINE_MAX_BARS_AFTER_SWEEP_DEFAULT)))
             self.strategy["pine_max_bars_after_imbalance"] = max(1, _as_int(cmd_data.get("pine_max_bars_after_imbalance"), self.strategy.get("pine_max_bars_after_imbalance", PINE_MAX_BARS_AFTER_IMBALANCE_DEFAULT)))
+            self.strategy["pine_trend_filter"] = _as_bool(cmd_data.get("pine_trend_filter"), self.strategy.get("pine_trend_filter", PINE_TREND_FILTER_DEFAULT))
+            self.strategy["pine_allow_countertrend"] = _as_bool(cmd_data.get("pine_allow_countertrend"), self.strategy.get("pine_allow_countertrend", PINE_ALLOW_COUNTERTREND_DEFAULT))
+            self.strategy["pine_ml_confirm"] = _as_bool(cmd_data.get("pine_ml_confirm"), self.strategy.get("pine_ml_confirm", PINE_ML_CONFIRM_DEFAULT))
+            self.strategy["pine_ml_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("pine_ml_min_conf"), self.strategy.get("pine_ml_min_conf", PINE_ML_MIN_CONF_DEFAULT))))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("pine", "ny_smc"):
@@ -3523,7 +3535,7 @@ class TradingBot:
             'reasoning_short': 'Fallback: no clean alignment',
         }
 
-    def _pine_smc_decision(self, symbol: str, df_1h) -> dict:
+    def _pine_smc_decision(self, symbol: str, df_1h, ml_pred: dict | None = None) -> dict:
         try:
             pivot_len = int(self.strategy.get("pine_pivot_len", PINE_PIVOT_LEN_DEFAULT))
         except Exception:
@@ -3544,6 +3556,13 @@ class TradingBot:
         req_ldn_sweep = bool(self.strategy.get("pine_require_london_sweep", PINE_REQUIRE_LONDON_SWEEP_DEFAULT))
         s1_on = bool(self.strategy.get("pine_s1_enabled", PINE_S1_ENABLED_DEFAULT))
         s2_on = bool(self.strategy.get("pine_s2_enabled", PINE_S2_ENABLED_DEFAULT))
+        trend_filter = bool(self.strategy.get("pine_trend_filter", PINE_TREND_FILTER_DEFAULT))
+        allow_countertrend = bool(self.strategy.get("pine_allow_countertrend", PINE_ALLOW_COUNTERTREND_DEFAULT))
+        ml_confirm = bool(self.strategy.get("pine_ml_confirm", PINE_ML_CONFIRM_DEFAULT))
+        try:
+            ml_min_conf = float(self.strategy.get("pine_ml_min_conf", PINE_ML_MIN_CONF_DEFAULT))
+        except Exception:
+            ml_min_conf = float(PINE_ML_MIN_CONF_DEFAULT)
 
         base = None
         try:
@@ -3554,6 +3573,15 @@ class TradingBot:
             return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет данных'}
 
         base = _to_utc_index(base)
+        try:
+            latest_1h = df_1h.iloc[-1]
+            ema21 = float(latest_1h.get("ema_21", 0.0) or 0.0)
+            ema50 = float(latest_1h.get("ema_50", 0.0) or 0.0)
+            c1h = float(latest_1h.get("close", 0.0) or 0.0)
+        except Exception:
+            ema21, ema50, c1h = 0.0, 0.0, 0.0
+        trend_up = (c1h > ema50) and (ema21 > ema50) and (ema50 > 0)
+        trend_dn = (c1h < ema50) and (ema21 < ema50) and (ema50 > 0)
 
         df15 = _fetch_ohlc(symbol, "15m", "60d")
         if df15 is None or df15.empty:
@@ -3675,6 +3703,29 @@ class TradingBot:
             both = (s1_long and s2_long) or (s1_short and s2_short)
             strength = "strong" if both else ("medium" if (s1_long or s1_short) else "weak")
             src = "S1" if (s1_long or s1_short) else "S2"
+
+            if trend_filter and (not allow_countertrend):
+                if side == "long" and (not trend_up):
+                    return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет бычьего HTF тренда (EMA21/50)'}
+                if side == "short" and (not trend_dn):
+                    return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет медвежьего HTF тренда (EMA21/50)'}
+
+            try:
+                use_ml = bool(self.strategy.get('use_ml', USE_ML_DEFAULT))
+            except Exception:
+                use_ml = bool(USE_ML_DEFAULT)
+            if ml_confirm and use_ml and isinstance(ml_pred, dict):
+                try:
+                    conf = float(ml_pred.get("confidence") or 0.0)
+                except Exception:
+                    conf = 0.0
+                reg = str(ml_pred.get("regime_name") or "").lower()
+                if conf >= float(ml_min_conf):
+                    if side == "long" and reg not in ("bullish",):
+                        return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f'Pine: ML не подтверждает (regime={reg}, conf={conf:.2f})'}
+                    if side == "short" and reg not in ("bearish",):
+                        return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f'Pine: ML не подтверждает (regime={reg}, conf={conf:.2f})'}
+
             return {
                 'trade_decision': 'YES',
                 'action': 'entry',
@@ -4108,12 +4159,12 @@ class TradingBot:
 
                 mode_now = str(getattr(self, "strategy_mode", "classic") or "classic").lower()
                 if mode_now == "ny_smc":
-                    rb = self._pine_smc_decision(symbol, df) or {}
+                    rb = self._pine_smc_decision(symbol, df, ml_pred=ml_pred) or {}
                     decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'pine_invalid'}
                     decision["strategy_mode"] = "ny_smc"
                     decision["decision_source"] = "pine"
                 elif mode_now == "combo":
-                    pine = self._pine_smc_decision(symbol, df) or {}
+                    pine = self._pine_smc_decision(symbol, df, ml_pred=ml_pred) or {}
                     pine_ok = isinstance(pine, dict)
                     pine_dec = str((pine or {}).get("trade_decision") or "NO").upper() == "YES"
                     pine_side = str((pine or {}).get("side") or "").lower()
