@@ -375,13 +375,41 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)"], index=1)
+strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)"], index=2)
 if strategy_mode_label == "Classic":
     strategy_mode = "classic"
 elif strategy_mode_label == "NY SMC (Pine)":
     strategy_mode = "ny_smc"
 else:
     strategy_mode = "combo"
+
+if st.sidebar.button("✅ Применить улучшения (качество)", width='stretch'):
+    _post_bot_command({
+        "command": "set_filters",
+        "strategy_mode": "combo",
+        "use_ml": True,
+        "pine_trend_filter": True,
+        "pine_allow_countertrend": False,
+        "pine_ml_confirm": True,
+        "pine_ml_min_conf": 0.58,
+        "pine_ny_session_only": True,
+        "pine_ny_first_2h_only": True,
+        "pine_require_london_sweep": True,
+        "pine_s1_enabled": True,
+        "pine_s2_enabled": False,
+        "pine_pivot_len": 5,
+        "pine_max_bars_after_sweep": 500,
+        "pine_max_bars_after_imbalance": 500,
+        "use_atr_risk": True,
+        "atr_sl_mult": 1.5,
+        "atr_tp_mult": 2.5,
+        "block_weak_signals": True,
+        "cooldown_bars": 2,
+        "quality_mode": "high",
+        "min_setup_score": 3,
+        "time": str(datetime.now()),
+    })
+    st.sidebar.success("Улучшения применены")
 
 with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     use_ml = st.checkbox("Use ML regime filter (unstable)", value=False)

@@ -213,7 +213,7 @@ USE_DXY_FILTER_DEFAULT = (os.getenv("USE_DXY_FILTER_DEFAULT", "false").strip().l
 
 RAILWAY = os.getenv("RAILWAY", "false").lower() == "true"
 TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
-STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "ny_smc").strip().lower()
+STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "combo").strip().lower()
 STRATEGY_VERSION = (os.getenv("STRATEGY_VERSION") or "v2").strip()
 
 USE_AI_DEFAULT = (os.getenv("USE_AI_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
