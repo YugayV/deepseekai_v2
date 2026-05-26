@@ -40,6 +40,7 @@ from plotly.subplots import make_subplots
 import yfinance as yf
 import joblib
 import json
+import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -125,6 +126,61 @@ def _openrouter_client(api_key: str):
         base_url="https://openrouter.ai/api/v1",
         default_headers=(headers or None),
     )
+
+def _resolve_new_dir() -> str:
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base = os.getcwd()
+    return os.path.join(base, "new")
+
+NEW_DIR = _resolve_new_dir()
+
+@st.cache_data(ttl=300)
+def _read_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=300)
+def _read_json(path: str):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+@st.cache_data(ttl=300)
+def _read_csv(path: str) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+def _strip_data_image_md(md: str) -> str:
+    if not md:
+        return ""
+    md = re.sub(r"!\[[^\]]*\]\(data:image/[^)]*\)", "[встроенное изображение (base64) скрыто]", md, flags=re.IGNORECASE)
+    md = re.sub(r"\(data:image/[^)]*\)", "(скрыто)", md, flags=re.IGNORECASE)
+    return md
+
+def _safe_exists(path: str) -> bool:
+    try:
+        return os.path.exists(path)
+    except Exception:
+        return False
+
+def _list_pngs(dir_path: str) -> list:
+    try:
+        out = []
+        for name in os.listdir(dir_path):
+            if name.lower().endswith(".png"):
+                out.append(os.path.join(dir_path, name))
+        return sorted(out)
+    except Exception:
+        return []
 
 RUN_BOT_IN_PROCESS = (os.getenv("RUN_BOT_IN_PROCESS") or "true").strip().lower() == "true"
 
@@ -320,7 +376,7 @@ st.sidebar.subheader("📊 Assets")
 assets = st.sidebar.multiselect(
     "Select assets to display",
     [
-        "EURUSD=X", "GBPUSD=X", "USDJPY=X",
+        "EURUSD=X", "GBPUSD=X", "USDJPY=X", "XAUUSD=X", "GLD",
         "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD", "DOGE-USD",
         "AVAX-USD", "LINK-USD", "DOT-USD", "LTC-USD", "TRX-USD",
     ],
@@ -353,7 +409,7 @@ else:
 
 # Risk Settings
 st.sidebar.subheader("🛡️ Risk Management")
-manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 4.0, 0.5)
+manual_tp = st.sidebar.slider("Take Profit (%)", 0.5, 10.0, 5.0, 0.5)
 manual_sl = st.sidebar.slider("Stop Loss (%)", 0.5, 5.0, 2.0, 0.5)
 risk_per_trade_pct = st.sidebar.slider("Risk per trade (%)", 0.1, 3.0, 0.5 if is_real else 1.0, 0.1, key="risk_per_trade_pct")
 paper_fee_bps = st.sidebar.slider("Paper fee (bps)", 0.0, 20.0, 2.0, 0.5)
@@ -371,15 +427,21 @@ spread_alloc_reduce_threshold_bps = st.sidebar.slider("Spread reduce threshold (
 spread_alloc_reduce_pct = st.sidebar.slider("Spread allocation reduce (%)", 0.0, 90.0, 40.0, 1.0, key="spread_alloc_reduce_pct")
 
 st.sidebar.subheader("🕒 Demo Limits")
-max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 2, 1)
+max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 3, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)"], index=2)
+strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)", "EURUSD ML (new)", "Gold Patterns (GLD)", "CVision Trade"], index=2)
 if strategy_mode_label == "Classic":
     strategy_mode = "classic"
 elif strategy_mode_label == "NY SMC (Pine)":
     strategy_mode = "ny_smc"
+elif strategy_mode_label == "EURUSD ML (new)":
+    strategy_mode = "eurusd_ml"
+elif strategy_mode_label == "Gold Patterns (GLD)":
+    strategy_mode = "gold_patterns"
+elif strategy_mode_label == "CVision Trade":
+    strategy_mode = "vision"
 else:
     strategy_mode = "combo"
 
@@ -432,6 +494,20 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     pine_allow_countertrend = st.checkbox("Allow countertrend", value=False)
     pine_ml_confirm = st.checkbox("ML confirm (if ML enabled)", value=True)
     pine_ml_min_conf = st.slider("ML min confidence", 0.0, 1.0, 0.58, 0.01)
+
+    st.subheader("💶 EURUSD ML (new)")
+    eurusd_ml_min_proba = st.slider("EURUSD ML min proba", 0.0, 1.0, 0.55, 0.01)
+    eurusd_combined_min_votes = st.slider("EURUSD combined min votes", 1, 5, 2, 1)
+
+    st.subheader("🥇 Gold Patterns (GLD)")
+    gold_pattern_min_conf = st.slider("Gold pattern min conf", 0.0, 1.0, 0.65, 0.01)
+    gold_pattern_mtf_min_votes = st.slider("Gold pattern MTF min votes", 1, 3, 2, 1)
+    gold_min_days_between_trades = st.slider("Gold min days between trades", 0, 30, 3, 1)
+
+    st.subheader("👁️ CVision Trade")
+    vision_trade_enabled = st.checkbox("Enable vision trading", value=False)
+    vision_trade_min_conf = st.slider("Vision min confidence", 0.0, 1.0, 0.62, 0.01)
+    vision_trade_ttl_minutes = st.slider("Vision signal TTL (min)", 1, 1440, 180, 5)
 
     st.subheader("🎯 Quality (Fewer trades)")
     quality_label = st.selectbox("Quality mode", ["High (fewer)", "Balanced"], index=0 if is_real else 1)
@@ -600,6 +676,14 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "pine_allow_countertrend": bool(pine_allow_countertrend),
             "pine_ml_confirm": bool(pine_ml_confirm),
             "pine_ml_min_conf": float(pine_ml_min_conf),
+            "eurusd_ml_min_proba": float(eurusd_ml_min_proba),
+            "eurusd_combined_min_votes": int(eurusd_combined_min_votes),
+            "gold_pattern_min_conf": float(gold_pattern_min_conf),
+            "gold_pattern_mtf_min_votes": int(gold_pattern_mtf_min_votes),
+            "gold_min_days_between_trades": int(gold_min_days_between_trades),
+            "vision_trade_enabled": bool(vision_trade_enabled),
+            "vision_trade_min_conf": float(vision_trade_min_conf),
+            "vision_trade_ttl_minutes": int(vision_trade_ttl_minutes),
             "time": str(datetime.now()),
         })
         st.success("More-trades preset applied")
@@ -658,6 +742,14 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "pine_allow_countertrend": bool(pine_allow_countertrend),
             "pine_ml_confirm": bool(pine_ml_confirm),
             "pine_ml_min_conf": float(pine_ml_min_conf),
+            "eurusd_ml_min_proba": float(eurusd_ml_min_proba),
+            "eurusd_combined_min_votes": int(eurusd_combined_min_votes),
+            "gold_pattern_min_conf": float(gold_pattern_min_conf),
+            "gold_pattern_mtf_min_votes": int(gold_pattern_mtf_min_votes),
+            "gold_min_days_between_trades": int(gold_min_days_between_trades),
+            "vision_trade_enabled": bool(vision_trade_enabled),
+            "vision_trade_min_conf": float(vision_trade_min_conf),
+            "vision_trade_ttl_minutes": int(vision_trade_ttl_minutes),
             "time": str(datetime.now()),
         })
         st.success("Filters applied")
@@ -1206,52 +1298,52 @@ else:
 
 st.markdown("---")
 
-st.subheader("🧾 Why no trades?")
-if isinstance(portfolio, dict):
-    meta = portfolio.get('meta') if isinstance(portfolio.get('meta'), dict) else {}
-    blocked = meta.get("blocked") if isinstance(meta.get("blocked"), dict) else {}
-    reasons = blocked.get("reasons") if isinstance(blocked.get("reasons"), dict) else {}
+with st.expander("🧾 Почему нет сделок?", expanded=False):
+    if isinstance(portfolio, dict):
+        meta = portfolio.get('meta') if isinstance(portfolio.get('meta'), dict) else {}
+        blocked = meta.get("blocked") if isinstance(meta.get("blocked"), dict) else {}
+        reasons = blocked.get("reasons") if isinstance(blocked.get("reasons"), dict) else {}
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total blocks", int(blocked.get("total") or 0))
-    c2.metric("Cooldown blocks", int(reasons.get("cooldown") or 0))
-    c3.metric("Weak blocks", int(reasons.get("weak") or 0))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Всего блокировок", int(blocked.get("total") or 0))
+        c2.metric("Cooldown", int(reasons.get("cooldown") or 0))
+        c3.metric("Weak", int(reasons.get("weak") or 0))
 
-    if reasons:
-        r = pd.DataFrame([{"reason": str(k), "count": int(v)} for k, v in reasons.items()]).sort_values("count", ascending=False)
-        st.dataframe(r, use_container_width=True)
+        if reasons:
+            r = pd.DataFrame([{"причина": str(k), "кол-во": int(v)} for k, v in reasons.items()]).sort_values("кол-во", ascending=False)
+            st.dataframe(r, use_container_width=True)
 
-    last_decisions = meta.get('last_decisions') if isinstance(meta.get('last_decisions'), list) else []
-    if last_decisions:
-        df_d = pd.DataFrame([d for d in last_decisions if isinstance(d, dict)])
-        if not df_d.empty:
-            cols = [c for c in ["ts", "symbol", "price", "trade_decision", "side", "signal_strength", "reasoning_short", "setup_score", "min_setup_score", "quality_mode", "atr_pct", "hour_utc"] if c in df_d.columns]
-            st.dataframe(df_d[cols].tail(80), use_container_width=True)
+        last_decisions = meta.get('last_decisions') if isinstance(meta.get('last_decisions'), list) else []
+        if last_decisions:
+            df_d = pd.DataFrame([d for d in last_decisions if isinstance(d, dict)])
+            if not df_d.empty:
+                cols = [c for c in ["ts", "symbol", "price", "trade_decision", "side", "signal_strength", "reasoning_short", "setup_score", "min_setup_score", "quality_mode", "atr_pct", "hour_utc"] if c in df_d.columns]
+                st.dataframe(df_d[cols].tail(80), use_container_width=True)
+            else:
+                st.info("Пока нет строк решений.")
         else:
-            st.info("No decision rows yet.")
+            st.info("Пока нет решений. Нажми Start All (или подожди один demo-цикл), чтобы появились логи решений.")
     else:
-        st.info("No decisions yet. Press Start All (or wait one demo cycle) to generate decision logs.")
-else:
-    st.info("Portfolio data not found. Start the bot and press Start All to generate state.")
+        st.info("Portfolio data not found. Start the bot and press Start All to generate state.")
 
 st.markdown("---")
 
-st.subheader("🧠 Lessons")
-lessons = load_trade_lessons(limit=100)
-if lessons is None or lessons.empty:
-    st.info("No lessons yet (DATABASE_URL missing or no closed trades).")
-else:
-    st.dataframe(lessons[["ts", "asset", "win", "pnl", "severity", "tags", "lesson"]].head(50), width='stretch')
+with st.expander("🧠 Уроки (из базы)", expanded=False):
+    lessons = load_trade_lessons(limit=100)
+    if lessons is None or lessons.empty:
+        st.info("Пока нет уроков (DATABASE_URL не задан или нет закрытых сделок).")
+    else:
+        st.dataframe(lessons[["ts", "asset", "win", "pnl", "severity", "tags", "lesson"]].head(50), width='stretch')
 
-    tags = []
-    for v in lessons["tags"].dropna().astype(str).tolist():
-        for t in [x.strip() for x in v.split(",") if x.strip()]:
-            tags.append(t)
-    if tags:
-        top = pd.Series(tags).value_counts().head(15).reset_index()
-        top.columns = ["tag", "count"]
-        st.markdown("### Top tags")
-        st.dataframe(top, width='stretch')
+        tags = []
+        for v in lessons["tags"].dropna().astype(str).tolist():
+            for t in [x.strip() for x in v.split(",") if x.strip()]:
+                tags.append(t)
+        if tags:
+            top = pd.Series(tags).value_counts().head(15).reset_index()
+            top.columns = ["tag", "count"]
+            st.markdown("### Топ тегов")
+            st.dataframe(top, width='stretch')
 
 st.markdown("---")
 
@@ -1643,21 +1735,252 @@ else:
 
 st.markdown("---")
 
-st.subheader("📷 CVision (Chart Screenshot)")
+with st.expander("📚 Аналитика и отчёты (папка new)", expanded=False):
+    if not _safe_exists(NEW_DIR):
+        st.info(f"Папка не найдена: {NEW_DIR}")
+    else:
+        section = st.selectbox(
+            "Раздел",
+            [
+                "EURUSD (анализ)",
+                "Золото (GLD, система паттернов)",
+                "Bitcoin (BTC)",
+                "Акции (6 тикеров, отчёты)",
+                "Галерея графиков",
+            ],
+            index=0,
+        )
+
+        show_full_md = st.checkbox("Показывать полный Markdown (может быть тяжёлым)", value=False)
+
+        if section == "EURUSD (анализ)":
+            eur_dir = os.path.join(NEW_DIR, "eurusd_analysis")
+            report_md = os.path.join(eur_dir, "EURUSD_FULL_REPORT.md")
+            report_pdf = os.path.join(eur_dir, "EURUSD_FULL_REPORT.pdf")
+
+            st.markdown("### EURUSD: отчёт и результаты")
+            m = _read_text(report_md)
+            if m:
+                st.markdown(m if show_full_md else _strip_data_image_md(m))
+            else:
+                st.info("EURUSD_FULL_REPORT.md не найден или пустой.")
+
+            if _safe_exists(report_pdf):
+                try:
+                    with open(report_pdf, "rb") as f:
+                        st.download_button("Скачать EURUSD_FULL_REPORT.pdf", data=f.read(), file_name="EURUSD_FULL_REPORT.pdf")
+                except Exception:
+                    pass
+
+            st.markdown("### Метрики и сделки (из results)")
+            metrics_csv = os.path.join(eur_dir, "results", "backtest_metrics.csv")
+            ml_metrics_csv = os.path.join(eur_dir, "results", "ml_metrics_summary.csv")
+            trades_csv = os.path.join(eur_dir, "results", "backtest_trades.csv")
+
+            m1 = _read_csv(metrics_csv)
+            if not m1.empty:
+                st.dataframe(m1, use_container_width=True)
+            else:
+                st.info("backtest_metrics.csv не найден или пустой.")
+
+            m2 = _read_csv(ml_metrics_csv)
+            if not m2.empty:
+                st.dataframe(m2, use_container_width=True)
+
+            with st.expander("Показать сделки (backtest_trades.csv)", expanded=False):
+                t = _read_csv(trades_csv)
+                if not t.empty:
+                    st.dataframe(t.tail(200), use_container_width=True)
+                else:
+                    st.info("backtest_trades.csv не найден или пустой.")
+
+            st.markdown("### Графики")
+            charts_dir = os.path.join(eur_dir, "charts")
+            pngs = _list_pngs(charts_dir)
+            if not pngs:
+                st.info("Графики не найдены.")
+            else:
+                pick = st.selectbox("Выбери график", [os.path.basename(p) for p in pngs], index=0)
+                p = os.path.join(charts_dir, pick)
+                st.image(p, use_container_width=True)
+
+        elif section == "Золото (GLD, система паттернов)":
+            st.markdown("### Золото: отчёты и бэктест")
+
+            system_txt = os.path.join(NEW_DIR, "СИСТЕМА_ГОТОВА.txt")
+            system_text = _read_text(system_txt)
+            if system_text:
+                lines = [ln.strip() for ln in system_text.splitlines() if ln.strip()]
+                metrics = {}
+                for ln in lines:
+                    m = re.search(r"Всего сделок:\s*(\d+)", ln)
+                    if m:
+                        metrics["Всего сделок"] = int(m.group(1))
+                    m = re.search(r"Винрейт:\s*([\d\.]+)%", ln)
+                    if m:
+                        metrics["Винрейт (%)"] = float(m.group(1))
+                    m = re.search(r"Profit Factor:\s*([\d\.]+)", ln)
+                    if m:
+                        metrics["Profit Factor"] = float(m.group(1))
+                    m = re.search(r"Общий P&L:\s*\$([\d\.,]+)", ln)
+                    if m:
+                        metrics["Общий P&L ($)"] = float(m.group(1).replace(",", ""))
+                    m = re.search(r"Доходность:\s*\+([\d\.]+)%", ln)
+                    if m:
+                        metrics["Доходность (%)"] = float(m.group(1))
+                    m = re.search(r"Sharpe Ratio:\s*([\d\.]+)", ln)
+                    if m:
+                        metrics["Sharpe"] = float(m.group(1))
+                if metrics:
+                    cols = st.columns(min(6, len(metrics)))
+                    for i, (k, v) in enumerate(metrics.items()):
+                        cols[i % len(cols)].metric(k, v)
+
+                with st.expander("Показать текст (СИСТЕМА_ГОТОВА.txt)", expanded=False):
+                    st.text(system_text)
+
+            report_md = os.path.join(NEW_DIR, "GOLD_TRADING_REPORT.md")
+            gold_report_ru_md = os.path.join(NEW_DIR, "gold_report_ru.md")
+
+            with st.expander("Открыть GOLD_TRADING_REPORT.md", expanded=False):
+                r = _read_text(report_md)
+                st.markdown(r if show_full_md else _strip_data_image_md(r))
+
+            with st.expander("Открыть gold_report_ru.md", expanded=False):
+                r = _read_text(gold_report_ru_md)
+                st.markdown(r if show_full_md else _strip_data_image_md(r))
+
+            st.markdown("### Графики")
+            gold_pngs = [
+                os.path.join(NEW_DIR, "gold_equity_curve.png"),
+                os.path.join(NEW_DIR, "gold_pattern_examples.png"),
+                os.path.join(NEW_DIR, "gold_pattern_distribution.png"),
+                os.path.join(NEW_DIR, "gold_monthly_heatmap.png"),
+                os.path.join(NEW_DIR, "gold_pnl_distribution.png"),
+                os.path.join(NEW_DIR, "gold_cumulative_pnl.png"),
+                os.path.join(NEW_DIR, "gold_correlation_matrix.png"),
+                os.path.join(NEW_DIR, "gold_feature_importance.png"),
+                os.path.join(NEW_DIR, "gold_ml_predictions.png"),
+                os.path.join(NEW_DIR, "gold_residuals_analysis.png"),
+                os.path.join(NEW_DIR, "gold_price_history.png"),
+            ]
+            gold_pngs = [p for p in gold_pngs if _safe_exists(p)]
+            if not gold_pngs:
+                st.info("PNG-графики золота не найдены.")
+            else:
+                pick = st.selectbox("Выбери график", [os.path.basename(p) for p in gold_pngs], index=0)
+                st.image(os.path.join(NEW_DIR, pick), use_container_width=True)
+
+        elif section == "Bitcoin (BTC)":
+            st.markdown("### Bitcoin: метрики и отчёт")
+            btc_m = _read_json(os.path.join(NEW_DIR, "btc_metrics_correct.json")) or {}
+            btc_a = _read_json(os.path.join(NEW_DIR, "btc_analysis_results.json")) or {}
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Цена (current)", round(float(btc_m.get("current_price") or btc_a.get("current_price") or 0.0), 2))
+            c2.metric("ATH", round(float(btc_m.get("ath") or btc_a.get("ath") or 0.0), 2))
+            dd = btc_m.get("max_drawdown") if isinstance(btc_m, dict) else None
+            if dd is None and isinstance(btc_a, dict):
+                dd = (btc_a.get("risk_metrics") or {}).get("max_drawdown")
+            c3.metric("Max Drawdown", round(float(dd or 0.0), 2))
+            vol30 = None
+            if isinstance(btc_m.get("volatility"), dict):
+                vol30 = btc_m["volatility"].get("30d")
+            if vol30 is None and isinstance(btc_a.get("risk_metrics"), dict):
+                vol30 = btc_a["risk_metrics"].get("volatility_30d")
+            c4.metric("Volatility 30d", round(float(vol30 or 0.0), 2))
+
+            btc_report_md = os.path.join(NEW_DIR, "Bitcoin_Analysis_Report_RU.md")
+            btc_report_pdf = os.path.join(NEW_DIR, "Bitcoin_Analysis_Report_RU.pdf")
+            with st.expander("Открыть Bitcoin_Analysis_Report_RU.md", expanded=False):
+                m = _read_text(btc_report_md)
+                st.markdown(m if show_full_md else _strip_data_image_md(m))
+
+            if _safe_exists(btc_report_pdf):
+                try:
+                    with open(btc_report_pdf, "rb") as f:
+                        st.download_button("Скачать Bitcoin_Analysis_Report_RU.pdf", data=f.read(), file_name="Bitcoin_Analysis_Report_RU.pdf")
+                except Exception:
+                    pass
+
+            st.markdown("### Графики")
+            btc_pngs = [
+                os.path.join(NEW_DIR, "chart1_price_indicators.png"),
+                os.path.join(NEW_DIR, "chart2_volatility_returns.png"),
+                os.path.join(NEW_DIR, "chart3_correlations.png"),
+                os.path.join(NEW_DIR, "chart4_bollinger.png"),
+                os.path.join(NEW_DIR, "chart5_distribution.png"),
+                os.path.join(NEW_DIR, "final_chart1.png"),
+                os.path.join(NEW_DIR, "final_chart2.png"),
+            ]
+            btc_pngs = [p for p in btc_pngs if _safe_exists(p)]
+            if btc_pngs:
+                pick = st.selectbox("Выбери график", [os.path.basename(p) for p in btc_pngs], index=0)
+                st.image(os.path.join(NEW_DIR, pick), use_container_width=True)
+            else:
+                st.info("PNG-графики BTC не найдены.")
+
+        elif section == "Акции (6 тикеров, отчёты)":
+            st.markdown("### Акции: отчёты и графики")
+            md_files = [
+                os.path.join(NEW_DIR, "FINAL_6STOCKS_ANALYSIS_RUS.md"),
+                os.path.join(NEW_DIR, "FINAL_REPORT_RUS.md"),
+                os.path.join(NEW_DIR, "Investment_Analysis_Tech_Stocks_RUS_short.md"),
+                os.path.join(NEW_DIR, "Investment_Analysis_Tech_Stocks_RUS.md"),
+            ]
+            md_files = [p for p in md_files if _safe_exists(p)]
+            if md_files:
+                pick = st.selectbox("Выбери отчёт (Markdown)", [os.path.basename(p) for p in md_files], index=0)
+                m = _read_text(os.path.join(NEW_DIR, pick))
+                st.markdown(m if show_full_md else _strip_data_image_md(m))
+            else:
+                st.info("Отчёты по акциям не найдены.")
+
+            st.markdown("### Графики")
+            stock_pngs = [
+                os.path.join(NEW_DIR, "chart_fundamentals.png"),
+                os.path.join(NEW_DIR, "chart_price_comparison.png"),
+                os.path.join(NEW_DIR, "chart_price_ma.png"),
+                os.path.join(NEW_DIR, "chart_returns.png"),
+                os.path.join(NEW_DIR, "chart_risk_potential.png"),
+                os.path.join(NEW_DIR, "chart_rsi.png"),
+            ]
+            stock_pngs = [p for p in stock_pngs if _safe_exists(p)]
+            if stock_pngs:
+                pick = st.selectbox("Выбери график", [os.path.basename(p) for p in stock_pngs], index=0)
+                st.image(os.path.join(NEW_DIR, pick), use_container_width=True)
+            else:
+                st.info("PNG-графики по акциям не найдены.")
+
+        else:
+            st.markdown("### Галерея: все PNG из папки new")
+            pngs = _list_pngs(NEW_DIR)
+            if not pngs:
+                st.info("PNG не найдены.")
+            else:
+                pick = st.selectbox("Выбери файл", [os.path.basename(p) for p in pngs], index=0)
+                st.image(os.path.join(NEW_DIR, pick), use_container_width=True)
+                try:
+                    with open(os.path.join(NEW_DIR, pick), "rb") as f:
+                        st.download_button("Скачать PNG", data=f.read(), file_name=str(pick))
+                except Exception:
+                    pass
+
+st.subheader("📷 CVision (анализ по картинке)")
 api_key = _get_openrouter_api_key()
-uploaded = st.file_uploader("Upload a chart screenshot (PNG/JPG)", type=["png", "jpg", "jpeg"])
-vision_model = st.text_input("Vision model (OpenRouter)", value=os.getenv("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini"))
+uploaded = st.file_uploader("Загрузить скриншот графика (PNG/JPG)", type=["png", "jpg", "jpeg"])
+vision_model = st.text_input("Vision-модель (OpenRouter)", value=os.getenv("OPENROUTER_VISION_MODEL", "openai/gpt-4o-mini"))
 vision_prompt = st.text_area(
-    "Question / task",
-    value=f"Analyze this chart for {chart_symbol} ({timeframe}). Identify trend, key levels, and a trade idea with TP/SL.",
+    "Запрос",
+    value=f"Проанализируй этот график для {chart_symbol} ({timeframe}). Определи тренд, ключевые уровни и торговую идею с TP/SL. Ответь на русском.",
     height=110,
 )
 
 if uploaded is not None:
     st.image(uploaded, use_container_width=True)
-    if st.button("🔎 Run CVision", width='stretch'):
+    if st.button("🔎 Запустить CVision", width='stretch'):
         if not api_key:
-            st.error("OPENROUTER_API_KEY not found.")
+            st.error("OPENROUTER_API_KEY не найден.")
         else:
             try:
                 import base64
@@ -1679,16 +2002,16 @@ if uploaded is not None:
                     temperature=0.2,
                     max_tokens=350,
                 )
-                st.success("CVision result:")
+                st.success("Результат CVision:")
                 st.write(resp.choices[0].message.content)
             except Exception as e:
                 msg = str(e)
                 if "401" in msg:
-                    st.error("CVision error: 401 Unauthorized. Check that OPENROUTER_API_KEY is valid (or paste it in sidebar → OpenRouter).")
+                    st.error("Ошибка CVision: 401 Unauthorized. Проверь OPENROUTER_API_KEY (или вставь ключ в сайдбаре → OpenRouter).")
                 else:
-                    st.error(f"CVision error: {e}")
+                    st.error(f"Ошибка CVision: {e}")
 else:
-    st.caption("Tip: take a screenshot from TradingView and upload it here.")
+    st.caption("Подсказка: сделай скриншот TradingView и загрузи его сюда.")
 
 st.markdown("---")
 

@@ -9,6 +9,7 @@ import logging
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import importlib.util
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -179,9 +180,9 @@ load_dotenv()
 PAPER_CAPITAL = float(os.getenv("PAPER_START_CAPITAL", 10000))
 MAX_POSITION_SIZE = float(os.getenv("MAX_POSITION_SIZE", 10.0))
 STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
-TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
+TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", 5.0))
 
-MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 5))
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", 3))
 DAILY_TP_TARGET_PERCENT = float(os.getenv("DAILY_TP_TARGET_PERCENT", 10.0))
 DEMO_CYCLE_SECONDS = int(os.getenv("DEMO_CYCLE_SECONDS", 300))
 REAL_CYCLE_SECONDS = int(os.getenv("REAL_CYCLE_SECONDS", 600))
@@ -216,6 +217,19 @@ TRADING_MODE = os.getenv("TRADING_MODE", "demo").lower()
 STRATEGY_MODE = (os.getenv("STRATEGY_MODE") or "combo").strip().lower()
 STRATEGY_VERSION = (os.getenv("STRATEGY_VERSION") or "v2").strip()
 
+NEW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "new")
+EURUSD_ANALYSIS_DIR = os.path.join(NEW_DIR, "eurusd_analysis")
+EURUSD_MODELS_DIR = os.path.join(EURUSD_ANALYSIS_DIR, "models")
+EURUSD_FEATURES_HEADER_CSV = os.path.join(EURUSD_ANALYSIS_DIR, "data", "features.csv")
+
+EURUSD_ML_MIN_PROBA_DEFAULT = float(os.getenv("EURUSD_ML_MIN_PROBA_DEFAULT", 0.55))
+EURUSD_COMBINED_MIN_VOTES_DEFAULT = int(os.getenv("EURUSD_COMBINED_MIN_VOTES_DEFAULT", 2))
+
+GOLD_SYSTEM_DIR = os.path.join(NEW_DIR, "gold_trading_system")
+GOLD_PATTERN_MIN_CONF_DEFAULT = float(os.getenv("GOLD_PATTERN_MIN_CONF_DEFAULT", 0.65))
+GOLD_PATTERN_MTF_MIN_VOTES_DEFAULT = int(os.getenv("GOLD_PATTERN_MTF_MIN_VOTES_DEFAULT", 2))
+GOLD_MIN_DAYS_BETWEEN_TRADES_DEFAULT = int(os.getenv("GOLD_MIN_DAYS_BETWEEN_TRADES_DEFAULT", 3))
+
 USE_AI_DEFAULT = (os.getenv("USE_AI_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 USE_ML_DEFAULT = (os.getenv("USE_ML_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -238,6 +252,11 @@ PINE_TREND_FILTER_DEFAULT = (os.getenv("PINE_TREND_FILTER_DEFAULT", "true").stri
 PINE_ALLOW_COUNTERTREND_DEFAULT = (os.getenv("PINE_ALLOW_COUNTERTREND_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
 PINE_ML_CONFIRM_DEFAULT = (os.getenv("PINE_ML_CONFIRM_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
 PINE_ML_MIN_CONF_DEFAULT = float(os.getenv("PINE_ML_MIN_CONF_DEFAULT", 0.58))
+
+VISION_TRADE_ENABLED_DEFAULT = (os.getenv("VISION_TRADE_ENABLED_DEFAULT", "false").strip().lower() in ("1", "true", "yes"))
+VISION_TRADE_MIN_CONF_DEFAULT = float(os.getenv("VISION_TRADE_MIN_CONF_DEFAULT", 0.62))
+VISION_TRADE_TTL_MINUTES_DEFAULT = int(os.getenv("VISION_TRADE_TTL_MINUTES_DEFAULT", 180))
+VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT = (os.getenv("VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
 
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
@@ -273,7 +292,7 @@ YF_MULTI_TF = (os.getenv("YF_MULTI_TF", "false").strip().lower() in ("1", "true"
 YF_MIN_FETCH_INTERVAL_SECONDS = int(os.getenv("YF_MIN_FETCH_INTERVAL_SECONDS", 180))
 YF_CACHE_TTL_SECONDS = int(os.getenv("YF_CACHE_TTL_SECONDS", 3600))
 
-FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X").split(",") if s.strip()]
+FOREX_SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "EURUSD=X,GBPUSD=X,USDJPY=X,XAUUSD=X,GLD").split(",") if s.strip()]
 CRYPTO_SYMBOLS = [s.strip() for s in os.getenv(
     "CRYPTO_SYMBOLS",
     "BTC-USD,ETH-USD,SOL-USD,BNB-USD,XRP-USD,ADA-USD,DOGE-USD,AVAX-USD,LINK-USD,DOT-USD,LTC-USD,TRX-USD"
@@ -390,6 +409,83 @@ class MultiChannelNotifier:
             advisor = AIAdvisor()
             out = advisor.analyze_image(image_bytes=image_bytes, mime=mime or "image/jpeg", prompt_ru=prompt, model=OPENROUTER_VISION_MODEL)
             await msg.reply_text(out or "Не удалось получить ответ от модели.")
+
+            sym = _guess_symbol_from_text(caption)
+            if not sym:
+                return
+
+            enabled = bool(VISION_TRADE_ENABLED_DEFAULT)
+            try:
+                if 'bot_instance' in globals() and bot_instance and isinstance(getattr(bot_instance, "strategy", None), dict):
+                    enabled = bool(bot_instance.strategy.get("vision_trade_enabled", enabled))
+            except Exception:
+                pass
+            if not enabled:
+                return
+
+            if (TRADING_MODE == "real") and bool(VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT):
+                cap_low = str(caption or "").lower()
+                if ("trade" not in cap_low) and ("сделка" not in cap_low) and ("вход" not in cap_low) and ("#trade" not in cap_low):
+                    await msg.reply_text("Для авто-сделки в REAL добавь в подпись слово TRADE (например: EURUSD trade).")
+                    return
+
+            decision = advisor.vision_trade_decision(
+                image_bytes=image_bytes,
+                mime=mime or "image/jpeg",
+                prompt_ru=f"Символ: {sym}. {prompt}",
+                model=OPENROUTER_VISION_MODEL,
+            )
+            if not isinstance(decision, dict):
+                return
+
+            try:
+                conf = float(decision.get("confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            try:
+                min_conf = float(VISION_TRADE_MIN_CONF_DEFAULT)
+            except Exception:
+                min_conf = 0.62
+            try:
+                if 'bot_instance' in globals() and bot_instance and isinstance(getattr(bot_instance, "strategy", None), dict):
+                    min_conf = float(bot_instance.strategy.get("vision_trade_min_conf", min_conf))
+            except Exception:
+                pass
+
+            td = str(decision.get("trade_decision") or "NO").upper()
+            if td != "YES" or (not np.isfinite(conf)) or float(conf) < float(min_conf):
+                await msg.reply_text(f"⛔ Vision-сделка: NO (conf={float(conf):.2f}, min={float(min_conf):.2f}).")
+                return
+
+            cmd = {
+                "command": "vision_trade",
+                "symbol": sym,
+                "side": str(decision.get("side") or "long").lower(),
+                "signal_strength": str(decision.get("signal_strength") or "medium").lower(),
+                "confidence": float(conf),
+                "tp_pct": float(decision.get("tp_pct") or 0.0),
+                "sl_pct": float(decision.get("sl_pct") or 0.0),
+                "reasoning_short": str(decision.get("reasoning_short") or "vision")[:200],
+                "source": "telegram_vision",
+                "execute_now": True,
+                "time": str(datetime.now()),
+            }
+
+            ok = False
+            try:
+                if 'bot_instance' in globals() and bot_instance:
+                    if 'BOT_LOOP' in globals() and BOT_LOOP:
+                        fut = asyncio.run_coroutine_threadsafe(bot_instance.apply_command(cmd), BOT_LOOP)
+                        fut.result(timeout=5)
+                    else:
+                        await bot_instance.apply_command(cmd)
+                    ok = True
+            except Exception as e:
+                await msg.reply_text(f"Не удалось отправить команду в торгового бота: {e}")
+                ok = False
+
+            if ok:
+                await msg.reply_text(f"✅ Vision-сделка отправлена: {sym} {cmd['side']} (conf={float(conf):.2f}).")
         except Exception as e:
             err = str(e)
             if "401" in err:
@@ -1209,6 +1305,148 @@ Rules:
                 return "Ошибка доступа (401/403). Проверь OPENROUTER_API_KEY."
             return f"Ошибка анализа: {e}"
 
+    def vision_trade_decision(self, image_bytes: bytes, mime: str, prompt_ru: str, model: str | None = None) -> dict:
+        if not self.client or self._is_disabled():
+            return {
+                "trade_decision": "NO",
+                "action": "hold",
+                "side": "long",
+                "signal_strength": "weak",
+                "confidence": 0.0,
+                "tp_pct": 0.0,
+                "sl_pct": 0.0,
+                "reasoning_short": "AI unavailable",
+            }
+
+        try:
+            import base64
+            data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+            m = (model or OPENROUTER_VISION_MODEL).strip() if (model or OPENROUTER_VISION_MODEL) else "openai/gpt-4o-mini"
+
+            system = (
+                "Ты — строгая функция принятия торгового решения по скриншоту графика. "
+                "Правила: (1) не выдумывай цены/новости; (2) если не уверен — trade_decision=NO; "
+                "(3) ответ строго JSON без лишнего текста; (4) TP/SL в процентах от цены входа."
+            )
+
+            user_text = (
+                f"{prompt_ru}\n\n"
+                "Верни строго JSON:\n"
+                "{\n"
+                '  "trade_decision": "YES"|"NO",\n'
+                '  "action": "entry"|"hold",\n'
+                '  "side": "long"|"short",\n'
+                '  "signal_strength": "weak"|"medium"|"strong",\n'
+                '  "confidence": 0.0,\n'
+                '  "tp_pct": 0.0,\n'
+                '  "sl_pct": 0.0,\n'
+                '  "reasoning_short": "коротко по-русски (<=120 символов)"\n'
+                "}\n"
+            )
+
+            resp = self.client.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=320,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            import re
+            match = re.search(r"\{[\s\S]*\}", content)
+            if not match:
+                return {
+                    "trade_decision": "NO",
+                    "action": "hold",
+                    "side": "long",
+                    "signal_strength": "weak",
+                    "confidence": 0.0,
+                    "tp_pct": 0.0,
+                    "sl_pct": 0.0,
+                    "reasoning_short": "Parse error",
+                }
+            data = json.loads(match.group())
+            if not isinstance(data, dict):
+                raise ValueError("Invalid JSON")
+
+            td = str(data.get("trade_decision") or "NO").upper()
+            act = str(data.get("action") or "hold").lower()
+            side = str(data.get("side") or "long").lower()
+            strength = str(data.get("signal_strength") or "weak").lower()
+            try:
+                conf = float(data.get("confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            try:
+                tp_pct = float(data.get("tp_pct") or 0.0)
+            except Exception:
+                tp_pct = 0.0
+            try:
+                sl_pct = float(data.get("sl_pct") or 0.0)
+            except Exception:
+                sl_pct = 0.0
+            rs = str(data.get("reasoning_short") or "").strip()
+
+            if td not in ("YES", "NO"):
+                td = "NO"
+            if act not in ("entry", "hold"):
+                act = "hold"
+            if side not in ("long", "short"):
+                side = "long"
+            if strength not in ("weak", "medium", "strong"):
+                strength = "weak"
+            if not np.isfinite(conf):
+                conf = 0.0
+            conf = float(max(0.0, min(1.0, conf)))
+            if not np.isfinite(tp_pct):
+                tp_pct = 0.0
+            if not np.isfinite(sl_pct):
+                sl_pct = 0.0
+            tp_pct = float(max(0.0, min(50.0, tp_pct)))
+            sl_pct = float(max(0.0, min(50.0, sl_pct)))
+
+            return {
+                "trade_decision": td,
+                "action": act,
+                "side": side,
+                "signal_strength": strength,
+                "confidence": conf,
+                "tp_pct": tp_pct,
+                "sl_pct": sl_pct,
+                "reasoning_short": rs[:120] or "ok",
+            }
+        except Exception as e:
+            msg = str(e)
+            if "401" in msg or "403" in msg or "Unauthorized" in msg:
+                return {
+                    "trade_decision": "NO",
+                    "action": "hold",
+                    "side": "long",
+                    "signal_strength": "weak",
+                    "confidence": 0.0,
+                    "tp_pct": 0.0,
+                    "sl_pct": 0.0,
+                    "reasoning_short": "Auth error",
+                }
+            return {
+                "trade_decision": "NO",
+                "action": "hold",
+                "side": "long",
+                "signal_strength": "weak",
+                "confidence": 0.0,
+                "tp_pct": 0.0,
+                "sl_pct": 0.0,
+                "reasoning_short": "Vision error",
+            }
+
     def review_trade(self, trade: dict, context: dict | None = None) -> dict:
         if not self.client:
             return {"lesson": "No AI key", "tags": ["ai_off"], "severity": 1, "action_items": []}
@@ -1764,6 +2002,43 @@ def _fx_parts(symbol: str):
     if not base.isalpha() or not quote.isalpha():
         return None
     return base.upper(), quote.upper()
+
+def _guess_symbol_from_text(text: str) -> str | None:
+    t = str(text or "").strip().upper()
+    if not t:
+        return None
+
+    for sym in ALL_SYMBOLS:
+        s_up = str(sym).upper()
+        if s_up and s_up in t:
+            return str(sym)
+
+    aliases = {
+        "EURUSD": "EURUSD=X",
+        "GBPUSD": "GBPUSD=X",
+        "USDJPY": "USDJPY=X",
+        "XAUUSD": "XAUUSD=X",
+        "GOLD": "GLD",
+        "GLD": "GLD",
+        "BTC": "BTC-USD",
+        "BTCUSD": "BTC-USD",
+        "ETH": "ETH-USD",
+        "ETHUSD": "ETH-USD",
+        "SOL": "SOL-USD",
+        "BNB": "BNB-USD",
+        "XRP": "XRP-USD",
+        "ADA": "ADA-USD",
+        "DOGE": "DOGE-USD",
+        "AVAX": "AVAX-USD",
+        "LINK": "LINK-USD",
+        "DOT": "DOT-USD",
+        "LTC": "LTC-USD",
+        "TRX": "TRX-USD",
+    }
+    for k, v in aliases.items():
+        if k in t:
+            return v if v in ALL_SYMBOLS else v
+    return None
 
 
 def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -2821,8 +3096,16 @@ class TradingBot:
             "pine_allow_countertrend": bool(PINE_ALLOW_COUNTERTREND_DEFAULT),
             "pine_ml_confirm": bool(PINE_ML_CONFIRM_DEFAULT),
             "pine_ml_min_conf": float(PINE_ML_MIN_CONF_DEFAULT),
+            "eurusd_ml_min_proba": float(EURUSD_ML_MIN_PROBA_DEFAULT),
+            "eurusd_combined_min_votes": int(EURUSD_COMBINED_MIN_VOTES_DEFAULT),
+            "gold_pattern_min_conf": float(GOLD_PATTERN_MIN_CONF_DEFAULT),
+            "gold_pattern_mtf_min_votes": int(GOLD_PATTERN_MTF_MIN_VOTES_DEFAULT),
+            "gold_min_days_between_trades": int(GOLD_MIN_DAYS_BETWEEN_TRADES_DEFAULT),
+            "vision_trade_enabled": bool(VISION_TRADE_ENABLED_DEFAULT),
+            "vision_trade_min_conf": float(VISION_TRADE_MIN_CONF_DEFAULT),
+            "vision_trade_ttl_minutes": int(VISION_TRADE_TTL_MINUTES_DEFAULT),
         }
-        self.context = {}
+        self.context = {"vision_force": {}, "vision_signals": {}}
         self.last_action_ts = {}
         self.pause_until_ts = 0.0
         self.blocked = {"total": 0, "cooldown": 0, "weak": 0}
@@ -3206,6 +3489,88 @@ class TradingBot:
             self.force_cycle = True
             return
 
+        if cmd in ("vision_trade", "vision_signal"):
+            raw_symbol = (cmd_data.get("symbol") or cmd_data.get("asset") or "").strip()
+            if not raw_symbol:
+                raw_symbol = _guess_symbol_from_text(cmd_data.get("caption") or cmd_data.get("text") or "")
+            symbol = raw_symbol.strip() if isinstance(raw_symbol, str) else ""
+            if not symbol:
+                return
+
+            side = str(cmd_data.get("side") or "long").strip().lower()
+            if side not in ("long", "short"):
+                side = "long"
+
+            strength = str(cmd_data.get("signal_strength") or "medium").strip().lower()
+            if strength not in ("weak", "medium", "strong"):
+                strength = "medium"
+
+            try:
+                conf = float(cmd_data.get("confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            conf = float(max(0.0, min(1.0, conf))) if np.isfinite(conf) else 0.0
+
+            try:
+                tp_pct = float(cmd_data.get("tp_pct") or 0.0)
+            except Exception:
+                tp_pct = 0.0
+            try:
+                sl_pct = float(cmd_data.get("sl_pct") or 0.0)
+            except Exception:
+                sl_pct = 0.0
+
+            rs = str(cmd_data.get("reasoning_short") or cmd_data.get("reason") or "vision").strip()[:200]
+
+            now = time.time()
+            try:
+                ttl_min = int(self.strategy.get("vision_trade_ttl_minutes", VISION_TRADE_TTL_MINUTES_DEFAULT))
+            except Exception:
+                ttl_min = int(VISION_TRADE_TTL_MINUTES_DEFAULT)
+            ttl_sec = max(60, int(ttl_min) * 60)
+            expires_ts = now + float(ttl_sec)
+
+            payload = {
+                "ts": float(now),
+                "expires_ts": float(expires_ts),
+                "symbol": str(symbol),
+                "side": side,
+                "signal_strength": strength,
+                "confidence": float(conf),
+                "tp_pct": float(tp_pct),
+                "sl_pct": float(sl_pct),
+                "reasoning_short": rs,
+                "source": str(cmd_data.get("source") or cmd),
+            }
+
+            if isinstance(self.context, dict):
+                self.context.setdefault("vision_signals", {})
+                if isinstance(self.context.get("vision_signals"), dict):
+                    self.context["vision_signals"][symbol] = payload
+
+            execute_now = bool(cmd_data.get("execute_now", True))
+            if execute_now:
+                self.context.setdefault("vision_force", {})
+                if isinstance(self.context.get("vision_force"), dict):
+                    self.context["vision_force"][symbol] = {
+                        "ts": float(now),
+                        "expires_ts": float(expires_ts),
+                        "trade_decision": "YES",
+                        "action": "entry",
+                        "side": side,
+                        "signal_strength": strength,
+                        "confidence": float(conf),
+                        "tp_pct": float(tp_pct),
+                        "sl_pct": float(sl_pct),
+                        "reasoning_short": rs,
+                        "strategy_mode": "vision",
+                        "decision_source": "vision_force",
+                    }
+                await self.process_symbol(symbol)
+
+            self.force_cycle = True
+            return
+
         if cmd == "set_filters":
             def _as_float(v, fallback):
                 try:
@@ -3349,11 +3714,26 @@ class TradingBot:
             self.strategy["pine_ml_confirm"] = _as_bool(cmd_data.get("pine_ml_confirm"), self.strategy.get("pine_ml_confirm", PINE_ML_CONFIRM_DEFAULT))
             self.strategy["pine_ml_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("pine_ml_min_conf"), self.strategy.get("pine_ml_min_conf", PINE_ML_MIN_CONF_DEFAULT))))
 
+            self.strategy["eurusd_ml_min_proba"] = max(0.0, min(1.0, _as_float(cmd_data.get("eurusd_ml_min_proba"), self.strategy.get("eurusd_ml_min_proba", EURUSD_ML_MIN_PROBA_DEFAULT))))
+            self.strategy["eurusd_combined_min_votes"] = max(1, min(3, _as_int(cmd_data.get("eurusd_combined_min_votes"), self.strategy.get("eurusd_combined_min_votes", EURUSD_COMBINED_MIN_VOTES_DEFAULT))))
+            self.strategy["gold_pattern_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("gold_pattern_min_conf"), self.strategy.get("gold_pattern_min_conf", GOLD_PATTERN_MIN_CONF_DEFAULT))))
+            self.strategy["gold_pattern_mtf_min_votes"] = max(1, min(3, _as_int(cmd_data.get("gold_pattern_mtf_min_votes"), self.strategy.get("gold_pattern_mtf_min_votes", GOLD_PATTERN_MTF_MIN_VOTES_DEFAULT))))
+            self.strategy["gold_min_days_between_trades"] = max(0, _as_int(cmd_data.get("gold_min_days_between_trades"), self.strategy.get("gold_min_days_between_trades", GOLD_MIN_DAYS_BETWEEN_TRADES_DEFAULT)))
+            self.strategy["vision_trade_enabled"] = _as_bool(cmd_data.get("vision_trade_enabled"), self.strategy.get("vision_trade_enabled", VISION_TRADE_ENABLED_DEFAULT))
+            self.strategy["vision_trade_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("vision_trade_min_conf"), self.strategy.get("vision_trade_min_conf", VISION_TRADE_MIN_CONF_DEFAULT))))
+            self.strategy["vision_trade_ttl_minutes"] = max(1, _as_int(cmd_data.get("vision_trade_ttl_minutes"), self.strategy.get("vision_trade_ttl_minutes", VISION_TRADE_TTL_MINUTES_DEFAULT)))
+
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("pine", "ny_smc"):
                 self.strategy_mode = "ny_smc"
             elif mode in ("combo", "hybrid", "ny_combo"):
                 self.strategy_mode = "combo"
+            elif mode in ("eurusd_ml", "eurusd", "eur_ml"):
+                self.strategy_mode = "eurusd_ml"
+            elif mode in ("gold_patterns", "gold", "gld"):
+                self.strategy_mode = "gold_patterns"
+            elif mode in ("vision", "cvision", "cvision_trade", "vision_trade"):
+                self.strategy_mode = "vision"
             elif mode in ("classic", "reinforse", "pro", "mix"):
                 self.strategy_mode = "reinforse" if mode == "pro" else mode
 
@@ -3597,14 +3977,26 @@ class TradingBot:
             return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: не первые 2 часа NY'}
 
         if req_ldn_sweep:
-            if not _in_london_session_utc(now_ts):
-                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: ждём свип Лондона (вне окна)'}
-            ph_l = _pivot_series(df15["high"], pivot_len, "high")
-            pl_l = _pivot_series(df15["low"], pivot_len, "low")
+            t_now = pd.Timestamp(now_ts)
+            day0 = t_now.normalize()
+            ldn_start = day0 + pd.Timedelta(hours=7)
+            ldn_end = day0 + pd.Timedelta(hours=16)
+            if t_now < ldn_start:
+                day0 = (t_now - pd.Timedelta(days=1)).normalize()
+                ldn_start = day0 + pd.Timedelta(hours=7)
+                ldn_end = day0 + pd.Timedelta(hours=16)
+
+            ldn_to = ldn_end if t_now >= ldn_end else t_now
+            df_ldn = df15.loc[(df15.index >= ldn_start) & (df15.index <= ldn_to)]
+            if df_ldn is None or df_ldn.empty:
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет данных по Лондону'}
+
+            ph_l = _pivot_series(df_ldn["high"], pivot_len, "high")
+            pl_l = _pivot_series(df_ldn["low"], pivot_len, "low")
             last_ph_l = ph_l.ffill().iloc[-1] if not ph_l.dropna().empty else np.nan
             last_pl_l = pl_l.ffill().iloc[-1] if not pl_l.dropna().empty else np.nan
-            sweep_up_l = (df15["high"] > last_ph_l) & (df15["close"] < last_ph_l) if np.isfinite(last_ph_l) else pd.Series(False, index=df15.index)
-            sweep_dn_l = (df15["low"] < last_pl_l) & (df15["close"] > last_pl_l) if np.isfinite(last_pl_l) else pd.Series(False, index=df15.index)
+            sweep_up_l = (df_ldn["high"] > last_ph_l) & (df_ldn["close"] < last_ph_l) if np.isfinite(last_ph_l) else pd.Series(False, index=df_ldn.index)
+            sweep_dn_l = (df_ldn["low"] < last_pl_l) & (df_ldn["close"] > last_pl_l) if np.isfinite(last_pl_l) else pd.Series(False, index=df_ldn.index)
             sweep_up_l_ev = sweep_up_l & (~sweep_up_l.shift(1).fillna(False))
             sweep_dn_l_ev = sweep_dn_l & (~sweep_dn_l.shift(1).fillna(False))
             if not (bool(sweep_up_l_ev.any()) or bool(sweep_dn_l_ev.any())):
@@ -3735,6 +4127,476 @@ class TradingBot:
             }
 
         return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Pine: нет сетапа'}
+
+    def _eurusd_feature_cols(self) -> list[str]:
+        cached = self.context.get("eurusd_feature_cols") if isinstance(getattr(self, "context", None), dict) else None
+        if isinstance(cached, list) and cached:
+            return cached
+        cols = []
+        try:
+            if os.path.exists(EURUSD_FEATURES_HEADER_CSV):
+                tmp = pd.read_csv(EURUSD_FEATURES_HEADER_CSV, nrows=0)
+                cols = [c for c in tmp.columns if isinstance(c, str)]
+        except Exception:
+            cols = []
+        feature_cols = [c for c in cols if not str(c).startswith("Target")]
+        if not feature_cols:
+            feature_cols = [c for c in cols if "Target" not in str(c)]
+        if isinstance(self.context, dict):
+            self.context["eurusd_feature_cols"] = feature_cols
+        return feature_cols
+
+    def _eurusd_load_ml(self):
+        cached = self.context.get("eurusd_ml") if isinstance(getattr(self, "context", None), dict) else None
+        if isinstance(cached, dict) and cached.get("ok"):
+            return cached
+        model_path = os.path.join(EURUSD_MODELS_DIR, "classification_XGBoost.pkl")
+        scaler_path = os.path.join(EURUSD_MODELS_DIR, "scaler.pkl")
+        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
+            out = {"ok": False, "reason": "eurusd_ml_artifacts_missing"}
+            if isinstance(self.context, dict):
+                self.context["eurusd_ml"] = out
+            return out
+        try:
+            model = joblib.load(model_path)
+            scaler = joblib.load(scaler_path)
+            out = {"ok": True, "model": model, "scaler": scaler}
+            if isinstance(self.context, dict):
+                self.context["eurusd_ml"] = out
+            return out
+        except Exception as e:
+            out = {"ok": False, "reason": f"eurusd_ml_load_error:{e}"}
+            if isinstance(self.context, dict):
+                self.context["eurusd_ml"] = out
+            return out
+
+    def _eurusd_fetch_daily_bundle(self) -> dict | None:
+        cache = self.context.get("eurusd_bundle") if isinstance(getattr(self, "context", None), dict) else None
+        now = time.time()
+        if isinstance(cache, dict):
+            ts = float(cache.get("ts") or 0.0)
+            if (now - ts) < float(os.getenv("EURUSD_CACHE_SECONDS", "900") or 900):
+                return cache.get("data")
+
+        tickers = {
+            "EURUSD": "EURUSD=X",
+            "DXY": "DX-Y.NYB",
+            "GBPUSD": "GBPUSD=X",
+            "USDJPY": "USDJPY=X",
+            "USDCHF": "USDCHF=X",
+            "AUDUSD": "AUDUSD=X",
+            "XAUUSD": "XAUUSD=X",
+        }
+
+        frames = {}
+        for k, sym in tickers.items():
+            df = _fetch_ohlc(sym, "1d", "3y")
+            if df is None or df.empty:
+                return None
+            frames[k] = _to_utc_index(df)
+
+        base = frames["EURUSD"][["open", "high", "low", "close", "volume"]].copy()
+        idx = base.index
+        out = pd.DataFrame(index=idx)
+        out["EURUSD_Close"] = base["close"].astype(float)
+        out["EURUSD_Open"] = base["open"].astype(float)
+        out["EURUSD_High"] = base["high"].astype(float)
+        out["EURUSD_Low"] = base["low"].astype(float)
+        out["EURUSD_Volume"] = base["volume"].astype(float)
+
+        for name, col in [
+            ("DXY", "close"),
+            ("GBPUSD", "close"),
+            ("USDJPY", "close"),
+            ("USDCHF", "close"),
+            ("AUDUSD", "close"),
+            ("XAUUSD", "close"),
+        ]:
+            s = frames[name][col].astype(float).reindex(idx).ffill()
+            out[f"{name}_Close"] = s
+
+        out = out.dropna().copy()
+        if isinstance(self.context, dict):
+            self.context["eurusd_bundle"] = {"ts": now, "data": out}
+        return out
+
+    def _eurusd_build_features(self, prices_df: pd.DataFrame) -> pd.DataFrame:
+        df = prices_df.copy()
+        df = df.sort_index()
+
+        close = df["EURUSD_Close"].astype(float)
+        high = df["EURUSD_High"].astype(float)
+        low = df["EURUSD_Low"].astype(float)
+        open_ = df["EURUSD_Open"].astype(float)
+
+        feat = pd.DataFrame(index=df.index)
+        feat["Close"] = close
+        feat["Open"] = open_
+        feat["High"] = high
+        feat["Low"] = low
+
+        feat["Return_1d"] = close.pct_change() * 100.0
+        feat["Return_3d"] = close.pct_change(3) * 100.0
+        feat["Return_5d"] = close.pct_change(5) * 100.0
+
+        hl_range = (high - low)
+        feat["HL_Range"] = hl_range
+        feat["HL_Range_Pct"] = (hl_range / close) * 100.0
+
+        feat["Body"] = (close - open_).abs()
+        feat["Upper_Shadow"] = (high - pd.concat([close, open_], axis=1).max(axis=1))
+        feat["Lower_Shadow"] = (pd.concat([close, open_], axis=1).min(axis=1) - low)
+
+        delta = close.diff()
+        gain = delta.clip(lower=0.0)
+        loss = (-delta).clip(lower=0.0)
+        rsi14 = 100.0 - (100.0 / (1.0 + (gain.ewm(alpha=1/14.0, adjust=False).mean() / (loss.ewm(alpha=1/14.0, adjust=False).mean() + 1e-12))))
+        rsi21 = 100.0 - (100.0 / (1.0 + (gain.ewm(alpha=1/21.0, adjust=False).mean() / (loss.ewm(alpha=1/21.0, adjust=False).mean() + 1e-12))))
+        feat["RSI_14"] = rsi14
+        feat["RSI_21"] = rsi21
+
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        macd_signal = macd.ewm(span=9, adjust=False).mean()
+        macd_diff = macd - macd_signal
+        feat["MACD"] = macd
+        feat["MACD_Signal"] = macd_signal
+        feat["MACD_Diff"] = macd_diff
+
+        bb_mid = close.rolling(20).mean()
+        bb_std = close.rolling(20).std(ddof=0)
+        bb_high = bb_mid + (2.0 * bb_std)
+        bb_low = bb_mid - (2.0 * bb_std)
+        feat["BB_High"] = bb_high
+        feat["BB_Low"] = bb_low
+        feat["BB_Mid"] = bb_mid
+        feat["BB_Width"] = ((bb_high - bb_low) / (bb_mid.replace(0.0, np.nan))) * 100.0
+        feat["BB_Position"] = ((close - bb_low) / ((bb_high - bb_low).replace(0.0, np.nan))) * 100.0
+
+        prev_close = close.shift(1)
+        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1/14.0, adjust=False).mean()
+        feat["ATR"] = atr
+        feat["ATR_Pct"] = (atr / close) * 100.0
+
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0.0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0.0), 0.0)
+        tr14 = tr.ewm(alpha=1/14.0, adjust=False).mean()
+        plus_di = 100.0 * (plus_dm.ewm(alpha=1/14.0, adjust=False).mean() / (tr14 + 1e-12))
+        minus_di = 100.0 * (minus_dm.ewm(alpha=1/14.0, adjust=False).mean() / (tr14 + 1e-12))
+        dx = 100.0 * ((plus_di - minus_di).abs() / ((plus_di + minus_di) + 1e-12))
+        adx = dx.ewm(alpha=1/14.0, adjust=False).mean()
+        feat["ADX"] = adx
+        feat["ADX_Pos"] = plus_di
+        feat["ADX_Neg"] = minus_di
+
+        ll = low.rolling(14).min()
+        hh = high.rolling(14).max()
+        stoch_k = 100.0 * ((close - ll) / ((hh - ll).replace(0.0, np.nan)))
+        stoch_d = stoch_k.rolling(3).mean()
+        feat["Stoch_K"] = stoch_k
+        feat["Stoch_D"] = stoch_d
+
+        for period in [10, 20, 50, 100, 200]:
+            sma = close.rolling(period).mean()
+            feat[f"SMA_{period}"] = sma
+            feat[f"Distance_SMA_{period}"] = ((close - sma) / sma.replace(0.0, np.nan)) * 100.0
+
+        for period in [12, 26, 50]:
+            feat[f"EMA_{period}"] = close.ewm(span=period, adjust=False).mean()
+
+        feat["SMA_Cross_50_200"] = (feat["SMA_50"] > feat["SMA_200"]).astype(int)
+
+        for period in [5, 10, 20]:
+            feat[f"Momentum_{period}"] = close - close.shift(period)
+            feat[f"Momentum_Pct_{period}"] = ((close - close.shift(period)) / close.shift(period).replace(0.0, np.nan)) * 100.0
+            feat[f"ROC_{period}"] = ((close - close.shift(period)) / close.shift(period).replace(0.0, np.nan)) * 100.0
+
+        for lag in [1, 2, 3, 5, 10]:
+            feat[f"Close_Lag_{lag}"] = close.shift(lag)
+        for lag in [1, 2, 3, 5]:
+            feat[f"Return_Lag_{lag}"] = feat["Return_1d"].shift(lag)
+
+        for instrument in ["DXY", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "XAUUSD"]:
+            s = df[f"{instrument}_Close"].astype(float)
+            r = s.pct_change() * 100.0
+            feat[f"{instrument}_Return"] = r
+            feat[f"{instrument}_Return_Lag1"] = r.shift(1)
+
+        feat["Spread_EUR_GBP"] = (df["EURUSD_Close"].astype(float) - df["GBPUSD_Close"].astype(float))
+
+        idx = feat.index
+        feat["DayOfWeek"] = idx.dayofweek
+        feat["Month"] = idx.month
+        feat["Quarter"] = ((idx.month - 1) // 3 + 1).astype(int)
+        feat["DayOfMonth"] = idx.day
+        feat["IsMonthStart"] = idx.is_month_start.astype(int)
+        feat["IsMonthEnd"] = idx.is_month_end.astype(int)
+
+        feat["DayOfWeek_Sin"] = np.sin(2 * np.pi * feat["DayOfWeek"] / 7.0)
+        feat["DayOfWeek_Cos"] = np.cos(2 * np.pi * feat["DayOfWeek"] / 7.0)
+        feat["Month_Sin"] = np.sin(2 * np.pi * feat["Month"] / 12.0)
+        feat["Month_Cos"] = np.cos(2 * np.pi * feat["Month"] / 12.0)
+
+        feat = feat.dropna().copy()
+        feat.index.name = "Date"
+        feat = feat.reset_index()
+        feat["Date"] = pd.to_datetime(feat["Date"]).dt.date.astype(str)
+        return feat
+
+    def _eurusd_ml_decision(self, symbol: str) -> dict:
+        if str(symbol) != "EURUSD=X":
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'EURUSD ML: только для EURUSD=X', "skip_filters": True}
+
+        loaded = self._eurusd_load_ml()
+        if not loaded.get("ok"):
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"EURUSD ML: {loaded.get('reason')}", "skip_filters": True}
+
+        prices = self._eurusd_fetch_daily_bundle()
+        if prices is None or prices.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'EURUSD ML: нет данных', "skip_filters": True}
+
+        feat_df = self._eurusd_build_features(prices)
+        if feat_df is None or feat_df.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'EURUSD ML: нет фичей', "skip_filters": True}
+
+        feature_cols = self._eurusd_feature_cols()
+        if not feature_cols:
+            feature_cols = [c for c in feat_df.columns if c not in ("Target_Direction", "Target_Return", "Target_Price")]
+
+        df_in = feat_df.copy()
+        for c in feature_cols:
+            if c not in df_in.columns:
+                df_in[c] = np.nan
+        df_in = df_in[feature_cols].copy()
+        df_in = df_in.dropna()
+        if df_in.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'EURUSD ML: NaN в фичах', "skip_filters": True}
+
+        x = df_in.tail(1)
+        try:
+            x_scaled = loaded["scaler"].transform(x)
+        except Exception:
+            x_scaled = x.values
+
+        try:
+            pred = int(loaded["model"].predict(x_scaled)[0])
+        except Exception:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'EURUSD ML: predict error', "skip_filters": True}
+
+        proba_up = None
+        try:
+            if hasattr(loaded["model"], "predict_proba"):
+                p = loaded["model"].predict_proba(x_scaled)
+                proba_up = float(p[0][1])
+        except Exception:
+            proba_up = None
+
+        last_row = df_in.tail(1).iloc[0]
+        dxy_signal = 1 if float(last_row.get("DXY_Return_Lag1") or 0.0) < 0.0 else 0
+        tech_signal = 0
+        try:
+            rsi = float(last_row.get("RSI_14") or 50.0)
+            md = float(last_row.get("MACD_Diff") or 0.0)
+            if (rsi < 40.0) and (md > 0.0):
+                tech_signal = 1
+            elif (rsi > 60.0) and (md < 0.0):
+                tech_signal = -1
+        except Exception:
+            tech_signal = 0
+
+        bullish_votes = (1 if pred == 1 else 0) + (1 if dxy_signal == 1 else 0) + (1 if tech_signal == 1 else 0)
+        bearish_votes = (1 if pred == 0 else 0) + (1 if dxy_signal == 0 else 0) + (1 if tech_signal == -1 else 0)
+
+        min_votes = int(self.strategy.get("eurusd_combined_min_votes", EURUSD_COMBINED_MIN_VOTES_DEFAULT) or EURUSD_COMBINED_MIN_VOTES_DEFAULT)
+        min_votes = max(1, min(3, int(min_votes)))
+        min_proba = float(self.strategy.get("eurusd_ml_min_proba", EURUSD_ML_MIN_PROBA_DEFAULT) or EURUSD_ML_MIN_PROBA_DEFAULT)
+        min_proba = max(0.0, min(1.0, float(min_proba)))
+
+        if proba_up is not None:
+            if max(proba_up, 1.0 - proba_up) < min_proba:
+                return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"EURUSD ML: низкая уверенность ({max(proba_up, 1.0 - proba_up):.2f}<{min_proba:.2f})", "skip_filters": True}
+
+        side = None
+        if bullish_votes >= min_votes:
+            side = "long"
+        elif bearish_votes >= min_votes:
+            side = "short"
+
+        if not side:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"EURUSD ML: нет комбо (votes L={bullish_votes} S={bearish_votes})", "skip_filters": True}
+
+        strength = "medium"
+        if proba_up is not None:
+            conf = max(proba_up, 1.0 - proba_up)
+            strength = "strong" if conf >= 0.65 else ("medium" if conf >= 0.58 else "weak")
+        else:
+            strength = "strong" if max(bullish_votes, bearish_votes) == 3 else "medium"
+
+        rs = f"EURUSD ML: votes L={bullish_votes} S={bearish_votes}, pred={'UP' if pred==1 else 'DOWN'}"
+        if proba_up is not None:
+            rs += f", p_up={proba_up:.2f}"
+
+        return {
+            'trade_decision': 'YES',
+            'action': 'entry',
+            'side': side,
+            'signal_strength': strength,
+            'tp_pct': float(TAKE_PROFIT_PERCENT),
+            'sl_pct': float(STOP_LOSS_PERCENT),
+            'reasoning_short': rs[:250],
+            "skip_filters": True,
+        }
+
+    def _gold_pattern_detector(self):
+        cached = self.context.get("gold_pattern_detector") if isinstance(getattr(self, "context", None), dict) else None
+        if cached is not None:
+            return cached
+        path = os.path.join(GOLD_SYSTEM_DIR, "pattern_detector.py")
+        if not os.path.exists(path):
+            if isinstance(self.context, dict):
+                self.context["gold_pattern_detector"] = None
+            return None
+        try:
+            spec = importlib.util.spec_from_file_location("gold_pattern_detector_mod", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if isinstance(self.context, dict):
+                self.context["gold_pattern_detector"] = mod
+            return mod
+        except Exception:
+            if isinstance(self.context, dict):
+                self.context["gold_pattern_detector"] = None
+            return None
+
+    def _gold_patterns_decision(self, symbol: str) -> dict:
+        if str(symbol) not in ("GLD", "XAUUSD=X"):
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Gold: только для GLD или XAUUSD=X', "skip_filters": True}
+
+        mod = self._gold_pattern_detector()
+        if mod is None or not hasattr(mod, "PatternDetector"):
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Gold: pattern_detector недоступен', "skip_filters": True}
+
+        cache = self.context.get("gold_patterns_cache") if isinstance(getattr(self, "context", None), dict) else None
+        now = time.time()
+        if isinstance(cache, dict):
+            ts = float(cache.get("ts") or 0.0)
+            if (now - ts) < float(os.getenv("GOLD_CACHE_SECONDS", "300") or 300):
+                cached = cache.get("data")
+                if isinstance(cached, dict) and cached.get("symbol") == str(symbol):
+                    return cached.get("decision") or {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Gold: cache_invalid', "skip_filters": True}
+
+        df_1h = _fetch_ohlc(symbol, "1h", "120d")
+        df_1d = _fetch_ohlc(symbol, "1d", "3y")
+        if df_1h is None or df_1h.empty or df_1d is None or df_1d.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Gold: нет данных', "skip_filters": True}
+
+        df_1h = _to_utc_index(df_1h)
+        df_1d = _to_utc_index(df_1d)
+
+        try:
+            df_4h = df_1h.resample("4H").agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        except Exception:
+            df_4h = None
+
+        Detector = getattr(mod, "PatternDetector")
+        p1h = Detector(df_1h, "1h").detect_all_patterns()
+        p4h = Detector(df_4h, "4h").detect_all_patterns() if df_4h is not None and not df_4h.empty else []
+        p1d = Detector(df_1d, "1d").detect_all_patterns()
+
+        def _last_dir(patterns, since_ts: pd.Timestamp):
+            best = None
+            for p in (patterns or []):
+                try:
+                    ts = pd.Timestamp(getattr(p, "timestamp", None))
+                    if ts.tzinfo is not None:
+                        ts = ts.tz_convert("UTC").tz_localize(None)
+                    if ts < since_ts:
+                        continue
+                    d = str(getattr(p, "direction", "") or "")
+                    if d not in ("bullish", "bearish"):
+                        continue
+                    conf = float(getattr(p, "confidence", 0.0) or 0.0)
+                    if best is None or conf > best["conf"]:
+                        best = {"ts": ts, "dir": d, "conf": conf, "type": str(getattr(p, "pattern_type", "") or "")}
+                except Exception:
+                    continue
+            return best
+
+        now_ts = pd.Timestamp(df_1h.index[-1])
+        if now_ts.tzinfo is not None:
+            now_ts = now_ts.tz_convert("UTC").tz_localize(None)
+
+        last1h = _last_dir(p1h, now_ts - pd.Timedelta(days=3))
+        last4h = _last_dir(p4h, now_ts - pd.Timedelta(days=10))
+        last1d = _last_dir(p1d, now_ts - pd.Timedelta(days=30))
+
+        votes = {"bullish": 0, "bearish": 0}
+        parts = []
+        for tag, d in [("1h", last1h), ("4h", last4h), ("1d", last1d)]:
+            if d is None:
+                continue
+            votes[d["dir"]] += 1
+            parts.append(f"{tag}:{d['type']}:{d['dir']}:{d['conf']:.2f}")
+
+        mtf_min = int(self.strategy.get("gold_pattern_mtf_min_votes", GOLD_PATTERN_MTF_MIN_VOTES_DEFAULT) or GOLD_PATTERN_MTF_MIN_VOTES_DEFAULT)
+        mtf_min = max(1, min(3, mtf_min))
+        min_conf = float(self.strategy.get("gold_pattern_min_conf", GOLD_PATTERN_MIN_CONF_DEFAULT) or GOLD_PATTERN_MIN_CONF_DEFAULT)
+        min_conf = max(0.0, min(1.0, min_conf))
+
+        side = None
+        if votes["bullish"] >= mtf_min:
+            side = "long"
+        elif votes["bearish"] >= mtf_min:
+            side = "short"
+
+        top_conf = max([d["conf"] for d in [last1h, last4h, last1d] if isinstance(d, dict)] + [0.0])
+        if side is None:
+            out = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"Gold: нет MTF комбо (bull={votes['bullish']} bear={votes['bearish']})", "skip_filters": True}
+        elif top_conf < min_conf:
+            out = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"Gold: низкая уверенность ({top_conf:.2f}<{min_conf:.2f})", "skip_filters": True}
+        else:
+            days_min = int(self.strategy.get("gold_min_days_between_trades", GOLD_MIN_DAYS_BETWEEN_TRADES_DEFAULT) or GOLD_MIN_DAYS_BETWEEN_TRADES_DEFAULT)
+            days_min = max(0, int(days_min))
+            last_key = f"gold_last_entry_day:{symbol}"
+            last_day = self.context.get(last_key) if isinstance(getattr(self, "context", None), dict) else None
+            if last_day:
+                try:
+                    last_day_dt = pd.to_datetime(str(last_day), errors="coerce")
+                except Exception:
+                    last_day_dt = None
+                if last_day_dt is not None and pd.notna(last_day_dt):
+                    if (now_ts.normalize() - pd.Timestamp(last_day_dt).normalize()).days < days_min:
+                        out = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"Gold: дедупликация {days_min}d", "skip_filters": True}
+                    else:
+                        out = None
+                else:
+                    out = None
+            else:
+                out = None
+
+            if out is None:
+                if isinstance(self.context, dict):
+                    self.context[last_key] = str(now_ts.normalize().date())
+                strength = "strong" if top_conf >= 0.75 else "medium"
+                out = {
+                    'trade_decision': 'YES',
+                    'action': 'entry',
+                    'side': side,
+                    'signal_strength': strength,
+                    'use_atr_risk': True,
+                    'atr_sl_mult': 2.0,
+                    'atr_tp_mult': 3.0,
+                    'reasoning_short': ("Gold MTF: " + "; ".join(parts))[:250],
+                    "skip_filters": True,
+                }
+
+        if isinstance(self.context, dict):
+            self.context["gold_patterns_cache"] = {"ts": now, "data": {"symbol": str(symbol), "decision": out}}
+        return out
 
     def _atr_pct(self, df) -> float | None:
         try:
@@ -4158,11 +5020,95 @@ class TradingBot:
                             pass
 
                 mode_now = str(getattr(self, "strategy_mode", "classic") or "classic").lower()
-                if mode_now == "ny_smc":
+                forced = None
+                try:
+                    vf = self.context.get("vision_force") if isinstance(self.context, dict) else None
+                    if isinstance(vf, dict):
+                        forced = vf.get(symbol)
+                except Exception:
+                    forced = None
+
+                if isinstance(forced, dict):
+                    try:
+                        exp = float(forced.get("expires_ts") or 0.0)
+                    except Exception:
+                        exp = 0.0
+                    if exp > 0 and time.time() > exp:
+                        try:
+                            self.context.get("vision_force", {}).pop(symbol, None)
+                        except Exception:
+                            pass
+                        forced = None
+
+                if isinstance(forced, dict):
+                    decision = dict(forced)
+                    decision["strategy_mode"] = "vision"
+                    decision["decision_source"] = "vision_force"
+                elif mode_now == "vision":
+                    vs = None
+                    try:
+                        vmap = self.context.get("vision_signals") if isinstance(self.context, dict) else None
+                        if isinstance(vmap, dict):
+                            vs = vmap.get(symbol)
+                    except Exception:
+                        vs = None
+
+                    ok = False
+                    if isinstance(vs, dict):
+                        try:
+                            exp = float(vs.get("expires_ts") or 0.0)
+                        except Exception:
+                            exp = 0.0
+                        if exp > 0 and time.time() > exp:
+                            try:
+                                self.context.get("vision_signals", {}).pop(symbol, None)
+                            except Exception:
+                                pass
+                            vs = None
+
+                    enabled = bool(self.strategy.get("vision_trade_enabled", VISION_TRADE_ENABLED_DEFAULT))
+                    try:
+                        thr = float(self.strategy.get("vision_trade_min_conf", VISION_TRADE_MIN_CONF_DEFAULT))
+                    except Exception:
+                        thr = float(VISION_TRADE_MIN_CONF_DEFAULT)
+
+                    if enabled and isinstance(vs, dict):
+                        try:
+                            conf = float(vs.get("confidence") or 0.0)
+                        except Exception:
+                            conf = 0.0
+                        ok = np.isfinite(conf) and (float(conf) >= float(thr))
+
+                    if not (enabled and ok and isinstance(vs, dict)):
+                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Vision: нет актуального сигнала'}
+                    else:
+                        decision = {
+                            'trade_decision': 'YES',
+                            'action': 'entry',
+                            'side': str(vs.get('side') or 'long').lower(),
+                            'signal_strength': str(vs.get('signal_strength') or 'medium').lower(),
+                            'tp_pct': float(vs.get('tp_pct') or TAKE_PROFIT_PERCENT),
+                            'sl_pct': float(vs.get('sl_pct') or STOP_LOSS_PERCENT),
+                            'reasoning_short': str(vs.get('reasoning_short') or 'Vision signal')[:200],
+                            'confidence': float(vs.get('confidence') or 0.0),
+                        }
+                    decision["strategy_mode"] = "vision"
+                    decision["decision_source"] = "vision"
+                elif mode_now == "ny_smc":
                     rb = self._pine_smc_decision(symbol, df, ml_pred=ml_pred) or {}
                     decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'pine_invalid'}
                     decision["strategy_mode"] = "ny_smc"
                     decision["decision_source"] = "pine"
+                elif mode_now == "eurusd_ml":
+                    rb = self._eurusd_ml_decision(symbol) or {}
+                    decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'eurusd_ml_invalid', "skip_filters": True}
+                    decision["strategy_mode"] = "eurusd_ml"
+                    decision["decision_source"] = "eurusd_ml"
+                elif mode_now == "gold_patterns":
+                    rb = self._gold_patterns_decision(symbol) or {}
+                    decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'gold_patterns_invalid', "skip_filters": True}
+                    decision["strategy_mode"] = "gold_patterns"
+                    decision["decision_source"] = "gold_patterns"
                 elif mode_now == "combo":
                     pine = self._pine_smc_decision(symbol, df, ml_pred=ml_pred) or {}
                     pine_ok = isinstance(pine, dict)
@@ -4205,6 +5151,8 @@ class TradingBot:
                     atr = None
                 decision = self._decorate_decision_with_risk(symbol, float(current_price), ml_pred, decision, atr=atr)
 
+                skip_filters = bool(decision.get("skip_filters"))
+
                 side = str(decision.get('side') or 'long').lower()
                 quality_mode = str(self.strategy.get('quality_mode') or 'balanced').lower()
                 min_score = int(self.strategy.get('min_setup_score', MIN_SETUP_SCORE_DEFAULT) or 0)
@@ -4229,7 +5177,7 @@ class TradingBot:
                 if atr_pct is not None and max_atr > 0:
                     atr_ok = (atr_pct >= min_atr) and (atr_pct <= max_atr)
 
-                if str(decision.get('trade_decision') or '').upper() == 'YES':
+                if (not skip_filters) and str(decision.get('trade_decision') or '').upper() == 'YES':
                     if not ex_ok:
                         decision['trade_decision'] = 'NO'
                         decision['action'] = 'hold'
@@ -4256,7 +5204,7 @@ class TradingBot:
                         decision['reasoning_short'] = 'Quality: weak strength'
                         self._record_block(symbol, 'quality_strength')
 
-                if bool(self.strategy.get("block_weak_signals", False)) and str(decision.get("signal_strength") or "").lower() == "weak":
+                if (not skip_filters) and bool(self.strategy.get("block_weak_signals", False)) and str(decision.get("signal_strength") or "").lower() == "weak":
                     logger.info(f"⛔ {symbol}: Weak signal blocked")
                     self._record_block(symbol, "weak")
                     return
@@ -4268,59 +5216,62 @@ class TradingBot:
 
                 side = str(decision.get('side') or 'long').lower()
 
-                use_wave = bool(self.strategy.get('use_wave_filter', USE_WAVE_FILTER_DEFAULT))
-                wave_thr = float(self.strategy.get('wave_trend_block_pct', WAVE_TREND_BLOCK_PCT) or WAVE_TREND_BLOCK_PCT)
-                if use_wave and abs(wave_trend) >= wave_thr:
-                    if (wave_trend > 0 and side == 'short') or (wave_trend < 0 and side == 'long'):
-                        decision['trade_decision'] = 'NO'
-                        decision['action'] = 'hold'
-                        decision['reasoning_short'] = f"Wave trend conflict ({wave_trend:.2f}%)"
-                        logger.info(f"⛔ {symbol}: Wave trend conflicts with side ({wave_trend:.2f}% vs {side})")
+                if not skip_filters:
+                    use_wave = bool(self.strategy.get('use_wave_filter', USE_WAVE_FILTER_DEFAULT))
+                    wave_thr = float(self.strategy.get('wave_trend_block_pct', WAVE_TREND_BLOCK_PCT) or WAVE_TREND_BLOCK_PCT)
+                    if use_wave and abs(wave_trend) >= wave_thr:
+                        if (wave_trend > 0 and side == 'short') or (wave_trend < 0 and side == 'long'):
+                            decision['trade_decision'] = 'NO'
+                            decision['action'] = 'hold'
+                            decision['reasoning_short'] = f"Wave trend conflict ({wave_trend:.2f}%)"
+                            logger.info(f"⛔ {symbol}: Wave trend conflicts with side ({wave_trend:.2f}% vs {side})")
 
                 macro = ctx.get('macro') if isinstance(ctx, dict) else None
-                use_dxy = bool(self.strategy.get('use_dxy_filter', USE_DXY_FILTER_DEFAULT))
-                dxy_thr = float(self.strategy.get('dxy_trend_block_pct', DXY_TREND_BLOCK_PCT) or DXY_TREND_BLOCK_PCT)
-                if use_dxy and isinstance(macro, dict) and abs(float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)) >= dxy_thr:
-                    dxy_tr = float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)
-                    sym = str(symbol)
-                    if sym.endswith('=X') and len(sym) >= 6 and sym[3:6] == 'USD':
-                        if (dxy_tr > 0 and side == 'long') or (dxy_tr < 0 and side == 'short'):
-                            decision['trade_decision'] = 'NO'
-                            decision['action'] = 'hold'
-                            decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
-                            logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
-                    elif sym.endswith('=X') and len(sym) >= 6 and sym[0:3] == 'USD':
-                        if (dxy_tr > 0 and side == 'short') or (dxy_tr < 0 and side == 'long'):
-                            decision['trade_decision'] = 'NO'
-                            decision['action'] = 'hold'
-                            decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
-                            logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
+                if not skip_filters:
+                    use_dxy = bool(self.strategy.get('use_dxy_filter', USE_DXY_FILTER_DEFAULT))
+                    dxy_thr = float(self.strategy.get('dxy_trend_block_pct', DXY_TREND_BLOCK_PCT) or DXY_TREND_BLOCK_PCT)
+                    if use_dxy and isinstance(macro, dict) and abs(float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)) >= dxy_thr:
+                        dxy_tr = float(macro.get('DX-Y.NYB', {}).get('wave_trend_pct', 0.0) or 0.0)
+                        sym = str(symbol)
+                        if sym.endswith('=X') and len(sym) >= 6 and sym[3:6] == 'USD':
+                            if (dxy_tr > 0 and side == 'long') or (dxy_tr < 0 and side == 'short'):
+                                decision['trade_decision'] = 'NO'
+                                decision['action'] = 'hold'
+                                decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
+                                logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
+                        elif sym.endswith('=X') and len(sym) >= 6 and sym[0:3] == 'USD':
+                            if (dxy_tr > 0 and side == 'short') or (dxy_tr < 0 and side == 'long'):
+                                decision['trade_decision'] = 'NO'
+                                decision['action'] = 'hold'
+                                decision['reasoning_short'] = f"DXY trend conflict ({dxy_tr:.2f}%)"
+                                logger.info(f"⛔ {symbol}: DXY trend conflicts with side ({dxy_tr:.2f}% vs {side})")
 
-                use_macro_score = bool(self.strategy.get('use_macro_score', USE_MACRO_SCORE_DEFAULT))
-                if use_macro_score and isinstance(macro, dict):
-                    align, usd_strength = _macro_align_for_fx(symbol, side, macro)
-                    decision['macro_align'] = float(align)
-                    decision['usd_strength_24h'] = float(usd_strength)
+                if not skip_filters:
+                    use_macro_score = bool(self.strategy.get('use_macro_score', USE_MACRO_SCORE_DEFAULT))
+                    if use_macro_score and isinstance(macro, dict):
+                        align, usd_strength = _macro_align_for_fx(symbol, side, macro)
+                        decision['macro_align'] = float(align)
+                        decision['usd_strength_24h'] = float(usd_strength)
 
-                    if decision.get('trade_decision') == 'YES' and float(align) < -0.20:
-                        try:
-                            reduce_pct = float(self.strategy.get('macro_alloc_reduce_pct', MACRO_ALLOC_REDUCE_PCT_DEFAULT) or MACRO_ALLOC_REDUCE_PCT_DEFAULT)
-                        except Exception:
-                            reduce_pct = float(MACRO_ALLOC_REDUCE_PCT_DEFAULT)
+                        if decision.get('trade_decision') == 'YES' and float(align) < -0.20:
+                            try:
+                                reduce_pct = float(self.strategy.get('macro_alloc_reduce_pct', MACRO_ALLOC_REDUCE_PCT_DEFAULT) or MACRO_ALLOC_REDUCE_PCT_DEFAULT)
+                            except Exception:
+                                reduce_pct = float(MACRO_ALLOC_REDUCE_PCT_DEFAULT)
 
-                        try:
-                            base_alloc = float(decision.get('trade_alloc_pct') or self.strategy.get('max_trade_alloc_pct', MAX_POSITION_SIZE) or MAX_POSITION_SIZE)
-                        except Exception:
-                            base_alloc = float(MAX_POSITION_SIZE)
+                            try:
+                                base_alloc = float(decision.get('trade_alloc_pct') or self.strategy.get('max_trade_alloc_pct', MAX_POSITION_SIZE) or MAX_POSITION_SIZE)
+                            except Exception:
+                                base_alloc = float(MAX_POSITION_SIZE)
 
-                        reduce_pct = max(0.0, min(90.0, float(reduce_pct)))
-                        new_alloc = float(base_alloc) * (1.0 - (reduce_pct / 100.0))
-                        new_alloc = max(1.0, min(float(base_alloc), float(new_alloc)))
-                        decision['trade_alloc_pct'] = float(new_alloc)
+                            reduce_pct = max(0.0, min(90.0, float(reduce_pct)))
+                            new_alloc = float(base_alloc) * (1.0 - (reduce_pct / 100.0))
+                            new_alloc = max(1.0, min(float(base_alloc), float(new_alloc)))
+                            decision['trade_alloc_pct'] = float(new_alloc)
 
-                        rs = str(decision.get('reasoning_short') or '').strip()
-                        suffix = f"Macro alloc -{reduce_pct:.0f}%"
-                        decision['reasoning_short'] = (f"{rs}; {suffix}" if rs else suffix)[:250]
+                            rs = str(decision.get('reasoning_short') or '').strip()
+                            suffix = f"Macro alloc -{reduce_pct:.0f}%"
+                            decision['reasoning_short'] = (f"{rs}; {suffix}" if rs else suffix)[:250]
 
                 try:
                     self._append_last_decision({
