@@ -2649,6 +2649,29 @@ class PaperTradingEngine:
         allowed, reason = self.can_open_new_trade()
         if not allowed:
             logger.info(f"⛔ {symbol}: Entry blocked ({reason}). TradesToday={self.daily_trades}/{self.max_trades_per_day}, DayPnL={self._daily_profit_pct():+.2f}%")
+            try:
+                if os.path.exists(PORTFOLIO_PATH):
+                    with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+                        state = json.load(f) or {}
+                else:
+                    state = {}
+                meta = state.get("meta") if isinstance(state, dict) else None
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["entry_block"] = {
+                    "ts": str(datetime.now()),
+                    "symbol": str(symbol),
+                    "reason": str(reason),
+                    "daily_trades": int(self.daily_trades),
+                    "max_trades_per_day": int(self.max_trades_per_day),
+                    "day_pnl_pct": float(self._daily_profit_pct()),
+                }
+                state["meta"] = meta
+                state["last_update"] = str(datetime.now())
+                with open(PORTFOLIO_PATH, "w", encoding="utf-8") as f:
+                    json.dump(state, f, indent=4)
+            except Exception:
+                pass
             return None
 
         if decision.get('action') != 'entry':
@@ -4917,6 +4940,33 @@ class TradingBot:
             df = fetch_data(symbol)
             if df is None or len(df) < 50:
                 logger.warning(f"⚠️ {symbol}: Not enough data")
+                try:
+                    self._append_last_decision({
+                        "ts": str(datetime.now()),
+                        "symbol": str(symbol),
+                        "price": None,
+                        "trade_decision": "NO",
+                        "side": "",
+                        "signal_strength": "",
+                        "reasoning_short": "No data / yfinance ограничение / недостаточно свечей",
+                        "setup_score": 0,
+                        "min_setup_score": int(self.strategy.get('min_setup_score', MIN_SETUP_SCORE_DEFAULT) or 0),
+                        "quality_mode": str(self.strategy.get('quality_mode') or 'balanced'),
+                        "atr_pct": None,
+                        "min_atr_pct": float(self.strategy.get('min_atr_pct', MIN_ATR_PCT_DEFAULT) or 0.0),
+                        "max_atr_pct": float(self.strategy.get('max_atr_pct', MAX_ATR_PCT_DEFAULT) or 0.0),
+                        "hour_utc": None,
+                        "excluded_hour_ok": None,
+                        "session_ok": None,
+                        "macro_align": None,
+                        "usd_strength_24h": None,
+                    })
+                except Exception:
+                    pass
+                try:
+                    self._record_block(symbol, "no_data")
+                except Exception:
+                    pass
                 return
 
             current_price = df['close'].iloc[-1]

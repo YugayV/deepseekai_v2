@@ -625,7 +625,7 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     if st.button("⚡ More trades preset", width='stretch'):
         _post_bot_command({
             "command": "set_filters",
-            "strategy_mode": str(strategy_mode),
+            "strategy_mode": "classic",
             "use_ml": False,
             "block_weak_signals": False,
             "cooldown_bars": 0,
@@ -664,9 +664,9 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "use_polymarket": bool(use_polymarket),
             "use_macro_score": bool(use_macro_score),
             "macro_alloc_reduce_pct": float(macro_alloc_reduce_pct),
-            "pine_ny_session_only": bool(pine_ny_session_only),
-            "pine_ny_first_2h_only": bool(pine_ny_first_2h_only),
-            "pine_require_london_sweep": bool(pine_require_london_sweep),
+            "pine_ny_session_only": False,
+            "pine_ny_first_2h_only": False,
+            "pine_require_london_sweep": False,
             "pine_s1_enabled": bool(pine_s1_enabled),
             "pine_s2_enabled": bool(pine_s2_enabled),
             "pine_pivot_len": int(pine_pivot_len),
@@ -1323,6 +1323,14 @@ with st.expander("🧾 Почему нет сделок?", expanded=False):
                 st.info("Пока нет строк решений.")
         else:
             st.info("Пока нет решений. Нажми Start All (или подожди один demo-цикл), чтобы появились логи решений.")
+
+        entry_block = meta.get("entry_block") if isinstance(meta.get("entry_block"), dict) else None
+        if entry_block:
+            st.warning(
+                f"Последняя блокировка входа: {entry_block.get('reason')} | "
+                f"{entry_block.get('symbol')} | trades={entry_block.get('daily_trades')}/{entry_block.get('max_trades_per_day')} | "
+                f"day_pnl={entry_block.get('day_pnl_pct')}"
+            )
     else:
         st.info("Portfolio data not found. Start the bot and press Start All to generate state.")
 
