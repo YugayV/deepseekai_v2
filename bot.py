@@ -5164,6 +5164,15 @@ class TradingBot:
                     pine_ok = isinstance(pine, dict)
                     pine_dec = str((pine or {}).get("trade_decision") or "NO").upper() == "YES"
                     pine_side = str((pine or {}).get("side") or "").lower()
+                    pine_reason = str((pine or {}).get("reasoning_short") or "").strip()
+                    pine_reason_l = pine_reason.lower()
+                    pine_is_time_gate = (
+                        ("вне ny" in pine_reason_l)
+                        or ("не первые 2 часа ny" in pine_reason_l)
+                        or ("вне окна" in pine_reason_l)
+                        or ("вне лонд" in pine_reason_l)
+                        or ("ждём свип" in pine_reason_l)
+                    )
 
                     classic = self._rule_based_decision(symbol, df, ml_pred) or {}
                     classic_ok = isinstance(classic, dict)
@@ -5171,7 +5180,11 @@ class TradingBot:
                     classic_side = str((classic or {}).get("side") or "").lower()
 
                     if (not pine_ok) or (not classic_ok):
-                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'combo_invalid'}
+                        if classic_ok and classic_dec:
+                            decision = dict(classic)
+                            decision["reasoning_short"] = f"Classic fallback | Pine invalid: {pine_reason or 'invalid'}"[:250]
+                        else:
+                            decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'combo_invalid'}
                     elif pine_dec and (not pine_side):
                         decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'combo_pine_no_side'}
                     elif pine_dec and classic_dec and pine_side and classic_side and (pine_side != classic_side):
@@ -5183,7 +5196,11 @@ class TradingBot:
                         decision["sl_pct"] = (classic or {}).get("sl_pct", decision.get("sl_pct"))
                         decision["reasoning_short"] = f"Pine gate: {(pine or {}).get('reasoning_short') or 'signal'} | Classic: {(classic or {}).get('reasoning_short') or 'ok'}"
                     else:
-                        decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"Pine gate: {(pine or {}).get('reasoning_short') or 'no'}"}
+                        if classic_dec and pine_is_time_gate:
+                            decision = dict(classic)
+                            decision["reasoning_short"] = f"Classic fallback | Pine gate: {pine_reason or 'no'}"[:250]
+                        else:
+                            decision = {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': f"Pine gate: {pine_reason or 'no'}"}
 
                     decision["strategy_mode"] = "combo"
                     decision["decision_source"] = "combo"
