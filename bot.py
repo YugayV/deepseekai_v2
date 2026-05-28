@@ -258,6 +258,12 @@ VISION_TRADE_MIN_CONF_DEFAULT = float(os.getenv("VISION_TRADE_MIN_CONF_DEFAULT",
 VISION_TRADE_TTL_MINUTES_DEFAULT = int(os.getenv("VISION_TRADE_TTL_MINUTES_DEFAULT", 180))
 VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT = (os.getenv("VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
 
+MODERN_SCORE_THRESHOLD_DEFAULT = int(os.getenv("MODERN_SCORE_THRESHOLD_DEFAULT", 3))
+MODERN_ALLOW_TREND_DEFAULT = (os.getenv("MODERN_ALLOW_TREND_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+MODERN_ALLOW_MEANREV_DEFAULT = (os.getenv("MODERN_ALLOW_MEANREV_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+MODERN_ALLOW_BREAKOUT_DEFAULT = (os.getenv("MODERN_ALLOW_BREAKOUT_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+MODERN_TREND_STRENGTH_THR_DEFAULT = float(os.getenv("MODERN_TREND_STRENGTH_THR_DEFAULT", 0.25))
+
 DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 ENABLE_TRADE_REVIEW = (os.getenv("ENABLE_TRADE_REVIEW", "true").strip().lower() in ("1", "true", "yes"))
 REVIEW_MAX_TOKENS = int(os.getenv("REVIEW_MAX_TOKENS", 96))
@@ -1754,6 +1760,53 @@ Return JSON:
 _YF_DATA_CACHE = {}
 _YF_OHLC_CACHE = {}
 
+def _yf_cache_path(symbol: str, interval: str, period: str | None = None) -> str:
+    import re as _re
+    sym = _re.sub(r"[^A-Za-z0-9]+", "_", str(symbol or "sym")).strip("_")
+    itv = _re.sub(r"[^A-Za-z0-9]+", "_", str(interval or "itv")).strip("_")
+    per = _re.sub(r"[^A-Za-z0-9]+", "_", str(period or "")).strip("_")
+    tail = f"{sym}__{itv}" + (f"__{per}" if per else "")
+    return os.path.join(DATA_DIR, f"yf_cache__{tail}.csv")
+
+def _yf_try_load_disk(symbol: str, interval: str, period: str | None = None):
+    path = _yf_cache_path(symbol, interval, period=period)
+    if not os.path.exists(path):
+        return None
+    try:
+        age = time.time() - float(os.path.getmtime(path) or 0.0)
+    except Exception:
+        age = float("inf")
+    if age > float(YF_CACHE_TTL_SECONDS):
+        return None
+    try:
+        df = pd.read_csv(path, index_col=0, parse_dates=True)
+        if df is None or df.empty:
+            return None
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            pass
+        return df
+    except Exception:
+        return None
+
+def _yf_try_save_disk(symbol: str, interval: str, df, period: str | None = None):
+    if df is None or df.empty:
+        return
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+    path = _yf_cache_path(symbol, interval, period=period)
+    try:
+        out = df.copy()
+    except Exception:
+        out = df
+    try:
+        out.to_csv(path)
+    except Exception:
+        return
+
 
 def fetch_data(symbol):
     now = time.time()
@@ -1834,6 +1887,7 @@ def fetch_data(symbol):
         df = df.dropna(subset=["close"]).copy()
 
         out = calculate_indicators(df)
+        _yf_try_save_disk(symbol, "auto", out, period="auto")
         _YF_DATA_CACHE[symbol] = {"ts": now, "df": out}
         return out
     except Exception as e:
@@ -1841,12 +1895,22 @@ def fetch_data(symbol):
             if cached is not None and (now - float(cached.get("ts") or 0.0)) < float(YF_CACHE_TTL_SECONDS):
                 logger.warning(f"⚠️ {symbol}: yfinance rate limited, using cached data")
                 return cached.get("df")
+            disk = _yf_try_load_disk(symbol, "auto", period="auto")
+            if disk is not None:
+                logger.warning(f"⚠️ {symbol}: yfinance rate limited, using disk cache")
+                _YF_DATA_CACHE[symbol] = {"ts": now, "df": disk}
+                return disk
             logger.warning(f"⚠️ {symbol}: yfinance rate limited")
             return None
 
         if cached is not None and (now - float(cached.get("ts") or 0.0)) < float(YF_CACHE_TTL_SECONDS):
             logger.warning(f"⚠️ {symbol}: yfinance error, using cached data: {e}")
             return cached.get("df")
+        disk = _yf_try_load_disk(symbol, "auto", period="auto")
+        if disk is not None:
+            logger.warning(f"⚠️ {symbol}: yfinance error, using disk cache: {e}")
+            _YF_DATA_CACHE[symbol] = {"ts": now, "df": disk}
+            return disk
         raise
 
 
@@ -1863,6 +1927,10 @@ def _fetch_ohlc(symbol: str, interval: str, period: str):
         t = yf.Ticker(symbol)
         raw = t.history(period=period, interval=interval)
         if raw is None or raw.empty:
+            disk = _yf_try_load_disk(symbol, interval, period=period)
+            if disk is not None:
+                _YF_OHLC_CACHE[key] = {"ts": now, "df": disk}
+                return disk
             return None
         df = raw
         if isinstance(df.columns, pd.MultiIndex):
@@ -1902,9 +1970,14 @@ def _fetch_ohlc(symbol: str, interval: str, period: str):
         df = df.dropna(subset=["open", "high", "low", "close"]).copy()
         if df.empty:
             return None
+        _yf_try_save_disk(symbol, interval, df, period=period)
         _YF_OHLC_CACHE[key] = {"ts": now, "df": df}
         return df
     except Exception:
+        disk = _yf_try_load_disk(symbol, interval, period=period)
+        if disk is not None:
+            _YF_OHLC_CACHE[key] = {"ts": now, "df": disk}
+            return disk
         return None
 
 
@@ -3127,6 +3200,11 @@ class TradingBot:
             "vision_trade_enabled": bool(VISION_TRADE_ENABLED_DEFAULT),
             "vision_trade_min_conf": float(VISION_TRADE_MIN_CONF_DEFAULT),
             "vision_trade_ttl_minutes": int(VISION_TRADE_TTL_MINUTES_DEFAULT),
+            "modern_score_threshold": int(MODERN_SCORE_THRESHOLD_DEFAULT),
+            "modern_allow_trend": bool(MODERN_ALLOW_TREND_DEFAULT),
+            "modern_allow_meanrev": bool(MODERN_ALLOW_MEANREV_DEFAULT),
+            "modern_allow_breakout": bool(MODERN_ALLOW_BREAKOUT_DEFAULT),
+            "modern_trend_strength_thr": float(MODERN_TREND_STRENGTH_THR_DEFAULT),
         }
         self.context = {"vision_force": {}, "vision_signals": {}}
         self.last_action_ts = {}
@@ -3745,12 +3823,19 @@ class TradingBot:
             self.strategy["vision_trade_enabled"] = _as_bool(cmd_data.get("vision_trade_enabled"), self.strategy.get("vision_trade_enabled", VISION_TRADE_ENABLED_DEFAULT))
             self.strategy["vision_trade_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("vision_trade_min_conf"), self.strategy.get("vision_trade_min_conf", VISION_TRADE_MIN_CONF_DEFAULT))))
             self.strategy["vision_trade_ttl_minutes"] = max(1, _as_int(cmd_data.get("vision_trade_ttl_minutes"), self.strategy.get("vision_trade_ttl_minutes", VISION_TRADE_TTL_MINUTES_DEFAULT)))
+            self.strategy["modern_score_threshold"] = max(1, min(6, _as_int(cmd_data.get("modern_score_threshold"), self.strategy.get("modern_score_threshold", MODERN_SCORE_THRESHOLD_DEFAULT))))
+            self.strategy["modern_allow_trend"] = _as_bool(cmd_data.get("modern_allow_trend"), self.strategy.get("modern_allow_trend", MODERN_ALLOW_TREND_DEFAULT))
+            self.strategy["modern_allow_meanrev"] = _as_bool(cmd_data.get("modern_allow_meanrev"), self.strategy.get("modern_allow_meanrev", MODERN_ALLOW_MEANREV_DEFAULT))
+            self.strategy["modern_allow_breakout"] = _as_bool(cmd_data.get("modern_allow_breakout"), self.strategy.get("modern_allow_breakout", MODERN_ALLOW_BREAKOUT_DEFAULT))
+            self.strategy["modern_trend_strength_thr"] = max(0.05, min(5.0, _as_float(cmd_data.get("modern_trend_strength_thr"), self.strategy.get("modern_trend_strength_thr", MODERN_TREND_STRENGTH_THR_DEFAULT))))
 
             mode = (cmd_data.get("strategy_mode") or self.strategy_mode or "classic").strip().lower()
             if mode in ("pine", "ny_smc"):
                 self.strategy_mode = "ny_smc"
             elif mode in ("combo", "hybrid", "ny_combo"):
                 self.strategy_mode = "combo"
+            elif mode in ("modern", "multi", "multi_strategy"):
+                self.strategy_mode = "modern"
             elif mode in ("eurusd_ml", "eurusd", "eur_ml"):
                 self.strategy_mode = "eurusd_ml"
             elif mode in ("gold_patterns", "gold", "gld"):
@@ -3936,6 +4021,129 @@ class TradingBot:
             'tp_pct': float(TAKE_PROFIT_PERCENT),
             'sl_pct': float(STOP_LOSS_PERCENT),
             'reasoning_short': 'Fallback: no clean alignment',
+        }
+
+    def _modern_decision(self, symbol: str, df, ml_pred: dict | None = None) -> dict:
+        if df is None or df.empty:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Modern: нет данных'}
+
+        latest = df.iloc[-1]
+        try:
+            close = float(latest.get('close', 0.0) or 0.0)
+        except Exception:
+            close = 0.0
+
+        def _f(key: str, default: float = 0.0) -> float:
+            try:
+                v = float(latest.get(key, default) or default)
+                return float(v) if np.isfinite(v) else float(default)
+            except Exception:
+                return float(default)
+
+        ema8 = _f('ema_8', 0.0)
+        ema21 = _f('ema_21', 0.0)
+        macd_h = _f('macd_hist', 0.0)
+        rsi = _f('rsi', 50.0)
+        atr = _f('atr', 0.0)
+        bb_u = _f('bb_upper', 0.0)
+        bb_l = _f('bb_lower', 0.0)
+        orp = _f('or_range_pct', 0.0)
+
+        try:
+            bup = int(latest.get('breakout_up', 0) or 0)
+        except Exception:
+            bup = 0
+        try:
+            bdn = int(latest.get('breakout_down', 0) or 0)
+        except Exception:
+            bdn = 0
+
+        if close <= 0:
+            return {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'Modern: close<=0'}
+
+        atr_safe = float(atr) if atr > 0 else float(max(1e-9, abs(close) * 0.0005))
+        trend_strength = abs(float(ema8) - float(ema21)) / float(atr_safe)
+        atr_pct = (float(atr) / float(close) * 100.0) if atr > 0 else 0.0
+
+        try:
+            thr = float(self.strategy.get("modern_trend_strength_thr", MODERN_TREND_STRENGTH_THR_DEFAULT))
+        except Exception:
+            thr = float(MODERN_TREND_STRENGTH_THR_DEFAULT)
+        thr = max(0.05, min(5.0, float(thr)))
+
+        regime = "trend" if (trend_strength >= thr and atr_pct >= 0.03) else "range"
+
+        allow_trend = bool(self.strategy.get("modern_allow_trend", MODERN_ALLOW_TREND_DEFAULT))
+        allow_meanrev = bool(self.strategy.get("modern_allow_meanrev", MODERN_ALLOW_MEANREV_DEFAULT))
+        allow_break = bool(self.strategy.get("modern_allow_breakout", MODERN_ALLOW_BREAKOUT_DEFAULT))
+
+        w_trend = 2 if regime == "trend" else 1
+        w_mean = 2 if regime == "range" else 1
+        w_break = 1
+
+        trend_long = (ema8 > ema21) and (macd_h > 0) and (rsi >= 45.0)
+        trend_short = (ema8 < ema21) and (macd_h < 0) and (rsi <= 55.0)
+
+        mean_long = (bb_l > 0) and (close < bb_l) and (rsi <= 35.0)
+        mean_short = (bb_u > 0) and (close > bb_u) and (rsi >= 65.0)
+
+        break_long = (bup == 1)
+        break_short = (bdn == 1)
+
+        long_score = 0
+        short_score = 0
+        parts = []
+
+        if allow_trend and trend_long:
+            long_score += int(w_trend)
+            parts.append(f"trend+{w_trend}")
+        if allow_trend and trend_short:
+            short_score += int(w_trend)
+            parts.append(f"trendS+{w_trend}")
+
+        if allow_meanrev and mean_long:
+            long_score += int(w_mean)
+            parts.append(f"mean+{w_mean}")
+        if allow_meanrev and mean_short:
+            short_score += int(w_mean)
+            parts.append(f"meanS+{w_mean}")
+
+        if allow_break and break_long:
+            long_score += int(w_break)
+            parts.append("break+1")
+        if allow_break and break_short:
+            short_score += int(w_break)
+            parts.append("breakS+1")
+
+        try:
+            score_thr = int(self.strategy.get("modern_score_threshold", MODERN_SCORE_THRESHOLD_DEFAULT))
+        except Exception:
+            score_thr = int(MODERN_SCORE_THRESHOLD_DEFAULT)
+        score_thr = max(1, min(6, int(score_thr)))
+
+        side = None
+        score = max(long_score, short_score)
+        if long_score >= score_thr and long_score > short_score:
+            side = "long"
+        elif short_score >= score_thr and short_score > long_score:
+            side = "short"
+
+        if side is None:
+            return {
+                'trade_decision': 'NO',
+                'action': 'hold',
+                'signal_strength': 'weak',
+                'reasoning_short': f"Modern: нет сигнала (reg={regime}, L={long_score}, S={short_score}, or={orp:.2f}%)"[:250],
+            }
+
+        strength = "strong" if score >= (score_thr + 2) else ("medium" if score >= (score_thr + 1) else "weak")
+        reasoning = f"Modern:{regime} {side} score={score} ({','.join(parts)}) ts={trend_strength:.2f} atr%={atr_pct:.2f}"[:250]
+        return {
+            'trade_decision': 'YES',
+            'action': 'entry',
+            'side': side,
+            'signal_strength': strength,
+            'reasoning_short': reasoning,
         }
 
     def _pine_smc_decision(self, symbol: str, df_1h, ml_pred: dict | None = None) -> dict:
@@ -5144,6 +5352,11 @@ class TradingBot:
                         }
                     decision["strategy_mode"] = "vision"
                     decision["decision_source"] = "vision"
+                elif mode_now == "modern":
+                    rb = self._modern_decision(symbol, df, ml_pred=ml_pred) or {}
+                    decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'modern_invalid'}
+                    decision["strategy_mode"] = "modern"
+                    decision["decision_source"] = "modern"
                 elif mode_now == "ny_smc":
                     rb = self._pine_smc_decision(symbol, df, ml_pred=ml_pred) or {}
                     decision = dict(rb) if isinstance(rb, dict) else {'trade_decision': 'NO', 'action': 'hold', 'signal_strength': 'weak', 'reasoning_short': 'pine_invalid'}

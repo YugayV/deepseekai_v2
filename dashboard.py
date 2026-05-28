@@ -431,7 +431,9 @@ max_trades_per_day = st.sidebar.slider("Max trades per day", 1, 20, 3, 1)
 daily_tp_target_percent = st.sidebar.slider("Daily TP target (%)", 1.0, 50.0, 5.0, 1.0)
 
 st.sidebar.subheader("🧠 Strategy Filters")
-strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)", "EURUSD ML (new)", "Gold Patterns (GLD)", "CVision Trade"], index=2)
+strategy_mode_label = st.sidebar.selectbox("Strategy mode", ["Modern (multi)", "Classic", "NY SMC (Pine)", "COMBO (Pine gate + Classic)", "EURUSD ML (new)", "Gold Patterns (GLD)", "CVision Trade"], index=3)
+if strategy_mode_label == "Modern (multi)":
+    strategy_mode = "modern"
 if strategy_mode_label == "Classic":
     strategy_mode = "classic"
 elif strategy_mode_label == "NY SMC (Pine)":
@@ -508,6 +510,13 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
     vision_trade_enabled = st.checkbox("Enable vision trading", value=False)
     vision_trade_min_conf = st.slider("Vision min confidence", 0.0, 1.0, 0.62, 0.01)
     vision_trade_ttl_minutes = st.slider("Vision signal TTL (min)", 1, 1440, 180, 5)
+
+    st.subheader("🧩 Modern (multi-strategy)")
+    modern_score_threshold = st.slider("Modern score threshold", 1, 6, 3, 1)
+    modern_trend_strength_thr = st.slider("Modern trend strength thr", 0.05, 5.0, 0.25, 0.05)
+    modern_allow_trend = st.checkbox("Modern allow trend", value=True)
+    modern_allow_meanrev = st.checkbox("Modern allow mean reversion", value=True)
+    modern_allow_breakout = st.checkbox("Modern allow breakout", value=True)
 
     st.subheader("🎯 Quality (Fewer trades)")
     quality_label = st.selectbox("Quality mode", ["High (fewer)", "Balanced"], index=0 if is_real else 1)
@@ -684,6 +693,11 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "vision_trade_enabled": bool(vision_trade_enabled),
             "vision_trade_min_conf": float(vision_trade_min_conf),
             "vision_trade_ttl_minutes": int(vision_trade_ttl_minutes),
+            "modern_score_threshold": int(modern_score_threshold),
+            "modern_trend_strength_thr": float(modern_trend_strength_thr),
+            "modern_allow_trend": bool(modern_allow_trend),
+            "modern_allow_meanrev": bool(modern_allow_meanrev),
+            "modern_allow_breakout": bool(modern_allow_breakout),
             "time": str(datetime.now()),
         })
         st.success("More-trades preset applied")
@@ -750,6 +764,11 @@ with st.sidebar.expander("🧠 Strategy & Filters (Advanced)", expanded=False):
             "vision_trade_enabled": bool(vision_trade_enabled),
             "vision_trade_min_conf": float(vision_trade_min_conf),
             "vision_trade_ttl_minutes": int(vision_trade_ttl_minutes),
+            "modern_score_threshold": int(modern_score_threshold),
+            "modern_trend_strength_thr": float(modern_trend_strength_thr),
+            "modern_allow_trend": bool(modern_allow_trend),
+            "modern_allow_meanrev": bool(modern_allow_meanrev),
+            "modern_allow_breakout": bool(modern_allow_breakout),
             "time": str(datetime.now()),
         })
         st.success("Filters applied")
