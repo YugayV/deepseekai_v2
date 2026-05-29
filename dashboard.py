@@ -33,6 +33,7 @@ os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
 import streamlit as st
 import streamlit.components.v1 as components
+import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -203,6 +204,9 @@ if st.button("⚡ Авто-анализ без скриншотов", key="run_a
                 st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
                 st.stop()
 
+            st.session_state["last_final_reco"] = analysis
+            st.session_state["last_symbol"] = assistant_symbol
+
             trend = (analysis.get("overall_trend") or "neutral").lower()
             trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
             st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
@@ -308,6 +312,8 @@ with st.expander("🤖 Бот (управление + быстрый анали�
     except Exception:
         pass
     cmd_path = os.path.join(data_dir, "bot_command.json")
+    portfolio_path = os.path.join(data_dir, "portfolio_state.json")
+    trades_path = os.path.join(data_dir, "trade_history.csv")
 
     def _write_bot_command(payload: dict) -> bool:
         try:
@@ -318,6 +324,44 @@ with st.expander("🤖 Бот (управление + быстрый анали�
             return False
 
     st.write("Управление работает через файл команды: " + cmd_path)
+
+    if st.button("🔄 Обновить статус бота", key="refresh_bot_status", use_container_width=True):
+        st.rerun()
+
+    port = {}
+    if os.path.exists(portfolio_path):
+        try:
+            with open(portfolio_path, "r", encoding="utf-8") as f:
+                port = json.load(f) or {}
+        except Exception:
+            port = {}
+
+    trades_df = None
+    if os.path.exists(trades_path):
+        try:
+            trades_df = pd.read_csv(trades_path)
+        except Exception:
+            trades_df = None
+
+    bal = float(port.get("balance") or 0.0) if isinstance(port, dict) else 0.0
+    eq = float(port.get("equity") or bal) if isinstance(port, dict) else bal
+    positions = port.get("positions") if isinstance(port, dict) else {}
+    pos_count = len(positions) if isinstance(positions, dict) else 0
+    trades_count = int(len(trades_df)) if isinstance(trades_df, pd.DataFrame) else 0
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Баланс", f"{bal:.2f}")
+    s2.metric("Эквити", f"{eq:.2f}")
+    s3.metric("Позиций", str(pos_count))
+    s4.metric("Сделок", str(trades_count))
+
+    if isinstance(positions, dict) and positions:
+        with st.expander("Открытые позиции", expanded=False):
+            st.json(positions)
+
+    if isinstance(trades_df, pd.DataFrame) and (not trades_df.empty):
+        with st.expander("Последние сделки", expanded=False):
+            st.dataframe(trades_df.tail(30), use_container_width=True)
 
     b1, b2, b3 = st.columns(3)
     with b1:
@@ -382,11 +426,113 @@ with st.expander("🤖 Бот (управление + быстрый анали�
             if isinstance(out, dict) and ("error" in out):
                 st.error(str(out.get("error")))
             else:
+                st.session_state["quick_vision_out"] = out
+                st.session_state["quick_vision_symbol"] = assistant_symbol
                 st.json(out)
         except Exception as e:
             st.error(f"Ошибка быстрого анализа: {e}")
             import traceback
             st.code(traceback.format_exc())
+
+    def _to_conf01(v):
+        try:
+            x = float(v)
+        except Exception:
+            return 0.0
+        if not (x == x):
+            return 0.0
+        if x > 1.0:
+            x = x / 100.0
+        return float(max(0.0, min(1.0, x)))
+
+    def _pct_from_prices(entry: float, target: float) -> float:
+        try:
+            e = float(entry)
+            t = float(target)
+        except Exception:
+            return 0.0
+        if e <= 0:
+            return 0.0
+        return float(abs(t - e) / e * 100.0)
+
+    st.markdown("#### 📤 Отправка результата в бота (vision_trade)")
+    execute_now = st.checkbox("Выполнить сразу (execute_now)", value=True, key="vision_execute_now")
+
+    if st.button("📤 Отправить быстрый анализ в бота", key="send_quick_to_bot", use_container_width=True):
+        q = st.session_state.get("quick_vision_out")
+        sym = st.session_state.get("quick_vision_symbol") or assistant_symbol
+        if not isinstance(q, dict):
+            st.error("Сначала сделайте быстрый анализ картинки.")
+            st.stop()
+        pe = q.get("potential_entry") if isinstance(q.get("potential_entry"), dict) else {}
+        direction = str(pe.get("direction") or "none").lower()
+        if direction not in ("long", "short"):
+            st.error("В быстром анализе нет сценария long/short.")
+            st.stop()
+        entry_price = float(pe.get("entry_price") or 0.0)
+        sl_price = float(pe.get("stop_loss") or 0.0)
+        tp_price = float(pe.get("take_profit_1") or pe.get("take_profit_2") or 0.0)
+        conf = _to_conf01(pe.get("confidence") or q.get("confidence") or 0.0)
+        tp_pct = _pct_from_prices(entry_price, tp_price) if (entry_price > 0 and tp_price > 0) else float(bot_tp)
+        sl_pct = _pct_from_prices(entry_price, sl_price) if (entry_price > 0 and sl_price > 0) else float(bot_sl)
+        strength = "strong" if conf >= 0.75 else "medium" if conf >= 0.55 else "weak"
+        reason = str(q.get("analysis_notes") or q.get("invalidation") or "vision")[:200]
+        payload = {
+            "command": "vision_trade",
+            "symbol": str(sym),
+            "side": direction,
+            "signal_strength": strength,
+            "confidence": float(conf),
+            "tp_pct": float(tp_pct),
+            "sl_pct": float(sl_pct),
+            "reasoning_short": reason,
+            "source": "dashboard_quick_vision",
+            "execute_now": bool(execute_now),
+            "time": datetime.now().isoformat(),
+        }
+        ok = _write_bot_command(payload)
+        if ok:
+            st.success("Команда отправлена: vision_trade")
+        else:
+            st.error("Не удалось записать bot_command.json")
+
+    if st.button("📤 Отправить последнюю MTF-рекомендацию в бота", key="send_last_mtf_to_bot", use_container_width=True):
+        analysis = st.session_state.get("last_final_reco")
+        sym = st.session_state.get("last_symbol") or assistant_symbol
+        if not isinstance(analysis, dict):
+            st.error("Нет последней рекомендации. Запустите авто-анализ или анализ по 5 скриншотам.")
+            st.stop()
+        entry = analysis.get("entry_recommendation") if isinstance(analysis.get("entry_recommendation"), dict) else {}
+        direction = str(entry.get("direction") or "wait").lower()
+        if direction not in ("long", "short"):
+            st.error("В последней рекомендации направление не long/short.")
+            st.stop()
+        entry_price = float(entry.get("entry_price") or 0.0)
+        sl_price = float(entry.get("stop_loss") or 0.0)
+        tp_price = float(entry.get("take_profit_1") or 0.0)
+        conf = _to_conf01(analysis.get("confidence") or 0.0)
+        tp_pct = _pct_from_prices(entry_price, tp_price) if (entry_price > 0 and tp_price > 0) else float(bot_tp)
+        sl_pct = _pct_from_prices(entry_price, sl_price) if (entry_price > 0 and sl_price > 0) else float(bot_sl)
+        strength = "strong" if conf >= 0.75 else "medium" if conf >= 0.55 else "weak"
+        reason = str(analysis.get("smart_money_analysis") or "vision_mtf")[:200]
+        payload = {
+            "command": "vision_trade",
+            "symbol": str(sym),
+            "side": direction,
+            "signal_strength": strength,
+            "confidence": float(conf),
+            "tp_pct": float(tp_pct),
+            "sl_pct": float(sl_pct),
+            "reasoning_short": reason,
+            "source": "dashboard_mtf_vision",
+            "execute_now": bool(execute_now),
+            "time": datetime.now().isoformat(),
+        }
+        ok = _write_bot_command(payload)
+        if ok:
+            st.success("Команда отправлена: vision_trade (MTF)")
+        else:
+            st.error("Не удалось записать bot_command.json")
 
 st.markdown("### 📤 Анализ по 5 скриншотам (резервный режим)")
 if st.button("🚀 Запустить Полный Анализ (только компьютерное зрение)", key="run_vision_analysis"):
@@ -419,6 +565,9 @@ if st.button("🚀 Запустить Полный Анализ (только к
             if isinstance(analysis, dict) and ("error" in analysis):
                 st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
                 st.stop()
+
+            st.session_state["last_final_reco"] = analysis
+            st.session_state["last_symbol"] = assistant_symbol
 
             trend = (analysis.get("overall_trend") or "neutral").lower()
             trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
