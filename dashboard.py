@@ -5,12 +5,10 @@ Focused exclusively on computer vision analysis with DeepSeek
 """
 
 import os
-import threading
-import asyncio
 
 DEFAULT_STREAMLIT_PORT = 8501
 
-def _resolve_streamlit_port() -&gt; int:
+def _resolve_streamlit_port() -> int:
     raw = os.getenv("PORT")
     if raw is None:
         return DEFAULT_STREAMLIT_PORT
@@ -21,7 +19,7 @@ def _resolve_streamlit_port() -&gt; int:
         port = int(raw)
     except Exception:
         return DEFAULT_STREAMLIT_PORT
-    if port &lt;= 0 or port &gt; 65535:
+    if port <= 0 or port > 65535:
         return DEFAULT_STREAMLIT_PORT
     return port
 
@@ -33,8 +31,6 @@ os.environ.setdefault("STREAMLIT_SERVER_HEADLESS", "true")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
 import streamlit as st
-import pandas as pd
-import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -48,14 +44,14 @@ st.set_page_config(page_title="🤖 Компьютерное Зрение - То
 
 st.markdown(
     """
-    &lt;style&gt;
+    <style>
       .block-container { padding-top: 1.2rem; padding-bottom: 1.6rem; max-width: 1280px; }
       [data-testid="stSidebar"] { width: 360px; }
       header { visibility: hidden; height: 0px; }
       footer { visibility: hidden; height: 0px; }
       #MainMenu { visibility: hidden; }
       div[data-testid="stMetric"] { background: rgba(255,255,255,0.03); padding: 12px 12px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.06); }
-    &lt;/style&gt;
+    </style>
     """,
     unsafe_allow_html=True,
 )
@@ -111,12 +107,15 @@ assistant_symbol = st.selectbox(
 if st.button("🚀 Запустить Полный Анализ (Компьютерное Зрение)", key="run_vision_analysis"):
     with st.spinner("Анализируем графики с помощью компьютерного зрения и DeepSeek..."):
         try:
+            if not api_key_input:
+                st.error("Нужен OPENROUTER_API_KEY (в .env или в поле слева).")
+                st.stop()
+
             from trading_assistant import TradingAssistant
             assistant = TradingAssistant()
             
-            # Override API key from sidebar
             assistant.api_key = api_key_input
-            if api_key_input and hasattr(assistant, 'client') is None:
+            if assistant.client is None:
                 try:
                     import openai
                     headers = {}
@@ -131,6 +130,7 @@ if st.button("🚀 Запустить Полный Анализ (Компьют�
                     )
                 except Exception as e:
                     st.error(f"Ошибка инициализации клиента: {e}")
+                    st.stop()
             
             result = assistant.full_analysis(assistant_symbol)
             
