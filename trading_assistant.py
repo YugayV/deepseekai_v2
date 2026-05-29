@@ -9,9 +9,15 @@ Trading Assistant Module
 import os
 import json
 import base64
+import io
 from datetime import datetime
 from typing import Any, Dict, Optional
 from dotenv import load_dotenv
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from PIL import Image, ImageDraw, ImageFont
 
 try:
     import openai
@@ -61,6 +67,194 @@ class TradingAssistant:
             raise RuntimeError("OPENROUTER_API_KEY is missing")
         if self.client is None:
             self._init_client(self.api_key)
+
+    def fetch_ohlcv(self, symbol: str, *, interval: str, period: str) -> Optional[pd.DataFrame]:
+        try:
+            df = yf.Ticker(symbol).history(period=period, interval=interval)
+        except Exception:
+            return None
+        if df is None or df.empty:
+            return None
+        cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        if len(cols) < 4:
+            return None
+        out = df[cols].copy()
+        out.columns = [c.lower() for c in cols]
+        try:
+            idx = pd.to_datetime(out.index)
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_convert("UTC").tz_localize(None)
+            out.index = idx
+        except Exception:
+            pass
+        return out.dropna()
+
+    def resample_ohlc(self, df: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
+        if df is None or df.empty:
+            return None
+        if not isinstance(df.index, pd.DatetimeIndex):
+            return None
+        try:
+            o = df["open"].resample(rule).first()
+            h = df["high"].resample(rule).max()
+            l = df["low"].resample(rule).min()
+            c = df["close"].resample(rule).last()
+            v = df["volume"].resample(rule).sum() if "volume" in df.columns else None
+            out = pd.concat([o, h, l, c], axis=1)
+            out.columns = ["open", "high", "low", "close"]
+            if v is not None:
+                out["volume"] = v
+            return out.dropna()
+        except Exception:
+            return None
+
+    def _ema(self, s: pd.Series, span: int) -> pd.Series:
+        try:
+            return s.ewm(span=int(span), adjust=False).mean()
+        except Exception:
+            return pd.Series(index=s.index, dtype=float)
+
+    def render_candles_png(
+        self,
+        df: pd.DataFrame,
+        *,
+        title: str,
+        width: int = 1280,
+        height: int = 720,
+        max_bars: int = 180,
+    ) -> bytes:
+        if df is None or df.empty:
+            raise ValueError("empty_df")
+
+        d = df.copy()
+        d = d[["open", "high", "low", "close"] + (["volume"] if "volume" in d.columns else [])]
+        d = d.dropna()
+        if len(d) > int(max_bars):
+            d = d.iloc[-int(max_bars) :]
+
+        close = d["close"].astype(float)
+        ema21 = self._ema(close, 21)
+        ema50 = self._ema(close, 50)
+
+        pmin = float(np.nanmin(d["low"].astype(float).values))
+        pmax = float(np.nanmax(d["high"].astype(float).values))
+        if not np.isfinite(pmin) or not np.isfinite(pmax) or pmax <= pmin:
+            raise ValueError("bad_price_range")
+
+        pad = (pmax - pmin) * 0.08
+        pmin -= pad
+        pmax += pad
+
+        bg = (14, 17, 23)
+        fg = (220, 225, 235)
+        grid = (40, 45, 58)
+        bull = (46, 204, 113)
+        bear = (231, 76, 60)
+        ema21_c = (52, 152, 219)
+        ema50_c = (231, 76, 60)
+
+        img = Image.new("RGB", (int(width), int(height)), bg)
+        draw = ImageDraw.Draw(img)
+
+        margin_l = 70
+        margin_r = 30
+        margin_t = 55
+        margin_b = 45
+
+        x0 = margin_l
+        y0 = margin_t
+        x1 = width - margin_r
+        y1 = height - margin_b
+
+        draw.rectangle([x0, y0, x1, y1], outline=grid, width=1)
+
+        for k in range(1, 6):
+            yy = y0 + (y1 - y0) * k / 6.0
+            draw.line([x0, yy, x1, yy], fill=grid, width=1)
+
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+
+        draw.text((x0, 14), title, fill=fg, font=font)
+        draw.text((x0, y1 + 8), f"min={pmin:.5f}  max={pmax:.5f}", fill=(160, 170, 190), font=font)
+
+        n = len(d)
+        if n <= 1:
+            raise ValueError("not_enough_bars")
+
+        step = (x1 - x0) / float(n)
+        body_w = max(2, int(step * 0.62))
+
+        def y_of(p: float) -> float:
+            return y1 - (float(p) - pmin) / (pmax - pmin) * (y1 - y0)
+
+        def x_of(i: int) -> float:
+            return x0 + (i + 0.5) * step
+
+        for i, (_, row) in enumerate(d.iterrows()):
+            o = float(row["open"])
+            h = float(row["high"])
+            l = float(row["low"])
+            c = float(row["close"])
+
+            col = bull if c >= o else bear
+            xi = x_of(i)
+            y_open = y_of(o)
+            y_close = y_of(c)
+            y_high = y_of(h)
+            y_low = y_of(l)
+
+            draw.line([xi, y_high, xi, y_low], fill=col, width=2)
+
+            top = min(y_open, y_close)
+            bot = max(y_open, y_close)
+            if abs(bot - top) < 1.5:
+                bot = top + 2.0
+            draw.rectangle([xi - body_w / 2, top, xi + body_w / 2, bot], fill=col, outline=col)
+
+        def draw_series(series: pd.Series, color: tuple[int, int, int]):
+            pts = []
+            for i, v in enumerate(series.iloc[-n:].tolist()):
+                try:
+                    fv = float(v)
+                except Exception:
+                    continue
+                if not np.isfinite(fv):
+                    continue
+                pts.append((x_of(i), y_of(fv)))
+            if len(pts) >= 2:
+                draw.line(pts, fill=color, width=2, joint="curve")
+
+        draw_series(ema21, ema21_c)
+        draw_series(ema50, ema50_c)
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+
+    def build_images_from_market_data(self, symbol: str) -> Dict[str, Dict[str, Any]]:
+        weekly = self.fetch_ohlcv(symbol, interval="1wk", period="2y")
+        h1 = self.fetch_ohlcv(symbol, interval="1h", period="60d")
+        m15 = self.fetch_ohlcv(symbol, interval="15m", period="60d")
+        m5 = self.fetch_ohlcv(symbol, interval="5m", period="7d")
+
+        h4 = self.resample_ohlc(h1, "4H") if h1 is not None else None
+
+        out: Dict[str, Dict[str, Any]] = {}
+        if weekly is not None:
+            out["1wk"] = {"bytes": self.render_candles_png(weekly, title=f"{symbol} • 1W (auto)"), "mime": "image/png"}
+        if h4 is not None:
+            out["4h"] = {"bytes": self.render_candles_png(h4, title=f"{symbol} • 4H (auto)"), "mime": "image/png"}
+        if h1 is not None:
+            out["1h"] = {"bytes": self.render_candles_png(h1, title=f"{symbol} • 1H (auto)"), "mime": "image/png"}
+        if m15 is not None:
+            out["15m"] = {"bytes": self.render_candles_png(m15, title=f"{symbol} • 15m (auto)"), "mime": "image/png"}
+        if m5 is not None:
+            out["5m"] = {"bytes": self.render_candles_png(m5, title=f"{symbol} • 5m (auto)"), "mime": "image/png"}
+
+        return out
 
     def analyze_timeframe_image(self, *, image_bytes: bytes, mime: str, symbol: str, timeframe_key: str, user_prompt_ru: str = "") -> Dict[str, Any]:
         try:

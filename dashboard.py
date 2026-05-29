@@ -31,6 +31,7 @@ os.environ.setdefault("STREAMLIT_SERVER_HEADLESS", "true")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
 import streamlit as st
+import streamlit.components.v1 as components
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -101,6 +102,49 @@ assistant_symbol = st.selectbox(
     key="assistant_symbol"
 )
 
+def _tv_symbol(sym: str) -> str:
+    s = str(sym or "").strip()
+    if not s:
+        return "FX_IDC:EURUSD"
+    if s.endswith("=X"):
+        raw = s.replace("=X", "")
+        return f"FX_IDC:{raw}"
+    if s.endswith("-USD"):
+        raw = s.replace("-", "")
+        return f"BINANCE:{raw}T"
+    return s
+
+with st.expander("📺 TradingView (просмотр)", expanded=True):
+    tv = _tv_symbol(assistant_symbol)
+    tv_interval = st.selectbox("Таймфрейм отображения", ["1W", "240", "60", "15", "5"], index=2, help="Это только просмотр. Для CV используем авто-режим или 5 скриншотов.")
+    tradingview_html = f"""
+    <div class="tradingview-widget-container" style="height:680px;width:100%;">
+      <div id="tradingview_{tv.replace(':','_')}" style="height:680px;width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({{
+        "autosize": true,
+        "symbol": "{tv}",
+        "interval": "{tv_interval}",
+        "timezone": "Etc/UTC",
+        "theme": "dark",
+        "style": "1",
+        "locale": "ru",
+        "toolbar_bg": "#0e1117",
+        "enable_publishing": false,
+        "withdateranges": true,
+        "hide_side_toolbar": false,
+        "allow_symbol_change": true,
+        "details": true,
+        "hotlist": false,
+        "calendar": false,
+        "container_id": "tradingview_{tv.replace(':','_')}"
+      }});
+      </script>
+    </div>
+    """
+    components.html(tradingview_html, height=710)
+
 user_prompt_ru = st.text_area(
     "Контекст/задание (опционально)",
     value="Сделай SMC+SNR анализ и дай конкретный план входа. Учитывай структуру: Weekly -> 4H -> 1H -> 15m -> 5m.",
@@ -128,6 +172,135 @@ with c3:
 
 uploads = {"1wk": up_1wk, "4h": up_4h, "1h": up_1h, "15m": up_15m, "5m": up_5m}
 
+st.markdown("### 🚀 Авто-анализ без скриншотов (данные → автографики → computer vision)")
+if st.button("⚡ Авто-анализ без скриншотов", key="run_auto_vision_analysis"):
+    with st.spinner("Тянем данные, строим 5 автографиков и запускаем computer vision..."):
+        try:
+            if not api_key_input:
+                st.error("Нужен OPENROUTER_API_KEY (в .env или в поле слева).")
+                st.stop()
+
+            from trading_assistant import TradingAssistant
+            assistant = TradingAssistant()
+            assistant.client = None
+            assistant.ensure_client(api_key_input)
+
+            images = assistant.build_images_from_market_data(assistant_symbol)
+            required = ["1wk", "4h", "1h", "15m", "5m"]
+            missing = [tf for tf in required if tf not in images]
+            if missing:
+                st.error("Не удалось построить автографики для: " + ", ".join([tf_labels.get(x, x) for x in missing]))
+                st.stop()
+
+            result = assistant.full_vision_assessment(symbol=assistant_symbol, images=images, user_prompt_ru=user_prompt_ru)
+            if "error" in result:
+                st.error(f"Ошибка: {result['error']}")
+                st.stop()
+
+            analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
+            if isinstance(analysis, dict) and ("error" in analysis):
+                st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
+                st.stop()
+
+            trend = (analysis.get("overall_trend") or "neutral").lower()
+            trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
+            st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
+
+            entry = analysis.get("entry_recommendation", {}) if isinstance(analysis, dict) else {}
+            if isinstance(entry, dict) and entry:
+                st.subheader("🎯 Рекомендация по входу")
+                e1, e2, e3 = st.columns(3)
+                e1.metric("Направление", str(entry.get("direction") or "wait").upper())
+                e2.metric("Цена входа", f"{float(entry.get('entry_price') or 0.0):.5f}")
+                e3.metric("Риск/доход", str(analysis.get("risk_reward_ratio") or "N/A"))
+
+                t1, t2, t3 = st.columns(3)
+                t1.metric("TP1", f"{float(entry.get('take_profit_1') or 0.0):.5f}")
+                t2.metric("TP2", f"{float(entry.get('take_profit_2') or 0.0):.5f}")
+                t3.metric("TP3", f"{float(entry.get('take_profit_3') or 0.0):.5f}")
+                st.metric("SL", f"{float(entry.get('stop_loss') or 0.0):.5f}")
+
+            smc_text = analysis.get("smart_money_analysis") if isinstance(analysis, dict) else ""
+            if isinstance(smc_text, str) and smc_text.strip():
+                st.subheader("🧠 Итоговый разбор (SMC + компьютерное зрение)")
+                st.write(smc_text)
+
+            conf = analysis.get("confidence") if isinstance(analysis, dict) else None
+            if conf is not None:
+                try:
+                    st.metric("Уверенность", f"{int(float(conf))}%")
+                except Exception:
+                    st.metric("Уверенность", str(conf))
+
+            st.subheader("🖼️ Автографики (по данным)")
+            i1, i2, i3 = st.columns(3)
+            cols = [i1, i2, i3]
+            for idx, tf in enumerate(["1wk", "4h", "1h", "15m", "5m"]):
+                with cols[idx % 3]:
+                    st.image(images[tf]["bytes"], caption=tf_labels.get(tf, tf), use_container_width=True)
+
+            vision_analyses = result.get("vision_analyses", {}) if isinstance(result, dict) else {}
+            if isinstance(vision_analyses, dict) and vision_analyses:
+                st.subheader("👁️ Анализ зрения по таймфреймам")
+                for tf in ["1wk", "4h", "1h", "15m", "5m"]:
+                    vision_data = vision_analyses.get(tf) if isinstance(vision_analyses, dict) else None
+                    tf_name = tf_labels.get(tf, tf)
+                    with st.expander(tf_name, expanded=False):
+                        if not isinstance(vision_data, dict):
+                            st.write("Нет данных.")
+                            continue
+                        if "error" in vision_data:
+                            st.error(str(vision_data.get("error")))
+                            continue
+                        st.write(f"Тренд: {vision_data.get('trend')}")
+                        sup = vision_data.get("support_levels") or []
+                        res = vision_data.get("resistance_levels") or []
+                        if sup:
+                            st.write("Поддержки: " + ", ".join([f"{float(x):.5f}" for x in sup if x is not None]))
+                        if res:
+                            st.write("Сопротивления: " + ", ".join([f"{float(x):.5f}" for x in res if x is not None]))
+                        pe = vision_data.get("potential_entry") or {}
+                        if isinstance(pe, dict) and pe:
+                            st.write(
+                                f"Сценарий: {str(pe.get('direction') or 'none').upper()} | "
+                                f"Entry={float(pe.get('entry_price') or 0.0):.5f} | "
+                                f"SL={float(pe.get('stop_loss') or 0.0):.5f} | "
+                                f"TP1={float(pe.get('take_profit_1') or 0.0):.5f} | "
+                                f"TP2={float(pe.get('take_profit_2') or 0.0):.5f} | "
+                                f"Conf={pe.get('confidence')}"
+                            )
+                        inv = vision_data.get("invalidation")
+                        if isinstance(inv, str) and inv.strip():
+                            st.write("Отмена: " + inv)
+                        notes = vision_data.get("analysis_notes")
+                        if isinstance(notes, str) and notes.strip():
+                            st.write(notes)
+
+            tf_analysis_list = analysis.get("timeframe_analysis", []) if isinstance(analysis, dict) else []
+            if isinstance(tf_analysis_list, list) and tf_analysis_list:
+                st.subheader("📅 Разбор по таймфреймам (итог)")
+                for row in tf_analysis_list:
+                    if not isinstance(row, dict):
+                        continue
+                    with st.expander(str(row.get("timeframe") or "N/A"), expanded=False):
+                        st.write("Тренд: " + str(row.get("trend") or "neutral"))
+                        levels = row.get("key_levels") if isinstance(row.get("key_levels"), dict) else {}
+                        if levels:
+                            try:
+                                st.write(f"Поддержка: {float(levels.get('support') or 0.0):.5f}")
+                                st.write(f"Сопротивление: {float(levels.get('resistance') or 0.0):.5f}")
+                            except Exception:
+                                st.write(str(levels))
+                        notes = row.get("notes")
+                        if isinstance(notes, str) and notes.strip():
+                            st.write(notes)
+
+        except Exception as e:
+            st.error(f"Ошибка при запуске авто-анализа: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+st.markdown("### 📤 Анализ по 5 скриншотам (резервный режим)")
 if st.button("🚀 Запустить Полный Анализ (только компьютерное зрение)", key="run_vision_analysis"):
     with st.spinner("Анализируем 5 скриншотов (vision) и объединяем вывод (DeepSeek)..."):
         try:
@@ -189,7 +362,7 @@ if st.button("🚀 Запустить Полный Анализ (только к
                 except Exception:
                     st.metric("Уверенность", str(conf))
 
-            st.subheader("�️ Скриншоты")
+            st.subheader("🖼️ Скриншоты")
             i1, i2, i3 = st.columns(3)
             cols = [i1, i2, i3]
             for idx, (tf, f) in enumerate(uploads.items()):
