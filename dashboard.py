@@ -5,6 +5,7 @@ Focused exclusively on computer vision analysis with DeepSeek
 """
 
 import os
+import json
 
 DEFAULT_STREAMLIT_PORT = 8501
 
@@ -297,6 +298,93 @@ if st.button("⚡ Авто-анализ без скриншотов", key="run_a
 
         except Exception as e:
             st.error(f"Ошибка при запуске авто-анализа: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+with st.expander("🤖 Бот (управление + быстрый анализ картинки)", expanded=False):
+    data_dir = os.getenv("TRADEBOT_DATA_DIR", "data")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except Exception:
+        pass
+    cmd_path = os.path.join(data_dir, "bot_command.json")
+
+    def _write_bot_command(payload: dict) -> bool:
+        try:
+            with open(cmd_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
+    st.write("Управление работает через файл команды: " + cmd_path)
+
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        bot_tp = st.number_input("TP (%)", min_value=0.1, max_value=50.0, value=5.0, step=0.5, key="bot_tp")
+    with b2:
+        bot_sl = st.number_input("SL (%)", min_value=0.1, max_value=50.0, value=2.0, step=0.5, key="bot_sl")
+    with b3:
+        bot_leverage = st.number_input("Leverage", min_value=1, max_value=200, value=5, step=1, key="bot_leverage")
+
+    c_start, c_stop = st.columns(2)
+    if c_start.button("🚀 Start All (бот)", use_container_width=True):
+        payload = {
+            "command": "start_all",
+            "symbols": list(assets or [assistant_symbol]),
+            "tp": float(bot_tp),
+            "sl": float(bot_sl),
+            "leverage": int(bot_leverage),
+            "time": datetime.now().isoformat(),
+        }
+        ok = _write_bot_command(payload)
+        if ok:
+            st.success("Команда отправлена: start_all")
+        else:
+            st.error("Не удалось записать bot_command.json")
+
+    if c_stop.button("🛑 Stop All (бот)", use_container_width=True):
+        payload = {"command": "stop_all", "time": datetime.now().isoformat()}
+        ok = _write_bot_command(payload)
+        if ok:
+            st.success("Команда отправлена: stop_all")
+        else:
+            st.error("Не удалось записать bot_command.json")
+
+    st.markdown("#### ⚡ Быстрый анализ картинки (1 скриншот)")
+    quick_tf = st.selectbox("Таймфрейм картинки", ["1wk", "4h", "1h", "15m", "5m"], index=2, key="quick_tf")
+    quick_file = st.file_uploader("Загрузите 1 скриншот графика для быстрого анализа", type=["png", "jpg", "jpeg"], key="quick_img")
+    quick_prompt = st.text_area(
+        "Задание для быстрого анализа (опционально)",
+        value="Коротко: тренд, уровни, сценарий входа/SL/TP и отмена.",
+        height=60,
+        key="quick_prompt",
+    )
+    if st.button("👁️ Проанализировать 1 картинку", key="quick_analyze"):
+        if not api_key_input:
+            st.error("Нужен OPENROUTER_API_KEY (в .env или в поле слева).")
+            st.stop()
+        if quick_file is None:
+            st.error("Загрузите картинку.")
+            st.stop()
+        try:
+            from trading_assistant import TradingAssistant
+            assistant = TradingAssistant()
+            assistant.client = None
+            assistant.ensure_client(api_key_input)
+            out = assistant.analyze_timeframe_image(
+                image_bytes=quick_file.getvalue(),
+                mime=(quick_file.type or "image/png"),
+                symbol=assistant_symbol,
+                timeframe_key=quick_tf,
+                user_prompt_ru=quick_prompt,
+            )
+            if isinstance(out, dict) and ("error" in out):
+                st.error(str(out.get("error")))
+            else:
+                st.json(out)
+        except Exception as e:
+            st.error(f"Ошибка быстрого анализа: {e}")
             import traceback
             st.code(traceback.format_exc())
 
