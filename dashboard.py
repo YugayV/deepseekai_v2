@@ -92,9 +92,6 @@ st.title("🤖 Торговый Ассистент с Компьютерным �
 st.markdown("SMC • Multi-Timeframe Analysis • DeepSeek AI")
 st.markdown("---")
 
-# ============================================
-# COMPUTER VISION ANALYSIS
-# ============================================
 st.subheader("👁️ Анализ с помощью Компьютерного Зрения")
 
 assistant_symbol = st.selectbox(
@@ -104,127 +101,157 @@ assistant_symbol = st.selectbox(
     key="assistant_symbol"
 )
 
-if st.button("🚀 Запустить Полный Анализ (Компьютерное Зрение)", key="run_vision_analysis"):
-    with st.spinner("Анализируем графики с помощью компьютерного зрения и DeepSeek..."):
+user_prompt_ru = st.text_area(
+    "Контекст/задание (опционально)",
+    value="Сделай SMC+SNR анализ и дай конкретный план входа. Учитывай структуру: Weekly -> 4H -> 1H -> 15m -> 5m.",
+    height=80,
+    key="user_prompt_ru",
+)
+
+tf_labels = {
+    "1wk": "Неделя (1W)",
+    "4h": "4 часа (4H)",
+    "1h": "1 час (1H)",
+    "15m": "15 минут (15m)",
+    "5m": "5 минут (5m)",
+}
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    up_1wk = st.file_uploader("Скриншот графика: Неделя (1W)", type=["png", "jpg", "jpeg"], key="up_1wk")
+    up_4h = st.file_uploader("Скриншот графика: 4H", type=["png", "jpg", "jpeg"], key="up_4h")
+with c2:
+    up_1h = st.file_uploader("Скриншот графика: 1H", type=["png", "jpg", "jpeg"], key="up_1h")
+    up_15m = st.file_uploader("Скриншот графика: 15m", type=["png", "jpg", "jpeg"], key="up_15m")
+with c3:
+    up_5m = st.file_uploader("Скриншот графика: 5m", type=["png", "jpg", "jpeg"], key="up_5m")
+
+uploads = {"1wk": up_1wk, "4h": up_4h, "1h": up_1h, "15m": up_15m, "5m": up_5m}
+
+if st.button("🚀 Запустить Полный Анализ (только компьютерное зрение)", key="run_vision_analysis"):
+    with st.spinner("Анализируем 5 скриншотов (vision) и объединяем вывод (DeepSeek)..."):
         try:
             if not api_key_input:
                 st.error("Нужен OPENROUTER_API_KEY (в .env или в поле слева).")
                 st.stop()
 
+            missing = [k for k, f in uploads.items() if f is None]
+            if missing:
+                st.error("Не хватает скриншотов для таймфреймов: " + ", ".join([tf_labels.get(k, k) for k in missing]))
+                st.stop()
+
+            images = {}
+            for tf, f in uploads.items():
+                images[tf] = {"bytes": f.getvalue(), "mime": (f.type or "image/png")}
+
             from trading_assistant import TradingAssistant
             assistant = TradingAssistant()
-            
-            assistant.api_key = api_key_input
-            if assistant.client is None:
-                try:
-                    import openai
-                    headers = {}
-                    if OPENROUTER_SITE_URL:
-                        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
-                    if OPENROUTER_APP_NAME:
-                        headers["X-Title"] = OPENROUTER_APP_NAME
-                    assistant.client = openai.OpenAI(
-                        api_key=api_key_input,
-                        base_url="https://openrouter.ai/api/v1",
-                        default_headers=headers if headers else None
-                    )
-                except Exception as e:
-                    st.error(f"Ошибка инициализации клиента: {e}")
-                    st.stop()
-            
-            result = assistant.full_analysis(assistant_symbol)
-            
+            assistant.client = None
+            assistant.ensure_client(api_key_input)
+
+            result = assistant.full_vision_assessment(symbol=assistant_symbol, images=images, user_prompt_ru=user_prompt_ru)
             if "error" in result:
                 st.error(f"Ошибка: {result['error']}")
-            else:
-                analysis = result.get("final_recommendation", {})
-                
-                # Display overall trend
-                trend = analysis.get("overall_trend", "neutral")
-                trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
-                st.metric("Общий Тренд", f"{trend_emoji} {trend.upper()}")
-                
-                # Display entry recommendation
-                entry = analysis.get("entry_recommendation", {})
-                if entry:
-                    st.subheader("🎯 Рекомендация по Входу")
-                    col_e1, col_e2, col_e3 = st.columns(3)
-                    col_e1.metric("Направление", entry.get("direction", "wait").upper())
-                    col_e2.metric("Цена Входа", f"{entry.get('entry_price', 0):.5f}")
-                    col_e3.metric("Риск/Доход", analysis.get("risk_reward_ratio", "N/A"))
-                    
-                    col_tp1, col_tp2, col_tp3 = st.columns(3)
-                    col_tp1.metric("Тейк-Профит 1", f"{entry.get('take_profit_1', 0):.5f}")
-                    col_tp2.metric("Тейк-Профит 2", f"{entry.get('take_profit_2', 0):.5f}")
-                    col_tp3.metric("Тейк-Профит 3", f"{entry.get('take_profit_3', 0):.5f}")
-                    st.metric("Стоп-Лосс", f"{entry.get('stop_loss', 0):.5f}")
-                
-                # Display Smart Money analysis
-                smc_analysis = analysis.get("smart_money_analysis", "")
-                if smc_analysis:
-                    st.subheader("🧠 Анализ по Концепциям Smart Money + Компьютерное Зрение")
-                    st.write(smc_analysis)
-                
-                # Display confidence
-                confidence = analysis.get("confidence", 0)
-                st.metric("Уверенность AI", f"{confidence}%")
-                
-                # Display charts for all timeframes
-                st.subheader("📊 Графики на всех Таймфреймах")
-                charts = result.get("charts", {})
-                if charts:
-                    tf_cols = st.columns(3)
-                    for i, (tf, chart_img) in enumerate(charts.items()):
-                        with tf_cols[i % 3]:
-                            st.image(chart_img, caption=f"{assistant.timeframes.get(tf, tf)}", use_container_width=True)
-                
-                # Display computer vision analysis for each timeframe
-                vision_analyses = result.get("vision_analyses", {})
-                if vision_analyses:
-                    st.subheader("👁️ Анализ Компьютерным Зрением по Таймфреймам")
-                    for tf, vision_data in vision_analyses.items():
-                        tf_name = assistant.timeframes.get(tf, tf)
-                        with st.expander(f"{tf_name} - Анализ Компьютерным Зрением", expanded=False):
-                            if "error" in vision_data:
-                                st.error(f"Ошибка анализа зрения: {vision_data['error']}")
-                            else:
-                                st.write(f"**Тренд (Зрение):** {vision_data.get('trend', 'N/A')}")
-                                
-                                support = vision_data.get('support_levels', [])
-                                if support:
-                                    st.write(f"**Уровни Поддержки:** {', '.join([f'{s:.5f}' for s in support])}")
-                                
-                                resistance = vision_data.get('resistance_levels', [])
-                                if resistance:
-                                    st.write(f"**Уровни Сопротивления:** {', '.join([f'{r:.5f}' for r in resistance])}")
-                                
-                                entry_vision = vision_data.get('potential_entry', {})
-                                if entry_vision:
-                                    st.write(f"**Потенциальный Вход:** {entry_vision.get('direction', 'none').upper()}")
-                                    st.write(f"**Цена Входа:** {entry_vision.get('entry_price', 0):.5f}")
-                                    st.write(f"**Стоп-Лосс:** {entry_vision.get('stop_loss', 0):.5f}")
-                                    st.write(f"**Тейк-Профит:** {entry_vision.get('take_profit', 0):.5f}")
-                                    st.write(f"**Уверенность:** {entry_vision.get('confidence', 0)}%")
-                                
-                                notes = vision_data.get('analysis_notes', '')
-                                if notes:
-                                    st.write(f"**Заметки:** {notes}")
-                
-                # Display timeframe-by-timeframe analysis from final recommendation
-                tf_analysis_list = analysis.get("timeframe_analysis", [])
-                if tf_analysis_list:
-                    st.subheader("📅 Разбор по Таймфреймам (Финальная рекомендация)")
-                    for tf_analysis in tf_analysis_list:
-                        with st.expander(f"{tf_analysis.get('timeframe', 'N/A')}", expanded=False):
-                            st.write(f"**Тренд:** {tf_analysis.get('trend', 'neutral')}")
-                            levels = tf_analysis.get('key_levels', {})
-                            if levels:
-                                st.write(f"**Поддержка:** {levels.get('support', 0):.5f}")
-                                st.write(f"**Сопротивление:** {levels.get('resistance', 0):.5f}")
-                            notes = tf_analysis.get('notes', '')
-                            if notes:
-                                st.write(f"**Заметки:** {notes}")
-                
+                st.stop()
+
+            analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
+            if isinstance(analysis, dict) and ("error" in analysis):
+                st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
+                st.stop()
+
+            trend = (analysis.get("overall_trend") or "neutral").lower()
+            trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
+            st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
+
+            entry = analysis.get("entry_recommendation", {}) if isinstance(analysis, dict) else {}
+            if isinstance(entry, dict) and entry:
+                st.subheader("🎯 Рекомендация по входу")
+                e1, e2, e3 = st.columns(3)
+                e1.metric("Направление", str(entry.get("direction") or "wait").upper())
+                e2.metric("Цена входа", f"{float(entry.get('entry_price') or 0.0):.5f}")
+                e3.metric("Риск/доход", str(analysis.get("risk_reward_ratio") or "N/A"))
+
+                t1, t2, t3 = st.columns(3)
+                t1.metric("TP1", f"{float(entry.get('take_profit_1') or 0.0):.5f}")
+                t2.metric("TP2", f"{float(entry.get('take_profit_2') or 0.0):.5f}")
+                t3.metric("TP3", f"{float(entry.get('take_profit_3') or 0.0):.5f}")
+                st.metric("SL", f"{float(entry.get('stop_loss') or 0.0):.5f}")
+
+            smc_text = analysis.get("smart_money_analysis") if isinstance(analysis, dict) else ""
+            if isinstance(smc_text, str) and smc_text.strip():
+                st.subheader("🧠 Итоговый разбор (SMC + компьютерное зрение)")
+                st.write(smc_text)
+
+            conf = analysis.get("confidence") if isinstance(analysis, dict) else None
+            if conf is not None:
+                try:
+                    st.metric("Уверенность", f"{int(float(conf))}%")
+                except Exception:
+                    st.metric("Уверенность", str(conf))
+
+            st.subheader("�️ Скриншоты")
+            i1, i2, i3 = st.columns(3)
+            cols = [i1, i2, i3]
+            for idx, (tf, f) in enumerate(uploads.items()):
+                with cols[idx % 3]:
+                    st.image(f.getvalue(), caption=tf_labels.get(tf, tf), use_container_width=True)
+
+            vision_analyses = result.get("vision_analyses", {}) if isinstance(result, dict) else {}
+            if isinstance(vision_analyses, dict) and vision_analyses:
+                st.subheader("👁️ Анализ зрения по таймфреймам")
+                for tf in ["1wk", "4h", "1h", "15m", "5m"]:
+                    vision_data = vision_analyses.get(tf) if isinstance(vision_analyses, dict) else None
+                    tf_name = tf_labels.get(tf, tf)
+                    with st.expander(tf_name, expanded=False):
+                        if not isinstance(vision_data, dict):
+                            st.write("Нет данных.")
+                            continue
+                        if "error" in vision_data:
+                            st.error(str(vision_data.get("error")))
+                            continue
+                        st.write(f"Тренд: {vision_data.get('trend')}")
+                        sup = vision_data.get("support_levels") or []
+                        res = vision_data.get("resistance_levels") or []
+                        if sup:
+                            st.write("Поддержки: " + ", ".join([f"{float(x):.5f}" for x in sup if x is not None]))
+                        if res:
+                            st.write("Сопротивления: " + ", ".join([f"{float(x):.5f}" for x in res if x is not None]))
+                        pe = vision_data.get("potential_entry") or {}
+                        if isinstance(pe, dict) and pe:
+                            st.write(
+                                f"Сценарий: {str(pe.get('direction') or 'none').upper()} | "
+                                f"Entry={float(pe.get('entry_price') or 0.0):.5f} | "
+                                f"SL={float(pe.get('stop_loss') or 0.0):.5f} | "
+                                f"TP1={float(pe.get('take_profit_1') or 0.0):.5f} | "
+                                f"TP2={float(pe.get('take_profit_2') or 0.0):.5f} | "
+                                f"Conf={pe.get('confidence')}"
+                            )
+                        inv = vision_data.get("invalidation")
+                        if isinstance(inv, str) and inv.strip():
+                            st.write("Отмена: " + inv)
+                        notes = vision_data.get("analysis_notes")
+                        if isinstance(notes, str) and notes.strip():
+                            st.write(notes)
+
+            tf_analysis_list = analysis.get("timeframe_analysis", []) if isinstance(analysis, dict) else []
+            if isinstance(tf_analysis_list, list) and tf_analysis_list:
+                st.subheader("📅 Разбор по таймфреймам (итог)")
+                for row in tf_analysis_list:
+                    if not isinstance(row, dict):
+                        continue
+                    with st.expander(str(row.get("timeframe") or "N/A"), expanded=False):
+                        st.write("Тренд: " + str(row.get("trend") or "neutral"))
+                        levels = row.get("key_levels") if isinstance(row.get("key_levels"), dict) else {}
+                        if levels:
+                            try:
+                                st.write(f"Поддержка: {float(levels.get('support') or 0.0):.5f}")
+                                st.write(f"Сопротивление: {float(levels.get('resistance') or 0.0):.5f}")
+                            except Exception:
+                                st.write(str(levels))
+                        notes = row.get("notes")
+                        if isinstance(notes, str) and notes.strip():
+                            st.write(notes)
+
         except Exception as e:
             st.error(f"Ошибка при запуске анализа: {e}")
             import traceback
