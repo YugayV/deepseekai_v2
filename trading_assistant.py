@@ -114,6 +114,33 @@ class TradingAssistant:
         except Exception:
             return pd.Series(index=s.index, dtype=float)
 
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            out = float(value)
+            if not np.isfinite(out):
+                return float(default)
+            return out
+        except Exception:
+            return float(default)
+
+    def _normalize_confidence(self, value: Any) -> float:
+        conf = self._safe_float(value, 0.0)
+        if conf > 1.0:
+            conf = conf / 100.0
+        return float(max(0.0, min(1.0, conf)))
+
+    def _swing_levels(self, df: pd.DataFrame, lookback: int = 80) -> Dict[str, list[float]]:
+        if df is None or df.empty:
+            return {"highs": [], "lows": []}
+        d = df.tail(int(max(10, lookback))).copy()
+        hi = d["high"].astype(float)
+        lo = d["low"].astype(float)
+        ph = hi[(hi.shift(1) < hi) & (hi.shift(-1) < hi)].dropna()
+        pl = lo[(lo.shift(1) > lo) & (lo.shift(-1) > lo)].dropna()
+        highs = [float(x) for x in ph.tail(3).tolist()]
+        lows = [float(x) for x in pl.tail(3).tolist()]
+        return {"highs": highs, "lows": lows}
+
     def render_candles_png(
         self,
         df: pd.DataFrame,
@@ -135,6 +162,8 @@ class TradingAssistant:
         close = d["close"].astype(float)
         ema21 = self._ema(close, 21)
         ema50 = self._ema(close, 50)
+        swings = self._swing_levels(d, lookback=min(80, len(d)))
+        current_price = self._safe_float(close.iloc[-1], 0.0)
 
         pmin = float(np.nanmin(d["low"].astype(float).values))
         pmax = float(np.nanmax(d["high"].astype(float).values))
@@ -229,6 +258,28 @@ class TradingAssistant:
 
         draw_series(ema21, ema21_c)
         draw_series(ema50, ema50_c)
+
+        # Current price reference
+        if current_price > 0:
+            y_cur = y_of(current_price)
+            draw.line([x0, y_cur, x1, y_cur], fill=(255, 193, 7), width=1)
+            draw.text((x1 - 120, max(y0, y_cur - 12)), f"PX {current_price:.5f}", fill=(255, 193, 7), font=font)
+
+        # Recent swing levels to give vision model stronger S/R context.
+        for lvl in swings.get("highs", []):
+            yy = y_of(lvl)
+            draw.line([x0, yy, x1, yy], fill=(180, 80, 80), width=1)
+            draw.text((x0 + 4, max(y0, yy - 10)), f"SH {lvl:.5f}", fill=(180, 80, 80), font=font)
+        for lvl in swings.get("lows", []):
+            yy = y_of(lvl)
+            draw.line([x0, yy, x1, yy], fill=(80, 180, 120), width=1)
+            draw.text((x0 + 4, max(y0, yy - 10)), f"SL {lvl:.5f}", fill=(80, 180, 120), font=font)
+
+        # Right-top legend.
+        legend_x = x1 - 220
+        draw.text((legend_x, y0 + 6), "EMA21", fill=ema21_c, font=font)
+        draw.text((legend_x, y0 + 22), "EMA50", fill=ema50_c, font=font)
+        draw.text((legend_x, y0 + 38), "SH/SL levels", fill=fg, font=font)
 
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
@@ -348,6 +399,109 @@ class TradingAssistant:
             "vision_analyses": vision_analyses,
             "final_recommendation": final_recommendation,
         }
+
+    def _score_setup(self, vision_analyses: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+        order = ["1wk", "4h", "1h", "15m", "5m"]
+        weights = {"1wk": 30, "4h": 25, "1h": 20, "15m": 15, "5m": 10}
+        trend_to_dir = {"bullish": "long", "bearish": "short"}
+
+        final_entry = analysis.get("entry_recommendation") if isinstance(analysis.get("entry_recommendation"), dict) else {}
+        final_direction = str(final_entry.get("direction") or "wait").lower()
+        if final_direction not in ("long", "short"):
+            return {
+                "setup_score": 0,
+                "trade_allowed": False,
+                "alignment_score": 0,
+                "guardrails": ["Нет подтвержденного направления long/short в финальной рекомендации."],
+                "consensus": {},
+            }
+
+        score = 0
+        max_score = 100
+        guardrails: list[str] = []
+        aligned = 0
+        total_considered = 0
+        per_tf: dict[str, Any] = {}
+
+        for tf in order:
+            va = vision_analyses.get(tf) if isinstance(vision_analyses, dict) else None
+            if not isinstance(va, dict) or ("error" in va):
+                guardrails.append(f"{self.timeframes.get(tf, tf)}: нет валидного vision-анализа.")
+                continue
+
+            total_considered += 1
+            tf_trend = str(va.get("trend") or "neutral").lower()
+            pe = va.get("potential_entry") if isinstance(va.get("potential_entry"), dict) else {}
+            tf_dir = str(pe.get("direction") or "none").lower()
+            tf_conf = self._normalize_confidence(pe.get("confidence") or va.get("confidence") or 0.0)
+            weight = int(weights.get(tf, 10))
+
+            tf_score = 0.0
+            if trend_to_dir.get(tf_trend) == final_direction:
+                tf_score += weight * 0.6
+            elif tf_trend in ("bullish", "bearish"):
+                guardrails.append(f"{self.timeframes.get(tf, tf)}: тренд против финального направления.")
+
+            if tf_dir == final_direction:
+                tf_score += weight * 0.4
+                aligned += 1
+            elif tf_dir in ("long", "short"):
+                guardrails.append(f"{self.timeframes.get(tf, tf)}: локальный entry-конфликт.")
+
+            tf_score = tf_score * (0.35 + 0.65 * tf_conf)
+            score += tf_score
+            per_tf[tf] = {
+                "trend": tf_trend,
+                "direction": tf_dir,
+                "confidence": round(tf_conf, 3),
+                "score": round(tf_score, 1),
+            }
+
+        alignment_score = int(round((aligned / max(1, total_considered)) * 100))
+
+        rr_ok = True
+        try:
+            rr_raw = str(analysis.get("risk_reward_ratio") or "").replace(",", ".")
+            if ":" in rr_raw:
+                left, right = rr_raw.split(":", 1)
+                rr_val = self._safe_float(right, 0.0) / max(self._safe_float(left, 1.0), 1e-9)
+            else:
+                rr_val = self._safe_float(rr_raw, 0.0)
+            rr_ok = rr_val >= 1.5
+            if not rr_ok:
+                guardrails.append("Risk/Reward ниже 1.5.")
+        except Exception:
+            guardrails.append("Не удалось надежно определить Risk/Reward.")
+            rr_ok = False
+
+        final_conf = self._normalize_confidence(analysis.get("confidence") or 0.0)
+        if final_conf < 0.60:
+            guardrails.append("Итоговая уверенность модели ниже 60%.")
+
+        entry_price = self._safe_float(final_entry.get("entry_price"), 0.0)
+        sl_price = self._safe_float(final_entry.get("stop_loss"), 0.0)
+        tp1_price = self._safe_float(final_entry.get("take_profit_1"), 0.0)
+        if entry_price <= 0 or sl_price <= 0 or tp1_price <= 0:
+            guardrails.append("Некорректные уровни entry/SL/TP1.")
+        else:
+            risk = abs(entry_price - sl_price)
+            reward = abs(tp1_price - entry_price)
+            if reward <= risk:
+                guardrails.append("TP1 не перекрывает риск до SL.")
+
+        if alignment_score < 60:
+            guardrails.append("Недостаточная согласованность таймфреймов (< 60%).")
+
+        setup_score = int(round(min(max_score, max(0.0, score)) * (0.4 + 0.6 * final_conf)))
+        trade_allowed = (setup_score >= 65) and rr_ok and (alignment_score >= 60) and (final_conf >= 0.60)
+
+        return {
+            "setup_score": int(setup_score),
+            "trade_allowed": bool(trade_allowed),
+            "alignment_score": int(alignment_score),
+            "guardrails": list(dict.fromkeys(guardrails)),
+            "consensus": per_tf,
+        }
     
     def combine_vision_analyses(self, vision_analyses: Dict[str, Any], symbol: str) -> Dict[str, Any]:
         try:
@@ -401,6 +555,15 @@ class TradingAssistant:
                 response_format={"type": "json_object"},
                 max_tokens=2000
             )
-            return json.loads(response.choices[0].message.content)
+            analysis = json.loads(response.choices[0].message.content)
+            if not isinstance(analysis, dict):
+                return {"error": "bad_analysis_payload"}
+            quality = self._score_setup(vision_analyses, analysis)
+            analysis["setup_score"] = int(quality.get("setup_score", 0))
+            analysis["trade_allowed"] = bool(quality.get("trade_allowed", False))
+            analysis["alignment_score"] = int(quality.get("alignment_score", 0))
+            analysis["guardrails"] = quality.get("guardrails", [])
+            analysis["consensus"] = quality.get("consensus", {})
+            return analysis
         except Exception as e:
             return {"error": str(e)}

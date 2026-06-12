@@ -162,6 +162,170 @@ tf_labels = {
     "5m": "5 минут (5m)",
 }
 
+def _to_conf01(v):
+    try:
+        x = float(v)
+    except Exception:
+        return 0.0
+    if not (x == x):
+        return 0.0
+    if x > 1.0:
+        x = x / 100.0
+    return float(max(0.0, min(1.0, x)))
+
+def _pct_from_prices(entry: float, target: float) -> float:
+    try:
+        e = float(entry)
+        t = float(target)
+    except Exception:
+        return 0.0
+    if e <= 0:
+        return 0.0
+    return float(abs(t - e) / e * 100.0)
+
+def _render_analysis_result(result: dict, images: dict, image_title: str) -> None:
+    analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
+    if isinstance(analysis, dict) and ("error" in analysis):
+        st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
+        st.stop()
+
+    st.session_state["last_final_reco"] = analysis
+    st.session_state["last_symbol"] = assistant_symbol
+
+    trend = (analysis.get("overall_trend") or "neutral").lower()
+    trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
+    st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
+
+    score = int(float(analysis.get("setup_score") or 0))
+    align = int(float(analysis.get("alignment_score") or 0))
+    trade_allowed = bool(analysis.get("trade_allowed"))
+    q1, q2, q3 = st.columns(3)
+    q1.metric("Setup Score", str(score))
+    q2.metric("MTF Alignment", f"{align}%")
+    q3.metric("Trade Allowed", "YES" if trade_allowed else "NO")
+
+    entry = analysis.get("entry_recommendation", {}) if isinstance(analysis, dict) else {}
+    if isinstance(entry, dict) and entry:
+        st.subheader("🎯 Рекомендация по входу")
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Направление", str(entry.get("direction") or "wait").upper())
+        e2.metric("Цена входа", f"{float(entry.get('entry_price') or 0.0):.5f}")
+        e3.metric("Риск/доход", str(analysis.get("risk_reward_ratio") or "N/A"))
+
+        t1, t2, t3 = st.columns(3)
+        t1.metric("TP1", f"{float(entry.get('take_profit_1') or 0.0):.5f}")
+        t2.metric("TP2", f"{float(entry.get('take_profit_2') or 0.0):.5f}")
+        t3.metric("TP3", f"{float(entry.get('take_profit_3') or 0.0):.5f}")
+        st.metric("SL", f"{float(entry.get('stop_loss') or 0.0):.5f}")
+
+    smc_text = analysis.get("smart_money_analysis") if isinstance(analysis, dict) else ""
+    if isinstance(smc_text, str) and smc_text.strip():
+        st.subheader("🧠 Итоговый разбор (SMC + компьютерное зрение)")
+        st.write(smc_text)
+
+    conf = analysis.get("confidence") if isinstance(analysis, dict) else None
+    if conf is not None:
+        try:
+            st.metric("Уверенность", f"{int(float(conf))}%")
+        except Exception:
+            st.metric("Уверенность", str(conf))
+
+    guardrails = analysis.get("guardrails") if isinstance(analysis, dict) else None
+    if isinstance(guardrails, list) and guardrails:
+        st.subheader("🛡️ Guardrails")
+        for g in guardrails:
+            st.write(f"- {g}")
+
+    consensus = analysis.get("consensus") if isinstance(analysis, dict) else None
+    if isinstance(consensus, dict) and consensus:
+        rows = []
+        for tf in ["1wk", "4h", "1h", "15m", "5m"]:
+            item = consensus.get(tf)
+            if isinstance(item, dict):
+                rows.append({
+                    "timeframe": tf_labels.get(tf, tf),
+                    "trend": item.get("trend"),
+                    "direction": item.get("direction"),
+                    "confidence": item.get("confidence"),
+                    "score": item.get("score"),
+                })
+        if rows:
+            st.subheader("📊 Consensus Engine")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    st.subheader(image_title)
+    i1, i2, i3 = st.columns(3)
+    cols = [i1, i2, i3]
+    for idx, tf in enumerate(["1wk", "4h", "1h", "15m", "5m"]):
+        item = images.get(tf) if isinstance(images, dict) else None
+        if not item:
+            continue
+        with cols[idx % 3]:
+            if isinstance(item, dict):
+                if "bytes" in item:
+                    st.image(item["bytes"], caption=tf_labels.get(tf, tf), use_container_width=True)
+            else:
+                try:
+                    st.image(item.getvalue(), caption=tf_labels.get(tf, tf), use_container_width=True)
+                except Exception:
+                    pass
+
+    vision_analyses = result.get("vision_analyses", {}) if isinstance(result, dict) else {}
+    if isinstance(vision_analyses, dict) and vision_analyses:
+        st.subheader("👁️ Анализ зрения по таймфреймам")
+        for tf in ["1wk", "4h", "1h", "15m", "5m"]:
+            vision_data = vision_analyses.get(tf) if isinstance(vision_analyses, dict) else None
+            tf_name = tf_labels.get(tf, tf)
+            with st.expander(tf_name, expanded=False):
+                if not isinstance(vision_data, dict):
+                    st.write("Нет данных.")
+                    continue
+                if "error" in vision_data:
+                    st.error(str(vision_data.get("error")))
+                    continue
+                st.write(f"Тренд: {vision_data.get('trend')}")
+                sup = vision_data.get("support_levels") or []
+                res = vision_data.get("resistance_levels") or []
+                if sup:
+                    st.write("Поддержки: " + ", ".join([f"{float(x):.5f}" for x in sup if x is not None]))
+                if res:
+                    st.write("Сопротивления: " + ", ".join([f"{float(x):.5f}" for x in res if x is not None]))
+                pe = vision_data.get("potential_entry") or {}
+                if isinstance(pe, dict) and pe:
+                    st.write(
+                        f"Сценарий: {str(pe.get('direction') or 'none').upper()} | "
+                        f"Entry={float(pe.get('entry_price') or 0.0):.5f} | "
+                        f"SL={float(pe.get('stop_loss') or 0.0):.5f} | "
+                        f"TP1={float(pe.get('take_profit_1') or 0.0):.5f} | "
+                        f"TP2={float(pe.get('take_profit_2') or 0.0):.5f} | "
+                        f"Conf={pe.get('confidence')}"
+                    )
+                inv = vision_data.get("invalidation")
+                if isinstance(inv, str) and inv.strip():
+                    st.write("Отмена: " + inv)
+                notes = vision_data.get("analysis_notes")
+                if isinstance(notes, str) and notes.strip():
+                    st.write(notes)
+
+    tf_analysis_list = analysis.get("timeframe_analysis", []) if isinstance(analysis, dict) else []
+    if isinstance(tf_analysis_list, list) and tf_analysis_list:
+        st.subheader("📅 Разбор по таймфреймам (итог)")
+        for row in tf_analysis_list:
+            if not isinstance(row, dict):
+                continue
+            with st.expander(str(row.get("timeframe") or "N/A"), expanded=False):
+                st.write("Тренд: " + str(row.get("trend") or "neutral"))
+                levels = row.get("key_levels") if isinstance(row.get("key_levels"), dict) else {}
+                if levels:
+                    try:
+                        st.write(f"Поддержка: {float(levels.get('support') or 0.0):.5f}")
+                        st.write(f"Сопротивление: {float(levels.get('resistance') or 0.0):.5f}")
+                    except Exception:
+                        st.write(str(levels))
+                notes = row.get("notes")
+                if isinstance(notes, str) and notes.strip():
+                    st.write(notes)
+
 c1, c2, c3 = st.columns(3)
 with c1:
     up_1wk = st.file_uploader("Скриншот графика: Неделя (1W)", type=["png", "jpg", "jpeg"], key="up_1wk")
@@ -198,107 +362,7 @@ if st.button("⚡ Авто-анализ без скриншотов", key="run_a
             if "error" in result:
                 st.error(f"Ошибка: {result['error']}")
                 st.stop()
-
-            analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
-            if isinstance(analysis, dict) and ("error" in analysis):
-                st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
-                st.stop()
-
-            st.session_state["last_final_reco"] = analysis
-            st.session_state["last_symbol"] = assistant_symbol
-
-            trend = (analysis.get("overall_trend") or "neutral").lower()
-            trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
-            st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
-
-            entry = analysis.get("entry_recommendation", {}) if isinstance(analysis, dict) else {}
-            if isinstance(entry, dict) and entry:
-                st.subheader("🎯 Рекомендация по входу")
-                e1, e2, e3 = st.columns(3)
-                e1.metric("Направление", str(entry.get("direction") or "wait").upper())
-                e2.metric("Цена входа", f"{float(entry.get('entry_price') or 0.0):.5f}")
-                e3.metric("Риск/доход", str(analysis.get("risk_reward_ratio") or "N/A"))
-
-                t1, t2, t3 = st.columns(3)
-                t1.metric("TP1", f"{float(entry.get('take_profit_1') or 0.0):.5f}")
-                t2.metric("TP2", f"{float(entry.get('take_profit_2') or 0.0):.5f}")
-                t3.metric("TP3", f"{float(entry.get('take_profit_3') or 0.0):.5f}")
-                st.metric("SL", f"{float(entry.get('stop_loss') or 0.0):.5f}")
-
-            smc_text = analysis.get("smart_money_analysis") if isinstance(analysis, dict) else ""
-            if isinstance(smc_text, str) and smc_text.strip():
-                st.subheader("🧠 Итоговый разбор (SMC + компьютерное зрение)")
-                st.write(smc_text)
-
-            conf = analysis.get("confidence") if isinstance(analysis, dict) else None
-            if conf is not None:
-                try:
-                    st.metric("Уверенность", f"{int(float(conf))}%")
-                except Exception:
-                    st.metric("Уверенность", str(conf))
-
-            st.subheader("🖼️ Автографики (по данным)")
-            i1, i2, i3 = st.columns(3)
-            cols = [i1, i2, i3]
-            for idx, tf in enumerate(["1wk", "4h", "1h", "15m", "5m"]):
-                with cols[idx % 3]:
-                    st.image(images[tf]["bytes"], caption=tf_labels.get(tf, tf), use_container_width=True)
-
-            vision_analyses = result.get("vision_analyses", {}) if isinstance(result, dict) else {}
-            if isinstance(vision_analyses, dict) and vision_analyses:
-                st.subheader("👁️ Анализ зрения по таймфреймам")
-                for tf in ["1wk", "4h", "1h", "15m", "5m"]:
-                    vision_data = vision_analyses.get(tf) if isinstance(vision_analyses, dict) else None
-                    tf_name = tf_labels.get(tf, tf)
-                    with st.expander(tf_name, expanded=False):
-                        if not isinstance(vision_data, dict):
-                            st.write("Нет данных.")
-                            continue
-                        if "error" in vision_data:
-                            st.error(str(vision_data.get("error")))
-                            continue
-                        st.write(f"Тренд: {vision_data.get('trend')}")
-                        sup = vision_data.get("support_levels") or []
-                        res = vision_data.get("resistance_levels") or []
-                        if sup:
-                            st.write("Поддержки: " + ", ".join([f"{float(x):.5f}" for x in sup if x is not None]))
-                        if res:
-                            st.write("Сопротивления: " + ", ".join([f"{float(x):.5f}" for x in res if x is not None]))
-                        pe = vision_data.get("potential_entry") or {}
-                        if isinstance(pe, dict) and pe:
-                            st.write(
-                                f"Сценарий: {str(pe.get('direction') or 'none').upper()} | "
-                                f"Entry={float(pe.get('entry_price') or 0.0):.5f} | "
-                                f"SL={float(pe.get('stop_loss') or 0.0):.5f} | "
-                                f"TP1={float(pe.get('take_profit_1') or 0.0):.5f} | "
-                                f"TP2={float(pe.get('take_profit_2') or 0.0):.5f} | "
-                                f"Conf={pe.get('confidence')}"
-                            )
-                        inv = vision_data.get("invalidation")
-                        if isinstance(inv, str) and inv.strip():
-                            st.write("Отмена: " + inv)
-                        notes = vision_data.get("analysis_notes")
-                        if isinstance(notes, str) and notes.strip():
-                            st.write(notes)
-
-            tf_analysis_list = analysis.get("timeframe_analysis", []) if isinstance(analysis, dict) else []
-            if isinstance(tf_analysis_list, list) and tf_analysis_list:
-                st.subheader("📅 Разбор по таймфреймам (итог)")
-                for row in tf_analysis_list:
-                    if not isinstance(row, dict):
-                        continue
-                    with st.expander(str(row.get("timeframe") or "N/A"), expanded=False):
-                        st.write("Тренд: " + str(row.get("trend") or "neutral"))
-                        levels = row.get("key_levels") if isinstance(row.get("key_levels"), dict) else {}
-                        if levels:
-                            try:
-                                st.write(f"Поддержка: {float(levels.get('support') or 0.0):.5f}")
-                                st.write(f"Сопротивление: {float(levels.get('resistance') or 0.0):.5f}")
-                            except Exception:
-                                st.write(str(levels))
-                        notes = row.get("notes")
-                        if isinstance(notes, str) and notes.strip():
-                            st.write(notes)
+            _render_analysis_result(result, images, "🖼️ Автографики (по данным)")
 
         except Exception as e:
             st.error(f"Ошибка при запуске авто-анализа: {e}")
@@ -459,29 +523,9 @@ with st.expander("🤖 Бот (управление + быстрый анали�
             import traceback
             st.code(traceback.format_exc())
 
-    def _to_conf01(v):
-        try:
-            x = float(v)
-        except Exception:
-            return 0.0
-        if not (x == x):
-            return 0.0
-        if x > 1.0:
-            x = x / 100.0
-        return float(max(0.0, min(1.0, x)))
-
-    def _pct_from_prices(entry: float, target: float) -> float:
-        try:
-            e = float(entry)
-            t = float(target)
-        except Exception:
-            return 0.0
-        if e <= 0:
-            return 0.0
-        return float(abs(t - e) / e * 100.0)
-
     st.markdown("#### 📤 Отправка результата в бота (vision_trade)")
     execute_now = st.checkbox("Выполнить сразу (execute_now)", value=True, key="vision_execute_now")
+    allow_override = st.checkbox("Разрешить отправку даже если trade_allowed = NO", value=False, key="vision_allow_override")
 
     if st.button("📤 Отправить быстрый анализ в бота", key="send_quick_to_bot", use_container_width=True):
         q = st.session_state.get("quick_vision_out")
@@ -526,6 +570,9 @@ with st.expander("🤖 Бот (управление + быстрый анали�
         sym = st.session_state.get("last_symbol") or assistant_symbol
         if not isinstance(analysis, dict):
             st.error("Нет последней рекомендации. Запустите авто-анализ или анализ по 5 скриншотам.")
+            st.stop()
+        if (not bool(analysis.get("trade_allowed"))) and (not allow_override):
+            st.error("trade_allowed = NO. Либо улучшите сетап, либо включите override.")
             st.stop()
         entry = analysis.get("entry_recommendation") if isinstance(analysis.get("entry_recommendation"), dict) else {}
         direction = str(entry.get("direction") or "wait").lower()
@@ -585,107 +632,7 @@ if st.button("🚀 Запустить Полный Анализ (только к
             if "error" in result:
                 st.error(f"Ошибка: {result['error']}")
                 st.stop()
-
-            analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
-            if isinstance(analysis, dict) and ("error" in analysis):
-                st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
-                st.stop()
-
-            st.session_state["last_final_reco"] = analysis
-            st.session_state["last_symbol"] = assistant_symbol
-
-            trend = (analysis.get("overall_trend") or "neutral").lower()
-            trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
-            st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
-
-            entry = analysis.get("entry_recommendation", {}) if isinstance(analysis, dict) else {}
-            if isinstance(entry, dict) and entry:
-                st.subheader("🎯 Рекомендация по входу")
-                e1, e2, e3 = st.columns(3)
-                e1.metric("Направление", str(entry.get("direction") or "wait").upper())
-                e2.metric("Цена входа", f"{float(entry.get('entry_price') or 0.0):.5f}")
-                e3.metric("Риск/доход", str(analysis.get("risk_reward_ratio") or "N/A"))
-
-                t1, t2, t3 = st.columns(3)
-                t1.metric("TP1", f"{float(entry.get('take_profit_1') or 0.0):.5f}")
-                t2.metric("TP2", f"{float(entry.get('take_profit_2') or 0.0):.5f}")
-                t3.metric("TP3", f"{float(entry.get('take_profit_3') or 0.0):.5f}")
-                st.metric("SL", f"{float(entry.get('stop_loss') or 0.0):.5f}")
-
-            smc_text = analysis.get("smart_money_analysis") if isinstance(analysis, dict) else ""
-            if isinstance(smc_text, str) and smc_text.strip():
-                st.subheader("🧠 Итоговый разбор (SMC + компьютерное зрение)")
-                st.write(smc_text)
-
-            conf = analysis.get("confidence") if isinstance(analysis, dict) else None
-            if conf is not None:
-                try:
-                    st.metric("Уверенность", f"{int(float(conf))}%")
-                except Exception:
-                    st.metric("Уверенность", str(conf))
-
-            st.subheader("🖼️ Скриншоты")
-            i1, i2, i3 = st.columns(3)
-            cols = [i1, i2, i3]
-            for idx, (tf, f) in enumerate(uploads.items()):
-                with cols[idx % 3]:
-                    st.image(f.getvalue(), caption=tf_labels.get(tf, tf), use_container_width=True)
-
-            vision_analyses = result.get("vision_analyses", {}) if isinstance(result, dict) else {}
-            if isinstance(vision_analyses, dict) and vision_analyses:
-                st.subheader("👁️ Анализ зрения по таймфреймам")
-                for tf in ["1wk", "4h", "1h", "15m", "5m"]:
-                    vision_data = vision_analyses.get(tf) if isinstance(vision_analyses, dict) else None
-                    tf_name = tf_labels.get(tf, tf)
-                    with st.expander(tf_name, expanded=False):
-                        if not isinstance(vision_data, dict):
-                            st.write("Нет данных.")
-                            continue
-                        if "error" in vision_data:
-                            st.error(str(vision_data.get("error")))
-                            continue
-                        st.write(f"Тренд: {vision_data.get('trend')}")
-                        sup = vision_data.get("support_levels") or []
-                        res = vision_data.get("resistance_levels") or []
-                        if sup:
-                            st.write("Поддержки: " + ", ".join([f"{float(x):.5f}" for x in sup if x is not None]))
-                        if res:
-                            st.write("Сопротивления: " + ", ".join([f"{float(x):.5f}" for x in res if x is not None]))
-                        pe = vision_data.get("potential_entry") or {}
-                        if isinstance(pe, dict) and pe:
-                            st.write(
-                                f"Сценарий: {str(pe.get('direction') or 'none').upper()} | "
-                                f"Entry={float(pe.get('entry_price') or 0.0):.5f} | "
-                                f"SL={float(pe.get('stop_loss') or 0.0):.5f} | "
-                                f"TP1={float(pe.get('take_profit_1') or 0.0):.5f} | "
-                                f"TP2={float(pe.get('take_profit_2') or 0.0):.5f} | "
-                                f"Conf={pe.get('confidence')}"
-                            )
-                        inv = vision_data.get("invalidation")
-                        if isinstance(inv, str) and inv.strip():
-                            st.write("Отмена: " + inv)
-                        notes = vision_data.get("analysis_notes")
-                        if isinstance(notes, str) and notes.strip():
-                            st.write(notes)
-
-            tf_analysis_list = analysis.get("timeframe_analysis", []) if isinstance(analysis, dict) else []
-            if isinstance(tf_analysis_list, list) and tf_analysis_list:
-                st.subheader("📅 Разбор по таймфреймам (итог)")
-                for row in tf_analysis_list:
-                    if not isinstance(row, dict):
-                        continue
-                    with st.expander(str(row.get("timeframe") or "N/A"), expanded=False):
-                        st.write("Тренд: " + str(row.get("trend") or "neutral"))
-                        levels = row.get("key_levels") if isinstance(row.get("key_levels"), dict) else {}
-                        if levels:
-                            try:
-                                st.write(f"Поддержка: {float(levels.get('support') or 0.0):.5f}")
-                                st.write(f"Сопротивление: {float(levels.get('resistance') or 0.0):.5f}")
-                            except Exception:
-                                st.write(str(levels))
-                        notes = row.get("notes")
-                        if isinstance(notes, str) and notes.strip():
-                            st.write(notes)
+            _render_analysis_result(result, images, "🖼️ Скриншоты")
 
         except Exception as e:
             st.error(f"Ошибка при запуске анализа: {e}")
