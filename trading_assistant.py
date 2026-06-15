@@ -307,6 +307,70 @@ class TradingAssistant:
 
         return out
 
+    def build_market_snapshot(self, symbol: str) -> Dict[str, Any]:
+        daily = self.fetch_ohlcv(symbol, interval="1d", period="1y")
+        hourly = self.fetch_ohlcv(symbol, interval="1h", period="30d")
+        if daily is None or daily.empty:
+            return {"error": "no_daily_data"}
+
+        close_d = daily["close"].astype(float)
+        current_price = self._safe_float(close_d.iloc[-1], 0.0)
+        day_change = 0.0
+        week_change = 0.0
+        month_change = 0.0
+        vol_30d = 0.0
+
+        if len(close_d) >= 2:
+            prev = self._safe_float(close_d.iloc[-2], current_price)
+            if prev > 0:
+                day_change = (current_price - prev) / prev * 100.0
+        if len(close_d) >= 8:
+            prev = self._safe_float(close_d.iloc[-8], current_price)
+            if prev > 0:
+                week_change = (current_price - prev) / prev * 100.0
+        if len(close_d) >= 31:
+            prev = self._safe_float(close_d.iloc[-31], current_price)
+            if prev > 0:
+                month_change = (current_price - prev) / prev * 100.0
+
+        rets = close_d.pct_change().dropna()
+        if not rets.empty:
+            vol_30d = self._safe_float(rets.tail(30).std(), 0.0) * 100.0
+
+        levels = self._swing_levels(daily, lookback=120)
+        support = levels.get("lows", [])
+        resistance = levels.get("highs", [])
+
+        volume_ratio = 0.0
+        if hourly is not None and (not hourly.empty) and ("volume" in hourly.columns):
+            v = hourly["volume"].astype(float)
+            short_v = self._safe_float(v.tail(24).mean(), 0.0)
+            long_v = self._safe_float(v.tail(24 * 7).mean(), 0.0)
+            if long_v > 0:
+                volume_ratio = short_v / long_v
+
+        trend = "neutral"
+        ema21 = self._ema(close_d, 21)
+        ema50 = self._ema(close_d, 50)
+        if len(ema21) and len(ema50):
+            if self._safe_float(ema21.iloc[-1], 0.0) > self._safe_float(ema50.iloc[-1], 0.0):
+                trend = "bullish"
+            elif self._safe_float(ema21.iloc[-1], 0.0) < self._safe_float(ema50.iloc[-1], 0.0):
+                trend = "bearish"
+
+        return {
+            "symbol": symbol,
+            "current_price": current_price,
+            "day_change_pct": day_change,
+            "week_change_pct": week_change,
+            "month_change_pct": month_change,
+            "volatility_30d_pct": vol_30d,
+            "trend_daily": trend,
+            "support_levels": support,
+            "resistance_levels": resistance,
+            "volume_ratio_24h_vs_7d": volume_ratio,
+        }
+
     def analyze_timeframe_image(self, *, image_bytes: bytes, mime: str, symbol: str, timeframe_key: str, user_prompt_ru: str = "") -> Dict[str, Any]:
         try:
             self.ensure_client()

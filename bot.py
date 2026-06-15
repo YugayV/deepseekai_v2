@@ -257,6 +257,16 @@ VISION_TRADE_ENABLED_DEFAULT = (os.getenv("VISION_TRADE_ENABLED_DEFAULT", "false
 VISION_TRADE_MIN_CONF_DEFAULT = float(os.getenv("VISION_TRADE_MIN_CONF_DEFAULT", 0.62))
 VISION_TRADE_TTL_MINUTES_DEFAULT = int(os.getenv("VISION_TRADE_TTL_MINUTES_DEFAULT", 180))
 VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT = (os.getenv("VISION_TRADE_REAL_REQUIRE_KEYWORD_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+VISION_TRADE_MIN_RR_DEFAULT = float(os.getenv("VISION_TRADE_MIN_RR_DEFAULT", 1.4))
+VISION_TRADE_MIN_SETUP_SCORE_DEFAULT = float(os.getenv("VISION_TRADE_MIN_SETUP_SCORE_DEFAULT", 60.0))
+VISION_TRADE_MIN_ALIGNMENT_SCORE_DEFAULT = float(os.getenv("VISION_TRADE_MIN_ALIGNMENT_SCORE_DEFAULT", 0.55))
+VISION_TRADE_MAX_SL_PCT_DEFAULT = float(os.getenv("VISION_TRADE_MAX_SL_PCT_DEFAULT", 6.0))
+BTC_VISION_PROFILE_ENABLED_DEFAULT = (os.getenv("BTC_VISION_PROFILE_ENABLED_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
+BTC_VISION_MIN_CONF_DEFAULT = float(os.getenv("BTC_VISION_MIN_CONF_DEFAULT", 0.70))
+BTC_VISION_MIN_RR_DEFAULT = float(os.getenv("BTC_VISION_MIN_RR_DEFAULT", 1.8))
+BTC_VISION_MIN_SETUP_SCORE_DEFAULT = float(os.getenv("BTC_VISION_MIN_SETUP_SCORE_DEFAULT", 72.0))
+BTC_VISION_MIN_ALIGNMENT_SCORE_DEFAULT = float(os.getenv("BTC_VISION_MIN_ALIGNMENT_SCORE_DEFAULT", 0.65))
+BTC_VISION_MAX_SL_PCT_DEFAULT = float(os.getenv("BTC_VISION_MAX_SL_PCT_DEFAULT", 5.0))
 
 MODERN_SCORE_THRESHOLD_DEFAULT = int(os.getenv("MODERN_SCORE_THRESHOLD_DEFAULT", 3))
 MODERN_ALLOW_TREND_DEFAULT = (os.getenv("MODERN_ALLOW_TREND_DEFAULT", "true").strip().lower() in ("1", "true", "yes"))
@@ -319,6 +329,7 @@ METADATA_PATH = os.path.join("models", "model_metadata.json")
 DATA_DIR = os.getenv("TRADEBOT_DATA_DIR", "data")
 PORTFOLIO_PATH = os.path.join(DATA_DIR, "portfolio_state.json")
 TRADES_PATH = os.path.join(DATA_DIR, "trade_history.csv")
+SIGNAL_JOURNAL_PATH = os.path.join(DATA_DIR, "signal_journal.csv")
 
 os.makedirs("models", exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -3200,6 +3211,16 @@ class TradingBot:
             "vision_trade_enabled": bool(VISION_TRADE_ENABLED_DEFAULT),
             "vision_trade_min_conf": float(VISION_TRADE_MIN_CONF_DEFAULT),
             "vision_trade_ttl_minutes": int(VISION_TRADE_TTL_MINUTES_DEFAULT),
+            "vision_trade_min_rr": float(VISION_TRADE_MIN_RR_DEFAULT),
+            "vision_trade_min_setup_score": float(VISION_TRADE_MIN_SETUP_SCORE_DEFAULT),
+            "vision_trade_min_alignment_score": float(VISION_TRADE_MIN_ALIGNMENT_SCORE_DEFAULT),
+            "vision_trade_max_sl_pct": float(VISION_TRADE_MAX_SL_PCT_DEFAULT),
+            "btc_vision_profile_enabled": bool(BTC_VISION_PROFILE_ENABLED_DEFAULT),
+            "btc_vision_min_conf": float(BTC_VISION_MIN_CONF_DEFAULT),
+            "btc_vision_min_rr": float(BTC_VISION_MIN_RR_DEFAULT),
+            "btc_vision_min_setup_score": float(BTC_VISION_MIN_SETUP_SCORE_DEFAULT),
+            "btc_vision_min_alignment_score": float(BTC_VISION_MIN_ALIGNMENT_SCORE_DEFAULT),
+            "btc_vision_max_sl_pct": float(BTC_VISION_MAX_SL_PCT_DEFAULT),
             "modern_score_threshold": int(MODERN_SCORE_THRESHOLD_DEFAULT),
             "modern_allow_trend": bool(MODERN_ALLOW_TREND_DEFAULT),
             "modern_allow_meanrev": bool(MODERN_ALLOW_MEANREV_DEFAULT),
@@ -3225,6 +3246,115 @@ class TradingBot:
             self._db_ready = self._db_init()
 
         self.running = True
+
+    def _append_signal_journal(self, row: dict):
+        if not isinstance(row, dict):
+            return
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            new_df = pd.DataFrame([row])
+            if os.path.exists(SIGNAL_JOURNAL_PATH):
+                old_df = pd.read_csv(SIGNAL_JOURNAL_PATH)
+                out_df = pd.concat([old_df, new_df], ignore_index=True)
+            else:
+                out_df = new_df
+            if len(out_df) > 1000:
+                out_df = out_df.tail(1000).reset_index(drop=True)
+            out_df.to_csv(SIGNAL_JOURNAL_PATH, index=False)
+        except Exception as e:
+            logger.error(f"Signal journal write error: {e}")
+
+    def _vision_profile_for_symbol(self, symbol: str) -> dict:
+        prof = {
+            "min_conf": float(self.strategy.get("vision_trade_min_conf", VISION_TRADE_MIN_CONF_DEFAULT) or VISION_TRADE_MIN_CONF_DEFAULT),
+            "min_rr": float(self.strategy.get("vision_trade_min_rr", VISION_TRADE_MIN_RR_DEFAULT) or VISION_TRADE_MIN_RR_DEFAULT),
+            "min_setup_score": float(self.strategy.get("vision_trade_min_setup_score", VISION_TRADE_MIN_SETUP_SCORE_DEFAULT) or VISION_TRADE_MIN_SETUP_SCORE_DEFAULT),
+            "min_alignment_score": float(self.strategy.get("vision_trade_min_alignment_score", VISION_TRADE_MIN_ALIGNMENT_SCORE_DEFAULT) or VISION_TRADE_MIN_ALIGNMENT_SCORE_DEFAULT),
+            "max_sl_pct": float(self.strategy.get("vision_trade_max_sl_pct", VISION_TRADE_MAX_SL_PCT_DEFAULT) or VISION_TRADE_MAX_SL_PCT_DEFAULT),
+            "profile_name": "default_vision",
+        }
+        sym = str(symbol or "").upper()
+        is_btc = ("BTC" in sym) and (("USD" in sym) or ("USDT" in sym))
+        if is_btc and bool(self.strategy.get("btc_vision_profile_enabled", BTC_VISION_PROFILE_ENABLED_DEFAULT)):
+            prof.update({
+                "min_conf": float(self.strategy.get("btc_vision_min_conf", BTC_VISION_MIN_CONF_DEFAULT) or BTC_VISION_MIN_CONF_DEFAULT),
+                "min_rr": float(self.strategy.get("btc_vision_min_rr", BTC_VISION_MIN_RR_DEFAULT) or BTC_VISION_MIN_RR_DEFAULT),
+                "min_setup_score": float(self.strategy.get("btc_vision_min_setup_score", BTC_VISION_MIN_SETUP_SCORE_DEFAULT) or BTC_VISION_MIN_SETUP_SCORE_DEFAULT),
+                "min_alignment_score": float(self.strategy.get("btc_vision_min_alignment_score", BTC_VISION_MIN_ALIGNMENT_SCORE_DEFAULT) or BTC_VISION_MIN_ALIGNMENT_SCORE_DEFAULT),
+                "max_sl_pct": float(self.strategy.get("btc_vision_max_sl_pct", BTC_VISION_MAX_SL_PCT_DEFAULT) or BTC_VISION_MAX_SL_PCT_DEFAULT),
+                "profile_name": "btc_vision",
+            })
+        return prof
+
+    def _validate_vision_trade_payload(self, symbol: str, payload: dict) -> tuple[bool, str, dict]:
+        enabled = bool(self.strategy.get("vision_trade_enabled", VISION_TRADE_ENABLED_DEFAULT))
+        if not enabled:
+            return False, "VISION_DISABLED", {"profile_name": "disabled"}
+
+        prof = self._vision_profile_for_symbol(symbol)
+        side = str(payload.get("side") or "").strip().lower()
+        if side not in ("long", "short"):
+            return False, "BAD_SIDE", prof
+
+        try:
+            conf = float(payload.get("confidence") or 0.0)
+        except Exception:
+            conf = 0.0
+        conf = max(0.0, min(1.0, conf))
+        if conf < float(prof.get("min_conf") or 0.0):
+            return False, "LOW_CONFIDENCE", {**prof, "confidence": conf}
+
+        try:
+            tp_pct = float(payload.get("tp_pct") or 0.0)
+        except Exception:
+            tp_pct = 0.0
+        try:
+            sl_pct = float(payload.get("sl_pct") or 0.0)
+        except Exception:
+            sl_pct = 0.0
+        if (tp_pct <= 0.0) or (sl_pct <= 0.0):
+            return False, "BAD_RISK_PARAMS", {**prof, "tp_pct": tp_pct, "sl_pct": sl_pct}
+
+        rr = float(tp_pct) / max(float(sl_pct), 1e-9)
+        if rr < float(prof.get("min_rr") or 0.0):
+            return False, "LOW_RR", {**prof, "tp_pct": tp_pct, "sl_pct": sl_pct, "rr": rr}
+
+        if sl_pct > float(prof.get("max_sl_pct") or 999.0):
+            return False, "SL_TOO_WIDE", {**prof, "sl_pct": sl_pct}
+
+        try:
+            setup_score = float(payload.get("setup_score") or 0.0)
+        except Exception:
+            setup_score = 0.0
+        if ("setup_score" in payload) and (setup_score < float(prof.get("min_setup_score") or 0.0)):
+            return False, "LOW_SETUP_SCORE", {**prof, "setup_score": setup_score, "rr": rr, "confidence": conf}
+
+        try:
+            alignment_score = float(payload.get("alignment_score") or 0.0)
+        except Exception:
+            alignment_score = 0.0
+        if ("alignment_score" in payload) and (alignment_score < float(prof.get("min_alignment_score") or 0.0)):
+            return False, "LOW_ALIGNMENT", {**prof, "alignment_score": alignment_score, "rr": rr, "confidence": conf}
+
+        if ("trade_allowed" in payload) and (not bool(payload.get("trade_allowed"))):
+            return False, "TRADE_NOT_ALLOWED_BY_ASSISTANT", {**prof, "rr": rr, "confidence": conf}
+
+        if isinstance(self.engine, PaperTradingEngine):
+            if symbol in getattr(self.engine, "positions", {}):
+                return False, "POSITION_ALREADY_OPEN", {**prof, "rr": rr, "confidence": conf}
+
+        return True, "OK", {
+            **prof,
+            "confidence": conf,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "rr": rr,
+            "setup_score": setup_score,
+            "alignment_score": alignment_score,
+        }
 
     def _db_connect(self):
         if not DATABASE_URL:
@@ -3621,6 +3751,24 @@ class TradingBot:
             except Exception:
                 sl_pct = 0.0
 
+            try:
+                setup_score = float(cmd_data.get("setup_score") or 0.0)
+            except Exception:
+                setup_score = 0.0
+
+            try:
+                alignment_score = float(cmd_data.get("alignment_score") or 0.0)
+            except Exception:
+                alignment_score = 0.0
+
+            trade_allowed = cmd_data.get("trade_allowed")
+            if trade_allowed is None:
+                trade_allowed_norm = None
+            elif isinstance(trade_allowed, bool):
+                trade_allowed_norm = trade_allowed
+            else:
+                trade_allowed_norm = str(trade_allowed).strip().lower() in ("1", "true", "yes")
+
             rs = str(cmd_data.get("reasoning_short") or cmd_data.get("reason") or "vision").strip()[:200]
 
             now = time.time()
@@ -3630,6 +3778,10 @@ class TradingBot:
                 ttl_min = int(VISION_TRADE_TTL_MINUTES_DEFAULT)
             ttl_sec = max(60, int(ttl_min) * 60)
             expires_ts = now + float(ttl_sec)
+
+            setup_in_payload = "setup_score" in (cmd_data or {})
+            align_in_payload = "alignment_score" in (cmd_data or {})
+            trade_allowed_in_payload = "trade_allowed" in (cmd_data or {})
 
             payload = {
                 "ts": float(now),
@@ -3643,6 +3795,36 @@ class TradingBot:
                 "reasoning_short": rs,
                 "source": str(cmd_data.get("source") or cmd),
             }
+            if setup_in_payload:
+                payload["setup_score"] = float(setup_score)
+            if align_in_payload:
+                payload["alignment_score"] = float(alignment_score)
+            if trade_allowed_in_payload:
+                payload["trade_allowed"] = trade_allowed_norm
+
+            valid, valid_reason, valid_meta = self._validate_vision_trade_payload(symbol, payload)
+            journal_row = {
+                "ts": datetime.now().isoformat(),
+                "symbol": str(symbol),
+                "side": str(side),
+                "confidence": float(conf),
+                "tp_pct": float(tp_pct),
+                "sl_pct": float(sl_pct),
+                "rr": float(valid_meta.get("rr") or 0.0) if isinstance(valid_meta, dict) else 0.0,
+                "setup_score": (float(setup_score) if setup_in_payload else ""),
+                "alignment_score": (float(alignment_score) if align_in_payload else ""),
+                "trade_allowed": ("" if not trade_allowed_in_payload else bool(trade_allowed_norm)),
+                "status": ("accepted" if valid else "rejected"),
+                "reject_reason": ("" if valid else str(valid_reason)),
+                "source": str(payload.get("source") or cmd),
+                "profile_name": str(valid_meta.get("profile_name") or "unknown") if isinstance(valid_meta, dict) else "unknown",
+                "execute_now": bool(cmd_data.get("execute_now", True)),
+                "reasoning_short": rs,
+            }
+            self._append_signal_journal(journal_row)
+            if not valid:
+                logger.info(f"⛔ Vision signal rejected for {symbol}: {valid_reason}")
+                return
 
             if isinstance(self.context, dict):
                 self.context.setdefault("vision_signals", {})
@@ -3823,6 +4005,16 @@ class TradingBot:
             self.strategy["vision_trade_enabled"] = _as_bool(cmd_data.get("vision_trade_enabled"), self.strategy.get("vision_trade_enabled", VISION_TRADE_ENABLED_DEFAULT))
             self.strategy["vision_trade_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("vision_trade_min_conf"), self.strategy.get("vision_trade_min_conf", VISION_TRADE_MIN_CONF_DEFAULT))))
             self.strategy["vision_trade_ttl_minutes"] = max(1, _as_int(cmd_data.get("vision_trade_ttl_minutes"), self.strategy.get("vision_trade_ttl_minutes", VISION_TRADE_TTL_MINUTES_DEFAULT)))
+            self.strategy["vision_trade_min_rr"] = max(0.1, _as_float(cmd_data.get("vision_trade_min_rr"), self.strategy.get("vision_trade_min_rr", VISION_TRADE_MIN_RR_DEFAULT)))
+            self.strategy["vision_trade_min_setup_score"] = max(0.0, _as_float(cmd_data.get("vision_trade_min_setup_score"), self.strategy.get("vision_trade_min_setup_score", VISION_TRADE_MIN_SETUP_SCORE_DEFAULT)))
+            self.strategy["vision_trade_min_alignment_score"] = max(0.0, min(1.0, _as_float(cmd_data.get("vision_trade_min_alignment_score"), self.strategy.get("vision_trade_min_alignment_score", VISION_TRADE_MIN_ALIGNMENT_SCORE_DEFAULT))))
+            self.strategy["vision_trade_max_sl_pct"] = max(0.1, _as_float(cmd_data.get("vision_trade_max_sl_pct"), self.strategy.get("vision_trade_max_sl_pct", VISION_TRADE_MAX_SL_PCT_DEFAULT)))
+            self.strategy["btc_vision_profile_enabled"] = _as_bool(cmd_data.get("btc_vision_profile_enabled"), self.strategy.get("btc_vision_profile_enabled", BTC_VISION_PROFILE_ENABLED_DEFAULT))
+            self.strategy["btc_vision_min_conf"] = max(0.0, min(1.0, _as_float(cmd_data.get("btc_vision_min_conf"), self.strategy.get("btc_vision_min_conf", BTC_VISION_MIN_CONF_DEFAULT))))
+            self.strategy["btc_vision_min_rr"] = max(0.1, _as_float(cmd_data.get("btc_vision_min_rr"), self.strategy.get("btc_vision_min_rr", BTC_VISION_MIN_RR_DEFAULT)))
+            self.strategy["btc_vision_min_setup_score"] = max(0.0, _as_float(cmd_data.get("btc_vision_min_setup_score"), self.strategy.get("btc_vision_min_setup_score", BTC_VISION_MIN_SETUP_SCORE_DEFAULT)))
+            self.strategy["btc_vision_min_alignment_score"] = max(0.0, min(1.0, _as_float(cmd_data.get("btc_vision_min_alignment_score"), self.strategy.get("btc_vision_min_alignment_score", BTC_VISION_MIN_ALIGNMENT_SCORE_DEFAULT))))
+            self.strategy["btc_vision_max_sl_pct"] = max(0.1, _as_float(cmd_data.get("btc_vision_max_sl_pct"), self.strategy.get("btc_vision_max_sl_pct", BTC_VISION_MAX_SL_PCT_DEFAULT)))
             self.strategy["modern_score_threshold"] = max(1, min(6, _as_int(cmd_data.get("modern_score_threshold"), self.strategy.get("modern_score_threshold", MODERN_SCORE_THRESHOLD_DEFAULT))))
             self.strategy["modern_allow_trend"] = _as_bool(cmd_data.get("modern_allow_trend"), self.strategy.get("modern_allow_trend", MODERN_ALLOW_TREND_DEFAULT))
             self.strategy["modern_allow_meanrev"] = _as_bool(cmd_data.get("modern_allow_meanrev"), self.strategy.get("modern_allow_meanrev", MODERN_ALLOW_MEANREV_DEFAULT))

@@ -183,14 +183,14 @@ def _pct_from_prices(entry: float, target: float) -> float:
         return 0.0
     return float(abs(t - e) / e * 100.0)
 
-def _render_analysis_result(result: dict, images: dict, image_title: str) -> None:
+def _render_analysis_result(result: dict, images: dict, image_title: str, symbol: str) -> None:
     analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
     if isinstance(analysis, dict) and ("error" in analysis):
         st.error(f"Ошибка итогового объединения: {analysis.get('error')}")
         st.stop()
 
     st.session_state["last_final_reco"] = analysis
-    st.session_state["last_symbol"] = assistant_symbol
+    st.session_state["last_symbol"] = symbol
 
     trend = (analysis.get("overall_trend") or "neutral").lower()
     trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
@@ -338,7 +338,68 @@ with c3:
 
 uploads = {"1wk": up_1wk, "4h": up_4h, "1h": up_1h, "15m": up_15m, "5m": up_5m}
 
-st.markdown("### 🚀 Авто-анализ без скриншотов (данные → автографики → computer vision)")
+st.markdown("### ₿ Аналитика BTC/USD")
+if st.button("Обновить market snapshot BTC/USD", key="btc_snapshot_btn"):
+    st.session_state["btc_snapshot_refresh"] = datetime.now().isoformat()
+
+try:
+    from trading_assistant import TradingAssistant
+    _btc_assistant = TradingAssistant()
+    btc_snapshot = _btc_assistant.build_market_snapshot("BTC-USD")
+except Exception as e:
+    btc_snapshot = {"error": str(e)}
+
+if isinstance(btc_snapshot, dict) and ("error" not in btc_snapshot):
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("BTC/USD", f"{float(btc_snapshot.get('current_price') or 0.0):.2f}")
+    b2.metric("24ч", f"{float(btc_snapshot.get('day_change_pct') or 0.0):+.2f}%")
+    b3.metric("7д", f"{float(btc_snapshot.get('week_change_pct') or 0.0):+.2f}%")
+    b4.metric("30д", f"{float(btc_snapshot.get('month_change_pct') or 0.0):+.2f}%")
+    b5, b6, b7 = st.columns(3)
+    b5.metric("Trend D1", str(btc_snapshot.get("trend_daily") or "neutral").upper())
+    b6.metric("Vol 30d", f"{float(btc_snapshot.get('volatility_30d_pct') or 0.0):.2f}%")
+    b7.metric("VolRatio 24h/7d", f"{float(btc_snapshot.get('volume_ratio_24h_vs_7d') or 0.0):.2f}")
+    with st.expander("Уровни BTC/USD", expanded=False):
+        sup = btc_snapshot.get("support_levels") or []
+        res = btc_snapshot.get("resistance_levels") or []
+        if sup:
+            st.write("Поддержки: " + ", ".join([f"{float(x):.2f}" for x in sup]))
+        if res:
+            st.write("Сопротивления: " + ", ".join([f"{float(x):.2f}" for x in res]))
+else:
+    st.warning("BTC snapshot пока недоступен.")
+
+if st.button("₿ Запустить авто-анализ BTC/USD", key="run_btc_auto_vision"):
+    with st.spinner("Строим MTF-аналитику для BTC/USD..."):
+        try:
+            if not api_key_input:
+                st.error("Нужен OPENROUTER_API_KEY (в .env или в поле слева).")
+                st.stop()
+
+            from trading_assistant import TradingAssistant
+            assistant = TradingAssistant()
+            assistant.client = None
+            assistant.ensure_client(api_key_input)
+
+            btc_images = assistant.build_images_from_market_data("BTC-USD")
+            required = ["1wk", "4h", "1h", "15m", "5m"]
+            missing = [tf for tf in required if tf not in btc_images]
+            if missing:
+                st.error("Не удалось построить автографики BTC/USD для: " + ", ".join([tf_labels.get(x, x) for x in missing]))
+                st.stop()
+
+            btc_result = assistant.full_vision_assessment(symbol="BTC-USD", images=btc_images, user_prompt_ru=user_prompt_ru)
+            if "error" in btc_result:
+                st.error(f"Ошибка BTC/USD: {btc_result['error']}")
+                st.stop()
+
+            _render_analysis_result(btc_result, btc_images, "🖼️ BTC/USD Автографики", "BTC-USD")
+        except Exception as e:
+            st.error(f"Ошибка при запуске BTC/USD анализа: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+st.markdown("###  Авто-анализ без скриншотов (данные -> автографики -> computer vision)")
 if st.button("⚡ Авто-анализ без скриншотов", key="run_auto_vision_analysis"):
     with st.spinner("Тянем данные, строим 5 автографиков и запускаем computer vision..."):
         try:
@@ -362,7 +423,7 @@ if st.button("⚡ Авто-анализ без скриншотов", key="run_a
             if "error" in result:
                 st.error(f"Ошибка: {result['error']}")
                 st.stop()
-            _render_analysis_result(result, images, "🖼️ Автографики (по данным)")
+            _render_analysis_result(result, images, "🖼️ Автографики (по данным)", assistant_symbol)
 
         except Exception as e:
             st.error(f"Ошибка при запуске авто-анализа: {e}")
@@ -378,6 +439,7 @@ with st.expander("🤖 Бот (управление + быстрый анали�
     cmd_path = os.path.join(data_dir, "bot_command.json")
     portfolio_path = os.path.join(data_dir, "portfolio_state.json")
     trades_path = os.path.join(data_dir, "trade_history.csv")
+    signal_journal_path = os.path.join(data_dir, "signal_journal.csv")
 
     def _write_bot_command(payload: dict) -> bool:
         try:
@@ -407,6 +469,13 @@ with st.expander("🤖 Бот (управление + быстрый анали�
         except Exception:
             trades_df = None
 
+    signal_df = None
+    if os.path.exists(signal_journal_path):
+        try:
+            signal_df = pd.read_csv(signal_journal_path)
+        except Exception:
+            signal_df = None
+
     bal = float(port.get("balance") or 0.0) if isinstance(port, dict) else 0.0
     eq = float(port.get("equity") or bal) if isinstance(port, dict) else bal
     positions = port.get("positions") if isinstance(port, dict) else {}
@@ -419,6 +488,15 @@ with st.expander("🤖 Бот (управление + быстрый анали�
     s3.metric("Позиций", str(pos_count))
     s4.metric("Сделок", str(trades_count))
 
+    if isinstance(signal_df, pd.DataFrame) and (not signal_df.empty):
+        last_signals = signal_df.tail(50).copy()
+        accepted_count = int((last_signals["status"].astype(str) == "accepted").sum()) if "status" in last_signals.columns else 0
+        rejected_count = int((last_signals["status"].astype(str) == "rejected").sum()) if "status" in last_signals.columns else 0
+        j1, j2, j3 = st.columns(3)
+        j1.metric("Сигналов", str(len(last_signals)))
+        j2.metric("Принято", str(accepted_count))
+        j3.metric("Отклонено", str(rejected_count))
+
     if isinstance(positions, dict) and positions:
         with st.expander("Открытые позиции", expanded=False):
             st.json(positions)
@@ -426,6 +504,135 @@ with st.expander("🤖 Бот (управление + быстрый анали�
     if isinstance(trades_df, pd.DataFrame) and (not trades_df.empty):
         with st.expander("Последние сделки", expanded=False):
             st.dataframe(trades_df.tail(30), use_container_width=True)
+
+    if isinstance(signal_df, pd.DataFrame) and (not signal_df.empty):
+        with st.expander("Журнал сигналов", expanded=False):
+            st.dataframe(signal_df.tail(50), use_container_width=True)
+
+    meta = port.get("meta") if isinstance(port, dict) else {}
+    current_filters = meta.get("filters") if isinstance(meta, dict) else {}
+    if not isinstance(current_filters, dict):
+        current_filters = {}
+
+    st.markdown("#### 🎛️ Пороги качества Vision")
+    st.caption("Эти параметры отправляются в бота через `set_filters` и влияют на серверную валидацию `vision_trade`.")
+
+    q1, q2 = st.columns(2)
+    with q1:
+        vision_trade_enabled = st.checkbox(
+            "Включить vision_trade",
+            value=bool(current_filters.get("vision_trade_enabled", True)),
+            key="flt_vision_trade_enabled",
+        )
+        vision_trade_min_conf = st.slider(
+            "Мин. confidence",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(current_filters.get("vision_trade_min_conf", 0.62) or 0.62),
+            step=0.01,
+            key="flt_vision_trade_min_conf",
+        )
+        vision_trade_min_rr = st.number_input(
+            "Мин. RR",
+            min_value=0.1,
+            max_value=10.0,
+            value=float(current_filters.get("vision_trade_min_rr", 1.4) or 1.4),
+            step=0.1,
+            key="flt_vision_trade_min_rr",
+        )
+        vision_trade_min_setup_score = st.number_input(
+            "Мин. setup score",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(current_filters.get("vision_trade_min_setup_score", 60.0) or 60.0),
+            step=1.0,
+            key="flt_vision_trade_min_setup_score",
+        )
+        vision_trade_min_alignment_score = st.slider(
+            "Мин. alignment score",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(current_filters.get("vision_trade_min_alignment_score", 0.55) or 0.55),
+            step=0.01,
+            key="flt_vision_trade_min_alignment_score",
+        )
+        vision_trade_max_sl_pct = st.number_input(
+            "Макс. SL (%)",
+            min_value=0.1,
+            max_value=50.0,
+            value=float(current_filters.get("vision_trade_max_sl_pct", 6.0) or 6.0),
+            step=0.1,
+            key="flt_vision_trade_max_sl_pct",
+        )
+    with q2:
+        btc_vision_profile_enabled = st.checkbox(
+            "Включить BTC-профиль",
+            value=bool(current_filters.get("btc_vision_profile_enabled", True)),
+            key="flt_btc_vision_profile_enabled",
+        )
+        btc_vision_min_conf = st.slider(
+            "BTC мин. confidence",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(current_filters.get("btc_vision_min_conf", 0.70) or 0.70),
+            step=0.01,
+            key="flt_btc_vision_min_conf",
+        )
+        btc_vision_min_rr = st.number_input(
+            "BTC мин. RR",
+            min_value=0.1,
+            max_value=10.0,
+            value=float(current_filters.get("btc_vision_min_rr", 1.8) or 1.8),
+            step=0.1,
+            key="flt_btc_vision_min_rr",
+        )
+        btc_vision_min_setup_score = st.number_input(
+            "BTC мин. setup score",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(current_filters.get("btc_vision_min_setup_score", 72.0) or 72.0),
+            step=1.0,
+            key="flt_btc_vision_min_setup_score",
+        )
+        btc_vision_min_alignment_score = st.slider(
+            "BTC мин. alignment",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(current_filters.get("btc_vision_min_alignment_score", 0.65) or 0.65),
+            step=0.01,
+            key="flt_btc_vision_min_alignment_score",
+        )
+        btc_vision_max_sl_pct = st.number_input(
+            "BTC макс. SL (%)",
+            min_value=0.1,
+            max_value=50.0,
+            value=float(current_filters.get("btc_vision_max_sl_pct", 5.0) or 5.0),
+            step=0.1,
+            key="flt_btc_vision_max_sl_pct",
+        )
+
+    if st.button("💾 Применить пороги Vision", use_container_width=True, key="apply_vision_filters"):
+        payload = {
+            "command": "set_filters",
+            "vision_trade_enabled": bool(vision_trade_enabled),
+            "vision_trade_min_conf": float(vision_trade_min_conf),
+            "vision_trade_min_rr": float(vision_trade_min_rr),
+            "vision_trade_min_setup_score": float(vision_trade_min_setup_score),
+            "vision_trade_min_alignment_score": float(vision_trade_min_alignment_score),
+            "vision_trade_max_sl_pct": float(vision_trade_max_sl_pct),
+            "btc_vision_profile_enabled": bool(btc_vision_profile_enabled),
+            "btc_vision_min_conf": float(btc_vision_min_conf),
+            "btc_vision_min_rr": float(btc_vision_min_rr),
+            "btc_vision_min_setup_score": float(btc_vision_min_setup_score),
+            "btc_vision_min_alignment_score": float(btc_vision_min_alignment_score),
+            "btc_vision_max_sl_pct": float(btc_vision_max_sl_pct),
+            "time": datetime.now().isoformat(),
+        }
+        ok = _write_bot_command(payload)
+        if ok:
+            st.success("Команда отправлена: set_filters")
+        else:
+            st.error("Не удалось записать bot_command.json")
 
     b1, b2, b3 = st.columns(3)
     with b1:
@@ -595,6 +802,9 @@ with st.expander("🤖 Бот (управление + быстрый анали�
             "confidence": float(conf),
             "tp_pct": float(tp_pct),
             "sl_pct": float(sl_pct),
+            "setup_score": float(analysis.get("setup_score") or 0.0),
+            "alignment_score": float(analysis.get("alignment_score") or 0.0),
+            "trade_allowed": bool(analysis.get("trade_allowed")),
             "reasoning_short": reason,
             "source": "dashboard_mtf_vision",
             "execute_now": bool(execute_now),
@@ -632,7 +842,7 @@ if st.button("🚀 Запустить Полный Анализ (только к
             if "error" in result:
                 st.error(f"Ошибка: {result['error']}")
                 st.stop()
-            _render_analysis_result(result, images, "🖼️ Скриншоты")
+            _render_analysis_result(result, images, "🖼️ Скриншоты", assistant_symbol)
 
         except Exception as e:
             st.error(f"Ошибка при запуске анализа: {e}")
