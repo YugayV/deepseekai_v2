@@ -43,7 +43,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or ""
 OPENROUTER_SITE_URL = (os.getenv("OPENROUTER_SITE_URL") or "").strip()
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME") or ""
 
-st.set_page_config(page_title="🤖 Компьютерное Зрение - Торговый Ассистент", layout="wide")
+st.set_page_config(page_title="🤖 CVision SMC/S&R Assistant", layout="wide")
 
 st.markdown(
     """
@@ -91,11 +91,12 @@ st.sidebar.caption(f"Последнее обновление: {datetime.now().st
 # ============================================
 # MAIN TITLE
 # ============================================
-st.title("🤖 Торговый Ассистент с Компьютерным Зрением")
-st.markdown("SMC • Multi-Timeframe Analysis • DeepSeek AI")
+st.title("🤖 CVision Assistant: SMC + S/R")
+st.markdown("Multi-Timeframe Analysis • Smart Money Concepts • Support/Resistance")
 st.markdown("---")
 
-st.subheader("👁️ Анализ с помощью Компьютерного Зрения")
+st.subheader("👁️ Основной режим: визуальный SMC/S&R анализ")
+st.info("Базовый сценарий: загружаешь 5 скриншотов или запускаешь авто-MTF, а ассистент возвращает контекст, точки входа, invalidation, TP/SL и план исполнения по таймфреймам.")
 
 assistant_symbol = st.selectbox(
     "Выберите актив для анализа",
@@ -149,7 +150,7 @@ with st.expander("📺 TradingView (просмотр)", expanded=True):
 
 user_prompt_ru = st.text_area(
     "Контекст/задание (опционально)",
-    value="Сделай SMC+SNR анализ и дай конкретный план входа. Учитывай структуру: Weekly -> 4H -> 1H -> 15m -> 5m.",
+    value="Сделай top-down SMC + S/R анализ. Нужны: общий bias, market structure, liquidity sweeps, FVG, order blocks, premium/discount, конкретный план входа, invalidation и execution trigger на младших ТФ.",
     height=80,
     key="user_prompt_ru",
 )
@@ -183,6 +184,14 @@ def _pct_from_prices(entry: float, target: float) -> float:
         return 0.0
     return float(abs(t - e) / e * 100.0)
 
+def _render_text_list(title: str, values) -> None:
+    items = [str(x).strip() for x in (values or []) if str(x or "").strip()]
+    if not items:
+        return
+    st.write(f"**{title}:**")
+    for item in items:
+        st.write(f"- {item}")
+
 def _render_analysis_result(result: dict, images: dict, image_title: str, symbol: str) -> None:
     analysis = result.get("final_recommendation", {}) if isinstance(result, dict) else {}
     if isinstance(analysis, dict) and ("error" in analysis):
@@ -194,41 +203,67 @@ def _render_analysis_result(result: dict, images: dict, image_title: str, symbol
 
     trend = (analysis.get("overall_trend") or "neutral").lower()
     trend_emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
-    st.metric("Общий тренд", f"{trend_emoji} {trend.upper()}")
-
     score = int(float(analysis.get("setup_score") or 0))
     align = int(float(analysis.get("alignment_score") or 0))
     trade_allowed = bool(analysis.get("trade_allowed"))
-    q1, q2, q3 = st.columns(3)
-    q1.metric("Setup Score", str(score))
-    q2.metric("MTF Alignment", f"{align}%")
-    q3.metric("Trade Allowed", "YES" if trade_allowed else "NO")
+    conf = _to_conf01(analysis.get("confidence") or 0.0)
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric("Общий bias", f"{trend_emoji} {trend.upper()}")
+    q2.metric("Setup Score", str(score))
+    q3.metric("MTF Alignment", f"{align}%")
+    q4.metric("Confidence", f"{int(conf * 100)}%")
+
+    top_down_narrative = str(analysis.get("top_down_narrative") or "").strip()
+    if top_down_narrative:
+        st.subheader("🧭 Top-Down Context")
+        st.write(top_down_narrative)
 
     entry = analysis.get("entry_recommendation", {}) if isinstance(analysis, dict) else {}
     if isinstance(entry, dict) and entry:
-        st.subheader("🎯 Рекомендация по входу")
-        e1, e2, e3 = st.columns(3)
+        st.subheader("🎯 Торговый план")
+        e1, e2, e3, e4 = st.columns(4)
         e1.metric("Направление", str(entry.get("direction") or "wait").upper())
         e2.metric("Цена входа", f"{float(entry.get('entry_price') or 0.0):.5f}")
         e3.metric("Риск/доход", str(analysis.get("risk_reward_ratio") or "N/A"))
+        e4.metric("Execution TF", str(entry.get("execution_timeframe") or "N/A").upper())
 
         t1, t2, t3 = st.columns(3)
         t1.metric("TP1", f"{float(entry.get('take_profit_1') or 0.0):.5f}")
         t2.metric("TP2", f"{float(entry.get('take_profit_2') or 0.0):.5f}")
         t3.metric("TP3", f"{float(entry.get('take_profit_3') or 0.0):.5f}")
         st.metric("SL", f"{float(entry.get('stop_loss') or 0.0):.5f}")
+        if str(entry.get("entry_model") or "").strip():
+            st.caption("Модель входа: " + str(entry.get("entry_model") or ""))
 
     smc_text = analysis.get("smart_money_analysis") if isinstance(analysis, dict) else ""
     if isinstance(smc_text, str) and smc_text.strip():
         st.subheader("🧠 Итоговый разбор (SMC + компьютерное зрение)")
         st.write(smc_text)
 
-    conf = analysis.get("confidence") if isinstance(analysis, dict) else None
-    if conf is not None:
-        try:
-            st.metric("Уверенность", f"{int(float(conf))}%")
-        except Exception:
-            st.metric("Уверенность", str(conf))
+    execution_plan = str(analysis.get("execution_plan") or "").strip()
+    if execution_plan:
+        st.subheader("⚙️ План исполнения")
+        st.write(execution_plan)
+
+    what_to_wait_for = str(analysis.get("what_to_wait_for") or "").strip()
+    if what_to_wait_for:
+        st.subheader("⏳ Что ждать перед входом")
+        st.write(what_to_wait_for)
+
+    _render_text_list("Факторы конфлюэнции", analysis.get("confluence_factors"))
+    _render_text_list("Чеклист входа", analysis.get("entry_checklist"))
+
+    alternative_scenario = str(analysis.get("alternative_scenario") or "").strip()
+    if alternative_scenario:
+        st.subheader("🔁 Альтернативный сценарий")
+        st.write(alternative_scenario)
+
+    invalidation_text = str(analysis.get("invalidation") or "").strip()
+    if invalidation_text:
+        st.subheader("🛑 Invalidation")
+        st.write(invalidation_text)
+
+    st.caption("Trade Allowed показывает качество сетапа по внутренним guardrails, но основной фокус этой панели — аналитика и рекомендации.")
 
     guardrails = analysis.get("guardrails") if isinstance(analysis, dict) else None
     if isinstance(guardrails, list) and guardrails:
@@ -284,6 +319,10 @@ def _render_analysis_result(result: dict, images: dict, image_title: str, symbol
                     st.error(str(vision_data.get("error")))
                     continue
                 st.write(f"Тренд: {vision_data.get('trend')}")
+                ms = str(vision_data.get("market_structure") or "").strip()
+                pd_state = str(vision_data.get("pd_state") or "").strip()
+                if ms or pd_state:
+                    st.write(f"Структура: {ms or 'N/A'} | PD: {pd_state or 'unknown'}")
                 sup = vision_data.get("support_levels") or []
                 res = vision_data.get("resistance_levels") or []
                 if sup:
@@ -298,14 +337,41 @@ def _render_analysis_result(result: dict, images: dict, image_title: str, symbol
                         f"SL={float(pe.get('stop_loss') or 0.0):.5f} | "
                         f"TP1={float(pe.get('take_profit_1') or 0.0):.5f} | "
                         f"TP2={float(pe.get('take_profit_2') or 0.0):.5f} | "
-                        f"Conf={pe.get('confidence')}"
+                        f"Conf={int(_to_conf01(pe.get('confidence') or 0.0) * 100)}%"
                     )
+                    if str(pe.get("entry_model") or "").strip():
+                        st.write("Модель входа: " + str(pe.get("entry_model") or ""))
                 inv = vision_data.get("invalidation")
                 if isinstance(inv, str) and inv.strip():
                     st.write("Отмена: " + inv)
+                _render_text_list("Конфлюэнции", vision_data.get("confluences"))
+                sweeps = vision_data.get("liquidity_sweeps") or []
+                if sweeps:
+                    st.write("Ликвидность: " + "; ".join([
+                        f"{str(x.get('type') or '').replace('_', ' ')} @ {float(x.get('price') or 0.0):.5f}"
+                        for x in sweeps if isinstance(x, dict)
+                    ]))
+                fvgs = vision_data.get("fair_value_gaps") or []
+                if fvgs:
+                    st.write("FVG: " + "; ".join([
+                        f"{str(x.get('type') or '')} {float(x.get('price_low') or 0.0):.5f}-{float(x.get('price_high') or 0.0):.5f}"
+                        for x in fvgs if isinstance(x, dict)
+                    ]))
+                obs = vision_data.get("order_blocks") or []
+                if obs:
+                    st.write("Order Blocks: " + "; ".join([
+                        f"{str(x.get('type') or '')} {float(x.get('price_low') or 0.0):.5f}-{float(x.get('price_high') or 0.0):.5f}"
+                        for x in obs if isinstance(x, dict)
+                    ]))
                 notes = vision_data.get("analysis_notes")
                 if isinstance(notes, str) and notes.strip():
                     st.write(notes)
+                execution_notes = vision_data.get("execution_notes")
+                if isinstance(execution_notes, str) and execution_notes.strip():
+                    st.write("Что ждать: " + execution_notes)
+                risk_notes = vision_data.get("risk_notes")
+                if isinstance(risk_notes, str) and risk_notes.strip():
+                    st.write("Риски: " + risk_notes)
 
     tf_analysis_list = analysis.get("timeframe_analysis", []) if isinstance(analysis, dict) else []
     if isinstance(tf_analysis_list, list) and tf_analysis_list:
@@ -430,7 +496,7 @@ if st.button("⚡ Авто-анализ без скриншотов", key="run_a
             import traceback
             st.code(traceback.format_exc())
 
-with st.expander("🤖 Бот (управление + быстрый анализ картинки)", expanded=False):
+with st.expander("🤖 Вторично: бот и отправка сигнала", expanded=False):
     data_dir = os.getenv("TRADEBOT_DATA_DIR", "data")
     try:
         os.makedirs(data_dir, exist_ok=True)

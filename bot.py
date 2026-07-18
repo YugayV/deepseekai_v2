@@ -383,7 +383,7 @@ class MultiChannelNotifier:
                 return
 
             caption = (msg.caption or "").strip()
-            prompt = caption if caption else "Проанализируй скриншот графика: тренд, ключевые уровни, сценарий входа, TP/SL и риски. Отвечай на русском. Коротко и по пунктам."
+            prompt = caption if caption else "Сделай SMC + S/R анализ: тренд, структуру, уровни, liquidity sweep, FVG/OB, сценарий входа, invalidation, TP/SL и риски. Отвечай на русском."
 
             file_id = None
             mime = None
@@ -401,7 +401,7 @@ class MultiChannelNotifier:
                 await msg.reply_text("Не вижу картинку. Пришли фото/скриншот графика.")
                 return
 
-            await msg.reply_text("⏳ Анализирую картинку...")
+            await msg.reply_text("⏳ Анализирую скриншот как SMC/S&R ассистент...")
 
             f = await context.bot.get_file(file_id)
             import io
@@ -423,11 +423,39 @@ class MultiChannelNotifier:
                 await msg.reply_text("Картинка слишком большая. Пришли скриншот поменьше (до ~8MB).")
                 return
 
+            sym = _guess_symbol_from_text(caption)
+            tf_hint = _guess_timeframe_from_text(caption) or "unknown"
             advisor = AIAdvisor()
-            out = advisor.analyze_image(image_bytes=image_bytes, mime=mime or "image/jpeg", prompt_ru=prompt, model=OPENROUTER_VISION_MODEL)
+            single_struct = advisor.analyze_image_smc_structured(
+                image_bytes=image_bytes,
+                mime=mime or "image/jpeg",
+                prompt_ru=prompt,
+                symbol=sym or "unknown",
+                timeframe_hint=tf_hint,
+                model=OPENROUTER_VISION_MODEL,
+            )
+
+            mtf_result = None
+            if sym:
+                try:
+                    from trading_assistant import TradingAssistant
+                    assistant = TradingAssistant()
+                    assistant.client = None
+                    assistant.ensure_client(AI_API_KEY)
+                    auto_images = assistant.build_images_from_market_data(sym)
+                    required = ["1wk", "4h", "1h", "15m", "5m"]
+                    if all(tf in auto_images for tf in required):
+                        mtf_result = assistant.full_vision_assessment(symbol=sym, images=auto_images, user_prompt_ru=prompt)
+                except Exception as e:
+                    logger.warning(f"Telegram MTF vision skipped: {e}")
+
+            if isinstance(single_struct, dict) and ("error" not in single_struct):
+                out = _build_telegram_smc_reply(single_struct, mtf=mtf_result, symbol=sym or "Инструмент")
+            else:
+                out = advisor.analyze_image(image_bytes=image_bytes, mime=mime or "image/jpeg", prompt_ru=prompt, model=OPENROUTER_VISION_MODEL)
+
             await msg.reply_text(out or "Не удалось получить ответ от модели.")
 
-            sym = _guess_symbol_from_text(caption)
             if not sym:
                 return
 
@@ -1322,6 +1350,164 @@ Rules:
                 return "Ошибка доступа (401/403). Проверь OPENROUTER_API_KEY."
             return f"Ошибка анализа: {e}"
 
+    def _extract_json_object(self, content: str) -> dict:
+        import re
+        match = re.search(r"\{[\s\S]*\}", str(content or ""))
+        if not match:
+            raise ValueError("json_not_found")
+        data = json.loads(match.group())
+        if not isinstance(data, dict):
+            raise ValueError("invalid_json_object")
+        return data
+
+    def analyze_image_smc_structured(
+        self,
+        image_bytes: bytes,
+        mime: str,
+        prompt_ru: str,
+        symbol: str | None = None,
+        timeframe_hint: str | None = None,
+        model: str | None = None,
+    ) -> dict:
+        if not self.client or self._is_disabled():
+            return {"error": "AI unavailable"}
+
+        try:
+            import base64
+            data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+            m = (model or OPENROUTER_VISION_MODEL).strip() if (model or OPENROUTER_VISION_MODEL) else "openai/gpt-4o-mini"
+            sym = str(symbol or "unknown").strip() or "unknown"
+            tf = str(timeframe_hint or "unknown").strip() or "unknown"
+
+            system = (
+                "Ты — визуальный торговый ассистент по Smart Money Concepts и Support/Resistance. "
+                "Используй только то, что реально видно на графике. "
+                "Если информации недостаточно, укажи neutral/none и не выдумывай уровни."
+            )
+            user_text = (
+                f"Символ: {sym}\n"
+                f"Таймфрейм: {tf}\n"
+                f"Контекст пользователя: {prompt_ru}\n\n"
+                "Верни строго JSON:\n"
+                "{\n"
+                '  "trend": "bullish|bearish|neutral",\n'
+                '  "market_structure": "bullish_bos|bearish_bos|choch|range|pullback|expansion|neutral",\n'
+                '  "pd_state": "premium|discount|equilibrium|unknown",\n'
+                '  "support_levels": [0.0],\n'
+                '  "resistance_levels": [0.0],\n'
+                '  "liquidity_sweeps": [{"price": 0.0, "type": "buy_side|sell_side", "note": ""}],\n'
+                '  "fair_value_gaps": [{"price_low": 0.0, "price_high": 0.0, "type": "bullish|bearish", "note": ""}],\n'
+                '  "order_blocks": [{"price_low": 0.0, "price_high": 0.0, "type": "bullish|bearish", "note": ""}],\n'
+                '  "confluences": ["string"],\n'
+                '  "potential_entry": {"direction": "long|short|none", "entry_price": 0.0, "stop_loss": 0.0, "take_profit_1": 0.0, "take_profit_2": 0.0, "confidence": 0.0, "entry_model": "retest|sweep_reversal|breakout_retest|mitigation|none"},\n'
+                '  "execution_notes": "string",\n'
+                '  "risk_notes": "string",\n'
+                '  "invalidation": "string",\n'
+                '  "analysis_notes": "string"\n'
+                "}\n"
+            )
+
+            resp = self.client.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    },
+                ],
+                temperature=0.1,
+                max_tokens=900,
+            )
+            raw = self._extract_json_object(resp.choices[0].message.content or "{}")
+
+            def _safe_float_local(value, default=0.0):
+                try:
+                    out = float(value)
+                    if not np.isfinite(out):
+                        return float(default)
+                    return float(out)
+                except Exception:
+                    return float(default)
+
+            def _clean_price_list(values):
+                out = []
+                if isinstance(values, list):
+                    for item in values:
+                        price = _safe_float_local(item, 0.0)
+                        if price > 0:
+                            out.append(price)
+                return out[:5]
+
+            def _clean_zone_list(values, expect_bounds=False):
+                out = []
+                if not isinstance(values, list):
+                    return out
+                for item in values[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    row = {}
+                    if expect_bounds:
+                        low = _safe_float_local(item.get("price_low"), 0.0)
+                        high = _safe_float_local(item.get("price_high"), 0.0)
+                        if low > 0 and high > 0:
+                            row["price_low"] = min(low, high)
+                            row["price_high"] = max(low, high)
+                    else:
+                        price = _safe_float_local(item.get("price"), 0.0)
+                        if price > 0:
+                            row["price"] = price
+                    kind = str(item.get("type") or "").strip().lower()
+                    if kind:
+                        row["type"] = kind[:30]
+                    note = str(item.get("note") or "").strip()
+                    if note:
+                        row["note"] = note[:100]
+                    if row:
+                        out.append(row)
+                return out
+
+            pe = raw.get("potential_entry") if isinstance(raw.get("potential_entry"), dict) else {}
+            direction = str(pe.get("direction") or "none").strip().lower()
+            if direction not in ("long", "short", "none"):
+                direction = "none"
+            entry_model = str(pe.get("entry_model") or "none").strip().lower()
+
+            return {
+                "trend": str(raw.get("trend") or "neutral").strip().lower(),
+                "market_structure": str(raw.get("market_structure") or "neutral").strip().lower(),
+                "pd_state": str(raw.get("pd_state") or "unknown").strip().lower(),
+                "support_levels": _clean_price_list(raw.get("support_levels")),
+                "resistance_levels": _clean_price_list(raw.get("resistance_levels")),
+                "liquidity_sweeps": _clean_zone_list(raw.get("liquidity_sweeps"), expect_bounds=False),
+                "fair_value_gaps": _clean_zone_list(raw.get("fair_value_gaps"), expect_bounds=True),
+                "order_blocks": _clean_zone_list(raw.get("order_blocks"), expect_bounds=True),
+                "confluences": [str(x).strip()[:100] for x in (raw.get("confluences") or []) if str(x or "").strip()][:5],
+                "potential_entry": {
+                    "direction": direction,
+                    "entry_price": _safe_float_local(pe.get("entry_price"), 0.0),
+                    "stop_loss": _safe_float_local(pe.get("stop_loss"), 0.0),
+                    "take_profit_1": _safe_float_local(pe.get("take_profit_1"), 0.0),
+                    "take_profit_2": _safe_float_local(pe.get("take_profit_2"), 0.0),
+                    "confidence": max(0.0, min(1.0, _safe_float_local(pe.get("confidence"), 0.0))),
+                    "entry_model": entry_model[:40] or "none",
+                },
+                "execution_notes": str(raw.get("execution_notes") or "").strip()[:220],
+                "risk_notes": str(raw.get("risk_notes") or "").strip()[:220],
+                "invalidation": str(raw.get("invalidation") or "").strip()[:220],
+                "analysis_notes": str(raw.get("analysis_notes") or "").strip()[:400],
+                "symbol": sym,
+                "timeframe": tf,
+            }
+        except Exception as e:
+            msg = str(e)
+            if "401" in msg or "403" in msg or "Unauthorized" in msg:
+                return {"error": "Ошибка доступа (401/403). Проверь OPENROUTER_API_KEY."}
+            return {"error": f"Ошибка SMC-анализа: {e}"}
+
     def vision_trade_decision(self, image_bytes: bytes, mime: str, prompt_ru: str, model: str | None = None) -> dict:
         if not self.client or self._is_disabled():
             return {
@@ -2123,6 +2309,131 @@ def _guess_symbol_from_text(text: str) -> str | None:
         if k in t:
             return v if v in ALL_SYMBOLS else v
     return None
+
+def _guess_timeframe_from_text(text: str) -> str | None:
+    t = str(text or "").strip().lower()
+    if not t:
+        return None
+    mapping = [
+        (["1w", "weekly", "нед", "week"], "1W"),
+        (["4h", "h4", "4ч"], "4H"),
+        (["1h", "h1", "1ч"], "1H"),
+        (["15m", "m15", "15м"], "15m"),
+        (["5m", "m5", "5м"], "5m"),
+    ]
+    for keys, value in mapping:
+        for key in keys:
+            if key in t:
+                return value
+    return None
+
+def _fmt_price_for_chat(value: float, symbol: str | None = None) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return "N/A"
+    if not np.isfinite(v) or v <= 0:
+        return "N/A"
+    sym = str(symbol or "").upper()
+    digits = 2 if ("BTC" in sym or "ETH" in sym or "GLD" in sym or "XAU" in sym) else 5
+    return f"{v:.{digits}f}"
+
+def _build_telegram_smc_reply(single: dict, mtf: dict | None = None, symbol: str | None = None) -> str:
+    sym = str(symbol or single.get("symbol") or "Инструмент").strip()
+    tf = str(single.get("timeframe") or "N/A").strip()
+    pe = single.get("potential_entry") if isinstance(single.get("potential_entry"), dict) else {}
+    direction = str(pe.get("direction") or "none").upper()
+    conf = int(max(0.0, min(1.0, float(pe.get("confidence") or 0.0))) * 100) if isinstance(pe, dict) else 0
+    lines = [
+        f"CVision SMC/S&R: {sym}",
+        f"ТФ скриншота: {tf}",
+        f"Тренд: {str(single.get('trend') or 'neutral').upper()}",
+    ]
+    ms = str(single.get("market_structure") or "").strip()
+    pd_state = str(single.get("pd_state") or "").strip()
+    if ms or pd_state:
+        lines.append(f"Структура: {ms or 'neutral'} | PD: {pd_state or 'unknown'}")
+
+    sup = single.get("support_levels") or []
+    res = single.get("resistance_levels") or []
+    if sup:
+        lines.append("Поддержки: " + ", ".join([_fmt_price_for_chat(x, sym) for x in sup[:3]]))
+    if res:
+        lines.append("Сопротивления: " + ", ".join([_fmt_price_for_chat(x, sym) for x in res[:3]]))
+
+    if direction in ("LONG", "SHORT"):
+        lines.append(
+            "Идея: "
+            + f"{direction} | Entry {_fmt_price_for_chat(pe.get('entry_price'), sym)} | "
+            + f"SL {_fmt_price_for_chat(pe.get('stop_loss'), sym)} | "
+            + f"TP1 {_fmt_price_for_chat(pe.get('take_profit_1'), sym)} | "
+            + f"TP2 {_fmt_price_for_chat(pe.get('take_profit_2'), sym)} | "
+            + f"Conf {conf}%"
+        )
+        if str(pe.get("entry_model") or "").strip():
+            lines.append("Модель входа: " + str(pe.get("entry_model") or ""))
+    else:
+        lines.append("Идея: пока без подтвержденного входа, лучше ждать триггер.")
+
+    confluences = [str(x).strip() for x in (single.get("confluences") or []) if str(x or "").strip()]
+    if confluences:
+        lines.append("Конфлюэнции: " + "; ".join(confluences[:3]))
+
+    sweeps = single.get("liquidity_sweeps") or []
+    if sweeps:
+        sweep_parts = []
+        for item in sweeps[:2]:
+            if isinstance(item, dict):
+                sweep_parts.append(
+                    f"{str(item.get('type') or '').replace('_', ' ')} @{_fmt_price_for_chat(item.get('price'), sym)}"
+                )
+        if sweep_parts:
+            lines.append("Ликвидность: " + "; ".join(sweep_parts))
+
+    execution_notes = str(single.get("execution_notes") or "").strip()
+    if execution_notes:
+        lines.append("Что ждать: " + execution_notes)
+
+    invalidation = str(single.get("invalidation") or "").strip()
+    if invalidation:
+        lines.append("Отмена: " + invalidation)
+
+    risk_notes = str(single.get("risk_notes") or "").strip()
+    if risk_notes:
+        lines.append("Риски: " + risk_notes)
+
+    if isinstance(mtf, dict) and ("error" not in mtf):
+        final_reco = mtf.get("final_recommendation") if isinstance(mtf.get("final_recommendation"), dict) else {}
+        entry = final_reco.get("entry_recommendation") if isinstance(final_reco.get("entry_recommendation"), dict) else {}
+        if final_reco:
+            lines.append("")
+            lines.append("MTF контекст:")
+            lines.append(
+                f"Bias {str(final_reco.get('overall_trend') or 'neutral').upper()} | "
+                f"Setup {int(float(final_reco.get('setup_score') or 0))} | "
+                f"Align {int(float(final_reco.get('alignment_score') or 0))}%"
+            )
+            if str(entry.get("direction") or "").lower() in ("long", "short"):
+                lines.append(
+                    "MTF план: "
+                    + f"{str(entry.get('direction') or '').upper()} | "
+                    + f"Entry {_fmt_price_for_chat(entry.get('entry_price'), sym)} | "
+                    + f"SL {_fmt_price_for_chat(entry.get('stop_loss'), sym)} | "
+                    + f"TP1 {_fmt_price_for_chat(entry.get('take_profit_1'), sym)}"
+                )
+            top_down = str(final_reco.get("top_down_narrative") or "").strip()
+            if top_down:
+                lines.append("Контекст: " + top_down[:280])
+            what_to_wait = str(final_reco.get("what_to_wait_for") or "").strip()
+            if what_to_wait:
+                lines.append("Триггер: " + what_to_wait[:220])
+    else:
+        if not sym or sym == "Инструмент":
+            lines.append("")
+            lines.append("Подсказка: добавь в подпись символ, например EURUSD 1H или BTC 15m, чтобы я собрал MTF-контекст.")
+
+    text = "\n".join([line for line in lines if str(line).strip()])
+    return text[:3900]
 
 
 def _to_utc_index(df: pd.DataFrame) -> pd.DataFrame:

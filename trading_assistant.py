@@ -129,6 +129,128 @@ class TradingAssistant:
             conf = conf / 100.0
         return float(max(0.0, min(1.0, conf)))
 
+    def _clean_text(self, value: Any, limit: int = 400) -> str:
+        text = str(value or "").strip()
+        return text[:limit]
+
+    def _clean_price_list(self, values: Any, limit: int = 5) -> list[float]:
+        out: list[float] = []
+        if not isinstance(values, list):
+            return out
+        for item in values:
+            price = self._safe_float(item, 0.0)
+            if price > 0:
+                out.append(float(price))
+        return out[:limit]
+
+    def _clean_named_zones(self, values: Any, *, expect_bounds: bool) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if not isinstance(values, list):
+            return out
+        for item in values[:5]:
+            if not isinstance(item, dict):
+                continue
+            row: dict[str, Any] = {}
+            if expect_bounds:
+                low = self._safe_float(item.get("price_low"), 0.0)
+                high = self._safe_float(item.get("price_high"), 0.0)
+                if low > 0 and high > 0:
+                    row["price_low"] = float(min(low, high))
+                    row["price_high"] = float(max(low, high))
+            else:
+                price = self._safe_float(item.get("price"), 0.0)
+                if price > 0:
+                    row["price"] = float(price)
+            kind = str(item.get("type") or "").strip().lower()
+            if kind:
+                row["type"] = kind[:30]
+            note = self._clean_text(item.get("note"), 140)
+            if note:
+                row["note"] = note
+            if row:
+                out.append(row)
+        return out
+
+    def _clean_entry(self, entry: Any) -> dict[str, Any]:
+        if not isinstance(entry, dict):
+            entry = {}
+        direction = str(entry.get("direction") or "none").strip().lower()
+        if direction not in ("long", "short", "none", "wait"):
+            direction = "none"
+        out = {
+            "direction": direction,
+            "entry_price": self._safe_float(entry.get("entry_price"), 0.0),
+            "stop_loss": self._safe_float(entry.get("stop_loss"), 0.0),
+            "take_profit_1": self._safe_float(entry.get("take_profit_1"), 0.0),
+            "take_profit_2": self._safe_float(entry.get("take_profit_2"), 0.0),
+            "take_profit_3": self._safe_float(entry.get("take_profit_3"), 0.0),
+            "confidence": round(self._normalize_confidence(entry.get("confidence") or 0.0), 3),
+            "entry_model": self._clean_text(entry.get("entry_model"), 120),
+            "execution_timeframe": self._clean_text(entry.get("execution_timeframe"), 60),
+        }
+        return out
+
+    def _sanitize_tf_analysis(self, raw: Any, tf_name: str) -> Dict[str, Any]:
+        data = raw if isinstance(raw, dict) else {}
+        trend = str(data.get("trend") or "neutral").strip().lower()
+        if trend not in ("bullish", "bearish", "neutral"):
+            trend = "neutral"
+        return {
+            "timeframe": self._clean_text(data.get("timeframe") or tf_name, 50),
+            "trend": trend,
+            "market_structure": self._clean_text(data.get("market_structure"), 60),
+            "pd_state": self._clean_text(data.get("pd_state"), 60),
+            "support_levels": self._clean_price_list(data.get("support_levels"), 5),
+            "resistance_levels": self._clean_price_list(data.get("resistance_levels"), 5),
+            "liquidity_sweeps": self._clean_named_zones(data.get("liquidity_sweeps"), expect_bounds=False),
+            "fair_value_gaps": self._clean_named_zones(data.get("fair_value_gaps"), expect_bounds=True),
+            "order_blocks": self._clean_named_zones(data.get("order_blocks"), expect_bounds=True),
+            "confluences": [self._clean_text(x, 120) for x in (data.get("confluences") or []) if str(x or "").strip()][:6],
+            "potential_entry": self._clean_entry(data.get("potential_entry")),
+            "invalidation": self._clean_text(data.get("invalidation"), 220),
+            "analysis_notes": self._clean_text(data.get("analysis_notes"), 500),
+            "execution_notes": self._clean_text(data.get("execution_notes"), 220),
+            "risk_notes": self._clean_text(data.get("risk_notes"), 220),
+        }
+
+    def _sanitize_final_analysis(self, raw: Any) -> Dict[str, Any]:
+        data = raw if isinstance(raw, dict) else {}
+        trend = str(data.get("overall_trend") or "neutral").strip().lower()
+        if trend not in ("bullish", "bearish", "neutral"):
+            trend = "neutral"
+
+        tf_rows: list[dict[str, Any]] = []
+        for row in (data.get("timeframe_analysis") or [])[:5]:
+            if not isinstance(row, dict):
+                continue
+            levels = row.get("key_levels") if isinstance(row.get("key_levels"), dict) else {}
+            tf_rows.append({
+                "timeframe": self._clean_text(row.get("timeframe"), 40),
+                "trend": self._clean_text(row.get("trend"), 20).lower() or "neutral",
+                "key_levels": {
+                    "support": self._safe_float(levels.get("support"), 0.0),
+                    "resistance": self._safe_float(levels.get("resistance"), 0.0),
+                },
+                "notes": self._clean_text(row.get("notes"), 240),
+            })
+
+        out = {
+            "overall_trend": trend,
+            "timeframe_analysis": tf_rows,
+            "entry_recommendation": self._clean_entry(data.get("entry_recommendation")),
+            "smart_money_analysis": self._clean_text(data.get("smart_money_analysis"), 900),
+            "top_down_narrative": self._clean_text(data.get("top_down_narrative"), 700),
+            "execution_plan": self._clean_text(data.get("execution_plan"), 700),
+            "what_to_wait_for": self._clean_text(data.get("what_to_wait_for"), 300),
+            "alternative_scenario": self._clean_text(data.get("alternative_scenario"), 320),
+            "invalidation": self._clean_text(data.get("invalidation"), 240),
+            "risk_reward_ratio": self._clean_text(data.get("risk_reward_ratio"), 40),
+            "confidence": round(self._normalize_confidence(data.get("confidence") or 0.0), 3),
+            "entry_checklist": [self._clean_text(x, 140) for x in (data.get("entry_checklist") or []) if str(x or "").strip()][:7],
+            "confluence_factors": [self._clean_text(x, 140) for x in (data.get("confluence_factors") or []) if str(x or "").strip()][:7],
+        }
+        return out
+
     def _swing_levels(self, df: pd.DataFrame, lookback: int = 80) -> Dict[str, list[float]]:
         if df is None or df.empty:
             return {"highs": [], "lows": []}
@@ -387,27 +509,47 @@ class TradingAssistant:
             extra = "\n\nДоп. контекст от пользователя:\n" + extra
 
         prompt = f"""
-Ты профессиональный трейдер по Smart Money Concepts (SMC) и Support/Resistance.
+Ты профессиональный визуальный ассистент по Smart Money Concepts (SMC) и Support/Resistance.
 Таймфрейм: {tf_name}
 Символ: {symbol}
 
-Сделай анализ строго по скриншоту графика. Обязательно:
-1) Тренд (bullish/bearish/neutral) на этом ТФ
-2) Ключевые уровни поддержки и сопротивления (конкретные цены)
-3) Ликвидность (sweeps), имбалансы/FVG, order blocks (если видны)
-4) Сценарий входа: long/short/none + entry/SL/TP + уверенность
-5) Коротко укажи, что должно произойти, чтобы сценарий отменился
+Проанализируй ТОЛЬКО то, что реально видно на скриншоте. Не выдумывай цены, зоны и паттерны.
+Твоя задача:
+1) Определи тренд и market structure (BOS/CHoCH/range/expansion/pullback если видно)
+2) Найди ключевые support/resistance уровни
+3) Отметь buy-side/sell-side liquidity sweeps, FVG и order blocks, если они действительно различимы
+4) Определи PD state: premium / discount / equilibrium, если это читается по структуре
+5) Дай рабочий сценарий: direction + entry + SL + TP1/TP2/TP3 + confidence
+6) Коротко опиши execution notes: что именно ждать на этом ТФ для входа
+7) Коротко опиши risk notes и invalidation
+
+Если чего-то не видно, верни пустой список, 0.0 или neutral/none.
 
 Ответ строго JSON:
 {{
   "timeframe": "{tf_name}",
   "trend": "bullish|bearish|neutral",
+  "market_structure": "bullish_bos|bearish_bos|choch|range|pullback|expansion|neutral",
+  "pd_state": "premium|discount|equilibrium|unknown",
   "support_levels": [0.0],
   "resistance_levels": [0.0],
   "liquidity_sweeps": [{{"price": 0.0, "type": "buy_side|sell_side", "note": ""}}],
   "fair_value_gaps": [{{"price_low": 0.0, "price_high": 0.0, "type": "bullish|bearish", "note": ""}}],
   "order_blocks": [{{"price_low": 0.0, "price_high": 0.0, "type": "bullish|bearish", "note": ""}}],
-  "potential_entry": {{"direction": "long|short|none", "entry_price": 0.0, "stop_loss": 0.0, "take_profit_1": 0.0, "take_profit_2": 0.0, "confidence": 0}},
+  "confluences": ["string"],
+  "potential_entry": {{
+    "direction": "long|short|none",
+    "entry_price": 0.0,
+    "stop_loss": 0.0,
+    "take_profit_1": 0.0,
+    "take_profit_2": 0.0,
+    "take_profit_3": 0.0,
+    "confidence": 0.0,
+    "entry_model": "retest|sweep_reversal|breakout_retest|mitigation|none",
+    "execution_timeframe": "{tf_name}"
+  }},
+  "execution_notes": "string",
+  "risk_notes": "string",
   "invalidation": "string",
   "analysis_notes": "string"
 }}
@@ -429,7 +571,8 @@ class TradingAssistant:
                 response_format={"type": "json_object"},
                 max_tokens=1700,
             )
-            return json.loads(resp.choices[0].message.content or "{}")
+            raw = json.loads(resp.choices[0].message.content or "{}")
+            return self._sanitize_tf_analysis(raw, tf_name)
         except Exception as e:
             return {"error": str(e)}
 
@@ -587,25 +730,47 @@ class TradingAssistant:
                 })
         
         prompt = f"""
-Ты профессиональный трейдер, специализирующийся на Smart Money Concepts (SMC) и анализе на нескольких таймфреймах.
+Ты ведущий SMC/S&R аналитик. Нужно собрать единый top-down план по нескольким таймфреймам.
 
-Данные компьютерного зрения по {symbol} на всех таймфреймах:
+Данные компьютерного зрения по {symbol}:
 {json.dumps(tf_summaries, ensure_ascii=False, indent=2)}
 
-Сделай итог:
-1) Общий тренд по иерархии ТФ: Weekly -> 4H -> 1H -> 15m -> 5m
-2) Ключевые уровни (вход/SL/TP1/TP2/TP3) согласованные по ТФ
-3) План: контекст (старшие ТФ) + триггер входа (младшие ТФ)
-4) Риски и условия отмены
+Собери финальный ответ как человек, который торгует top-down:
+1) Weekly/4H задают контекст и bias
+2) 1H уточняет рабочий сценарий
+3) 15m/5m дают execution trigger
+4) Вход должен быть только если есть логичная MTF-конфлюэнция
+5) Если ясного сценария нет, направление должно быть wait
+
+Не противоречь входным данным. Не выдумывай неизвестные зоны.
 
 Ответ строго JSON:
 {{
   "overall_trend": "bullish|bearish|neutral",
-  "timeframe_analysis": [{{"timeframe": "Weekly", "trend": "bullish|bearish|neutral", "key_levels": {{"support": 0.0, "resistance": 0.0}}, "notes": ""}}],
-  "entry_recommendation": {{"direction": "long|short|wait", "entry_price": 0.0, "stop_loss": 0.0, "take_profit_1": 0.0, "take_profit_2": 0.0, "take_profit_3": 0.0}},
+  "timeframe_analysis": [
+    {{"timeframe": "Weekly", "trend": "bullish|bearish|neutral", "key_levels": {{"support": 0.0, "resistance": 0.0}}, "notes": ""}}
+  ],
+  "entry_recommendation": {{
+    "direction": "long|short|wait",
+    "entry_price": 0.0,
+    "stop_loss": 0.0,
+    "take_profit_1": 0.0,
+    "take_profit_2": 0.0,
+    "take_profit_3": 0.0,
+    "confidence": 0.0,
+    "entry_model": "retest|sweep_reversal|breakout_retest|mitigation|wait",
+    "execution_timeframe": "5m|15m|1h|wait"
+  }},
+  "top_down_narrative": "string",
   "smart_money_analysis": "string",
-  "risk_reward_ratio": "string",
-  "confidence": 0
+  "execution_plan": "string",
+  "what_to_wait_for": "string",
+  "alternative_scenario": "string",
+  "invalidation": "string",
+  "entry_checklist": ["string"],
+  "confluence_factors": ["string"],
+  "risk_reward_ratio": "1:2.0",
+  "confidence": 0.0
 }}
 """.strip()
         
@@ -619,7 +784,7 @@ class TradingAssistant:
                 response_format={"type": "json_object"},
                 max_tokens=2000
             )
-            analysis = json.loads(response.choices[0].message.content)
+            analysis = self._sanitize_final_analysis(json.loads(response.choices[0].message.content))
             if not isinstance(analysis, dict):
                 return {"error": "bad_analysis_payload"}
             quality = self._score_setup(vision_analyses, analysis)
