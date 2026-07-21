@@ -346,6 +346,8 @@ class MultiChannelNotifier:
         self.admin_chat_id = admin_chat_id
         self.application = None
         self.bot = None
+        self._media_groups = {}
+        self._media_group_tasks = {}
 
     async def initialize(self):
         if self.bot_token:
@@ -376,6 +378,195 @@ class MultiChannelNotifier:
             except Exception as e:
                 logger.error(f"Telegram init error: {e}")
 
+    async def _download_message_image(self, msg, context: ContextTypes.DEFAULT_TYPE) -> tuple[bytes | None, str | None, str | None]:
+        file_id = None
+        mime = None
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            mime = "image/jpeg"
+        elif msg.document:
+            mt = (msg.document.mime_type or "").strip()
+            if not mt.startswith("image/"):
+                return None, None, "not_image"
+            file_id = msg.document.file_id
+            mime = mt
+
+        if not file_id:
+            return None, None, "no_image"
+
+        f = await context.bot.get_file(file_id)
+        import io
+        buf = io.BytesIO()
+        try:
+            await f.download_to_memory(out=buf)
+        except Exception:
+            try:
+                await f.download_to_memory(buf)
+            except Exception:
+                data = await f.download_as_bytearray()
+                buf.write(bytes(data))
+
+        image_bytes = buf.getvalue()
+        if not image_bytes:
+            return None, None, "download_failed"
+        if len(image_bytes) > 8 * 1024 * 1024:
+            return None, None, "too_large"
+        return image_bytes, (mime or "image/jpeg"), None
+
+    def _normalize_tf_key(self, value: str | None) -> str | None:
+        t = str(value or "").strip().lower()
+        mapping = {
+            "1w": "1wk",
+            "1wk": "1wk",
+            "weekly": "1wk",
+            "4h": "4h",
+            "1h": "1h",
+            "15m": "15m",
+            "5m": "5m",
+        }
+        return mapping.get(t)
+
+    def _build_telegram_mtf_reply(self, result: dict, symbol: str) -> str:
+        sym = str(symbol or "Инструмент").strip()
+        if not isinstance(result, dict) or ("error" in result):
+            return f"MTF CVision: {sym}\nНе удалось собрать multi-timeframe анализ."
+
+        final_reco = result.get("final_recommendation") if isinstance(result.get("final_recommendation"), dict) else {}
+        vision_analyses = result.get("vision_analyses") if isinstance(result.get("vision_analyses"), dict) else {}
+        entry = final_reco.get("entry_recommendation") if isinstance(final_reco.get("entry_recommendation"), dict) else {}
+
+        try:
+            conf_raw = float(final_reco.get("confidence") or 0.0)
+            conf_pct = int(conf_raw * 100.0) if conf_raw <= 1.0 else int(conf_raw)
+        except Exception:
+            conf_pct = 0
+
+        lines = [
+            f"MTF CVision: {sym}",
+            f"Bias: {str(final_reco.get('overall_trend') or 'neutral').upper()} | Setup {int(float(final_reco.get('setup_score') or 0))} | Align {int(float(final_reco.get('alignment_score') or 0))}% | Conf {conf_pct}%",
+        ]
+
+        top_down = str(final_reco.get("top_down_narrative") or "").strip()
+        if top_down:
+            lines.append("Контекст: " + top_down[:320])
+
+        direction = str(entry.get("direction") or "wait").lower()
+        if direction in ("long", "short"):
+            lines.append(
+                "План: "
+                + f"{direction.upper()} | Entry {_fmt_price_for_chat(entry.get('entry_price'), sym)} | "
+                + f"SL {_fmt_price_for_chat(entry.get('stop_loss'), sym)} | "
+                + f"TP1 {_fmt_price_for_chat(entry.get('take_profit_1'), sym)} | "
+                + f"TP2 {_fmt_price_for_chat(entry.get('take_profit_2'), sym)} | "
+                + f"TP3 {_fmt_price_for_chat(entry.get('take_profit_3'), sym)}"
+            )
+            if str(entry.get("execution_timeframe") or "").strip():
+                lines.append("Execution TF: " + str(entry.get("execution_timeframe") or "").upper())
+            if str(entry.get("entry_model") or "").strip():
+                lines.append("Модель входа: " + str(entry.get("entry_model") or ""))
+        else:
+            lines.append("План: WAIT, пока нет качественного подтверждения для входа.")
+
+        what_to_wait = str(final_reco.get("what_to_wait_for") or "").strip()
+        if what_to_wait:
+            lines.append("Триггер: " + what_to_wait[:240])
+
+        invalidation = str(final_reco.get("invalidation") or "").strip()
+        if invalidation:
+            lines.append("Отмена: " + invalidation[:220])
+
+        checklist = [str(x).strip() for x in (final_reco.get("entry_checklist") or []) if str(x or "").strip()]
+        if checklist:
+            lines.append("Чеклист: " + "; ".join(checklist[:3]))
+
+        lines.append("")
+        lines.append("Таймфреймы:")
+        for tf in ["1wk", "4h", "1h", "15m", "5m"]:
+            item = vision_analyses.get(tf)
+            if not isinstance(item, dict) or ("error" in item):
+                continue
+            pe = item.get("potential_entry") if isinstance(item.get("potential_entry"), dict) else {}
+            lines.append(
+                f"- {tf}: {str(item.get('trend') or 'neutral').upper()} | "
+                + f"{str(item.get('market_structure') or 'neutral')} | "
+                + f"{str(pe.get('direction') or 'none').upper()}"
+            )
+
+        return "\n".join(lines)[:3900]
+
+    async def _process_chart_media_group(self, media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await asyncio.sleep(1.5)
+            bucket = self._media_groups.pop(media_group_id, None)
+            self._media_group_tasks.pop(media_group_id, None)
+            if not isinstance(bucket, dict):
+                return
+
+            items = list(bucket.get("items") or [])
+            chat_id = bucket.get("chat_id")
+            if not items or not chat_id:
+                return
+
+            joined_caption = " ".join([str(x.get("caption") or "") for x in items]).strip()
+            symbol = _guess_symbol_from_text(joined_caption) or str(bucket.get("symbol") or "").strip() or "unknown"
+            prompt = joined_caption or "Сделай полный multi-timeframe SMC + S/R анализ: bias, structure, liquidity, FVG, OB, entry, SL/TP, invalidation и trigger."
+
+            default_order = ["1wk", "4h", "1h", "15m", "5m"]
+            assigned = {}
+            unknown_items = []
+            for item in items:
+                tf_guess = self._normalize_tf_key(_guess_timeframe_from_text(item.get("caption") or ""))
+                if tf_guess and tf_guess not in assigned:
+                    assigned[tf_guess] = item
+                else:
+                    unknown_items.append(item)
+
+            for tf in default_order:
+                if tf in assigned or not unknown_items:
+                    continue
+                assigned[tf] = unknown_items.pop(0)
+
+            missing = [tf for tf in default_order if tf not in assigned]
+            if missing:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Для полного MTF-анализа нужны 5 скриншотов: 1W, 4H, 1H, 15m, 5m. "
+                    + "Сейчас не хватает: "
+                    + ", ".join(missing)
+                    + ". Можно отправить их альбомом в этом порядке или подписать таймфреймы в caption.",
+                )
+                return
+
+            from trading_assistant import TradingAssistant
+            assistant = TradingAssistant()
+            assistant.client = None
+            assistant.ensure_client(AI_API_KEY)
+
+            images = {}
+            for tf in default_order:
+                item = assigned.get(tf) or {}
+                images[tf] = {
+                    "bytes": item.get("image_bytes") or b"",
+                    "mime": item.get("mime") or "image/jpeg",
+                }
+
+            result = assistant.full_vision_assessment(symbol=symbol, images=images, user_prompt_ru=prompt)
+            if "error" in result:
+                await context.bot.send_message(chat_id=chat_id, text=f"Ошибка MTF-анализа: {result['error']}")
+                return
+
+            out = self._build_telegram_mtf_reply(result, symbol)
+            await context.bot.send_message(chat_id=chat_id, text=out or "Не удалось сформировать MTF-ответ.")
+        except Exception as e:
+            logger.error(f"Telegram media group error: {e}")
+            try:
+                bucket = self._media_groups.pop(media_group_id, None)
+                self._media_group_tasks.pop(media_group_id, None)
+                if isinstance(bucket, dict) and bucket.get("chat_id"):
+                    await context.bot.send_message(chat_id=bucket["chat_id"], text=f"Ошибка MTF-анализа альбома: {e}")
+            except Exception:
+                pass
+
     async def _handle_chart_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             msg = update.message
@@ -385,43 +576,49 @@ class MultiChannelNotifier:
             caption = (msg.caption or "").strip()
             prompt = caption if caption else "Сделай SMC + S/R анализ: тренд, структуру, уровни, liquidity sweep, FVG/OB, сценарий входа, invalidation, TP/SL и риски. Отвечай на русском."
 
-            file_id = None
-            mime = None
-            if msg.photo:
-                file_id = msg.photo[-1].file_id
-                mime = "image/jpeg"
-            elif msg.document:
-                mt = (msg.document.mime_type or "").strip()
-                if not mt.startswith("image/"):
-                    return
-                file_id = msg.document.file_id
-                mime = mt
-
-            if not file_id:
+            image_bytes, mime, err = await self._download_message_image(msg, context)
+            if err == "not_image":
+                return
+            if err == "no_image":
                 await msg.reply_text("Не вижу картинку. Пришли фото/скриншот графика.")
+                return
+            if err == "download_failed":
+                await msg.reply_text("Не удалось скачать изображение из Telegram.")
+                return
+            if err == "too_large":
+                await msg.reply_text("Картинка слишком большая. Пришли скриншот поменьше (до ~8MB).")
+                return
+            if not image_bytes:
+                await msg.reply_text("Не удалось прочитать изображение.")
+                return
+
+            media_group_id = getattr(msg, "media_group_id", None)
+            if media_group_id:
+                bucket = self._media_groups.setdefault(
+                    str(media_group_id),
+                    {
+                        "chat_id": update.effective_chat.id if update.effective_chat else None,
+                        "symbol": _guess_symbol_from_text(caption),
+                        "items": [],
+                    },
+                )
+                bucket["items"].append(
+                    {
+                        "caption": caption,
+                        "mime": mime or "image/jpeg",
+                        "image_bytes": image_bytes,
+                    }
+                )
+                if str(media_group_id) not in self._media_group_tasks:
+                    self._media_group_tasks[str(media_group_id)] = asyncio.create_task(
+                        self._process_chart_media_group(str(media_group_id), context)
+                    )
+                    await msg.reply_text(
+                        "📥 Получаю серию скриншотов. Для полного MTF-анализа лучше отправить 5 кадров: 1W, 4H, 1H, 15m, 5m."
+                    )
                 return
 
             await msg.reply_text("⏳ Анализирую скриншот как SMC/S&R ассистент...")
-
-            f = await context.bot.get_file(file_id)
-            import io
-            buf = io.BytesIO()
-            try:
-                await f.download_to_memory(out=buf)
-            except Exception:
-                try:
-                    await f.download_to_memory(buf)
-                except Exception:
-                    data = await f.download_as_bytearray()
-                    buf.write(bytes(data))
-
-            image_bytes = buf.getvalue()
-            if not image_bytes:
-                await msg.reply_text("Не удалось скачать изображение из Telegram.")
-                return
-            if len(image_bytes) > 8 * 1024 * 1024:
-                await msg.reply_text("Картинка слишком большая. Пришли скриншот поменьше (до ~8MB).")
-                return
 
             sym = _guess_symbol_from_text(caption)
             tf_hint = _guess_timeframe_from_text(caption) or "unknown"
