@@ -365,6 +365,9 @@ class MultiChannelNotifier:
                 # Handlers
                 self.application.add_handler(CommandHandler("start", self._cmd_start))
                 self.application.add_handler(CommandHandler("menu", self._cmd_start))
+                self.application.add_handler(CommandHandler("smc_start", self._cmd_smc_start))
+                self.application.add_handler(CommandHandler("smc_done", self._cmd_smc_done))
+                self.application.add_handler(CommandHandler("smc_reset", self._cmd_smc_reset))
                 self.application.add_handler(CallbackQueryHandler(self._handle_callbacks))
                 self.application.add_handler(MessageHandler(filters.PHOTO, self._handle_chart_image))
                 self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_chart_image))
@@ -494,6 +497,106 @@ class MultiChannelNotifier:
 
         return "\n".join(lines)[:3900]
 
+    def _get_smc_session(self, context: ContextTypes.DEFAULT_TYPE) -> dict:
+        session = context.user_data.get("smc_session")
+        if not isinstance(session, dict):
+            session = {
+                "active": False,
+                "symbol": None,
+                "prompt": "",
+                "images": {},
+                "order": [],
+            }
+            context.user_data["smc_session"] = session
+        return session
+
+    def _session_progress_text(self, session: dict) -> str:
+        labels = {"1wk": "1W", "4h": "4H", "1h": "1H", "15m": "15m", "5m": "5m"}
+        images = session.get("images") if isinstance(session.get("images"), dict) else {}
+        parts = []
+        for tf in ["1wk", "4h", "1h", "15m", "5m"]:
+            parts.append(f"{labels[tf]} {'✅' if tf in images else '⬜'}")
+        return " | ".join(parts)
+
+    def _session_missing_tfs(self, session: dict) -> list[str]:
+        images = session.get("images") if isinstance(session.get("images"), dict) else {}
+        return [tf for tf in ["1wk", "4h", "1h", "15m", "5m"] if tf not in images]
+
+    def _session_next_hint(self, session: dict) -> str:
+        labels = {"1wk": "1W", "4h": "4H", "1h": "1H", "15m": "15m", "5m": "5m"}
+        missing = self._session_missing_tfs(session)
+        if not missing:
+            return "Все 5 таймфреймов собраны."
+        return "Следующий желательный кадр: " + labels.get(missing[0], missing[0])
+
+    async def _run_smc_session_analysis(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+        session = self._get_smc_session(context)
+        images = session.get("images") if isinstance(session.get("images"), dict) else {}
+        symbol = str(session.get("symbol") or "unknown").strip() or "unknown"
+        prompt = str(session.get("prompt") or "").strip()
+        missing = self._session_missing_tfs(session)
+        if missing:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Сессия ещё не полная. Не хватает: "
+                + ", ".join(missing)
+                + "\n"
+                + self._session_progress_text(session)
+                + "\n"
+                + self._session_next_hint(session),
+            )
+            return
+
+        from trading_assistant import TradingAssistant
+        assistant = TradingAssistant()
+        assistant.client = None
+        assistant.ensure_client(AI_API_KEY)
+        result = assistant.full_vision_assessment(symbol=symbol, images=images, user_prompt_ru=prompt)
+        if "error" in result:
+            await context.bot.send_message(chat_id=chat_id, text=f"Ошибка SMC-сессии: {result['error']}")
+            return
+
+        out = self._build_telegram_mtf_reply(result, symbol)
+        await context.bot.send_message(chat_id=chat_id, text=out or "Не удалось сформировать ответ по SMC-сессии.")
+        session["active"] = False
+
+    async def _cmd_smc_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        session = self._get_smc_session(context)
+        context_text = " ".join(context.args).strip() if getattr(context, "args", None) else ""
+        symbol = _guess_symbol_from_text(context_text)
+        session["active"] = True
+        session["symbol"] = symbol or session.get("symbol")
+        session["prompt"] = context_text or ""
+        session["images"] = {}
+        session["order"] = []
+        await update.message.reply_text(
+            "🧠 SMC-сессия запущена.\n"
+            "Присылай 5 скриншотов по одному: 1W, 4H, 1H, 15m, 5m.\n"
+            "Можно подписывать кадры, например: EURUSD 4H.\n"
+            "Когда закончишь, отправь /smc_done\n"
+            + self._session_progress_text(session)
+            + "\n"
+            + self._session_next_hint(session)
+        )
+
+    async def _cmd_smc_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        session = self._get_smc_session(context)
+        if not bool(session.get("active")):
+            await update.message.reply_text("Сессия не запущена. Используй /smc_start")
+            return
+        await update.message.reply_text("⏳ Собираю итоговый multi-timeframe разбор по сессии...")
+        await self._run_smc_session_analysis(context, update.effective_chat.id)
+
+    async def _cmd_smc_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data["smc_session"] = {
+            "active": False,
+            "symbol": None,
+            "prompt": "",
+            "images": {},
+            "order": [],
+        }
+        await update.message.reply_text("♻️ SMC-сессия сброшена.")
+
     async def _process_chart_media_group(self, media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
         try:
             await asyncio.sleep(1.5)
@@ -617,6 +720,43 @@ class MultiChannelNotifier:
                         "📥 Получаю серию скриншотов. Для полного MTF-анализа лучше отправить 5 кадров: 1W, 4H, 1H, 15m, 5m."
                     )
                 return
+
+            session = self._get_smc_session(context)
+            if bool(session.get("active")):
+                tf_key = self._normalize_tf_key(_guess_timeframe_from_text(caption))
+                if not tf_key:
+                    order = list(session.get("order") or [])
+                    for candidate in ["1wk", "4h", "1h", "15m", "5m"]:
+                        if candidate not in order:
+                            tf_key = candidate
+                            break
+                if tf_key:
+                    session["images"][tf_key] = {
+                        "bytes": image_bytes,
+                        "mime": mime or "image/jpeg",
+                    }
+                    order = list(session.get("order") or [])
+                    if tf_key not in order:
+                        order.append(tf_key)
+                    session["order"] = order
+                    guessed_symbol = _guess_symbol_from_text(caption)
+                    if guessed_symbol:
+                        session["symbol"] = guessed_symbol
+                    if caption:
+                        session["prompt"] = caption
+                    remaining = self._session_missing_tfs(session)
+                    progress_text = (
+                        f"🗂️ Добавил кадр в SMC-сессию: {tf_key}\n"
+                        + self._session_progress_text(session)
+                        + "\n"
+                        + self._session_next_hint(session)
+                    )
+                    if remaining:
+                        await msg.reply_text(progress_text)
+                    else:
+                        await msg.reply_text(progress_text + "\n🚀 Все 5 кадров собраны. Запускаю итоговый MTF-анализ...")
+                        await self._run_smc_session_analysis(context, update.effective_chat.id)
+                    return
 
             await msg.reply_text("⏳ Анализирую скриншот как SMC/S&R ассистент...")
 
@@ -746,6 +886,7 @@ class MultiChannelNotifier:
             [InlineKeyboardButton("📊 Portfolio Status", callback_data='status')],
             [InlineKeyboardButton("💰 Current Prices", callback_data='prices')],
             [InlineKeyboardButton("🔮 AI Forecast", callback_data='select_forecast')],
+            [InlineKeyboardButton("🧠 SMC Session", callback_data='smc_menu')],
             [InlineKeyboardButton("🚀 Auto-Trade Controls", callback_data='trade_menu')],
             [InlineKeyboardButton("⚙️ Risk Settings", callback_data='risk_menu')]
         ]
@@ -815,6 +956,61 @@ class MultiChannelNotifier:
             ]
             await query.edit_message_text("⚙️ *Auto-Trade Controls*", 
                                           reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+        elif data == 'smc_menu':
+            keyboard = [
+                [InlineKeyboardButton("▶️ Start SMC Session", callback_data='smc_start')],
+                [InlineKeyboardButton("✅ Finish & Analyze", callback_data='smc_done')],
+                [InlineKeyboardButton("♻️ Reset Session", callback_data='smc_reset')],
+                [InlineKeyboardButton("⬅️ Back", callback_data='main_menu')],
+            ]
+            await query.edit_message_text(
+                "🧠 *SMC Session*\n\n"
+                "Собирает 5 скриншотов по одному: 1W, 4H, 1H, 15m, 5m.\n"
+                "Можно присылать изображения с подписями `EURUSD 4H`, `BTC 15m`.\n"
+                "После загрузки нажми Finish & Analyze.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+
+        elif data == 'smc_start':
+            session = self._get_smc_session(context)
+            session["active"] = True
+            session["images"] = {}
+            session["order"] = []
+            await query.edit_message_text(
+                "🧠 *SMC-сессия запущена*\n\n"
+                "Присылай 5 скриншотов по одному: 1W, 4H, 1H, 15m, 5m.\n"
+                "Когда закончишь, нажми `Finish & Analyze`.\n\n"
+                + self._session_progress_text(session)
+                + "\n"
+                + self._session_next_hint(session),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='smc_menu')]]),
+                parse_mode='Markdown'
+            )
+
+        elif data == 'smc_done':
+            session = self._get_smc_session(context)
+            await query.edit_message_text(
+                "⏳ Собираю итоговый multi-timeframe разбор...",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='smc_menu')]]),
+                parse_mode='Markdown'
+            )
+            await self._run_smc_session_analysis(context, query.message.chat_id)
+
+        elif data == 'smc_reset':
+            context.user_data["smc_session"] = {
+                "active": False,
+                "symbol": None,
+                "prompt": "",
+                "images": {},
+                "order": [],
+            }
+            await query.edit_message_text(
+                "♻️ *SMC-сессия сброшена*",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data='smc_menu')]]),
+                parse_mode='Markdown'
+            )
 
         elif data == 'start_all':
             with open(cmd_path, "w") as f:
